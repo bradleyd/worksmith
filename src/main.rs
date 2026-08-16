@@ -19,6 +19,7 @@ use worksmith::llm::openai::OpenAiCompatClient;
 use worksmith::memory::{MemoryStore, Scope};
 use worksmith::session::Session;
 use worksmith::tools::{ToolContext, ToolRegistry};
+use worksmith::validation::CommandValidator;
 
 const BASE_SYSTEM_PROMPT: &str = "\
 You are Worksmith, a terminal coding agent. You accomplish tasks by calling \
@@ -54,6 +55,12 @@ struct Args {
     /// Continue the most recent session for this directory.
     #[arg(long = "continue")]
     continue_: bool,
+
+    /// Validation check: a shell command that must exit 0 for the task to be
+    /// considered done. On failure its output drives a re-plan. E.g.
+    /// --until "cargo test".
+    #[arg(long)]
+    until: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,11 +126,17 @@ async fn run(args: Args) -> Result<()> {
         config.temperature,
         config.max_tokens,
         config.max_steps(),
+        config.max_retries(),
+        config.stuck_threshold(),
         tool_ctx,
     );
 
     let renderer = spawn_renderer(bus.subscribe(), mode);
     bus.emit(Event::SessionStarted { id: session.id.clone() });
+
+    // Validation command: --until overrides the configured default.
+    let validate_cmd = args.until.clone().or_else(|| config.validate_command().map(String::from));
+    let bash_timeout = Duration::from_secs(config.bash_timeout_secs());
 
     let one_shot = args.prompt.is_some() && matches!(mode, OutputMode::Print | OutputMode::Json);
 
@@ -131,13 +144,20 @@ async fn run(args: Args) -> Result<()> {
         let prompt = args.prompt.clone().unwrap();
         let system = build_system_prompt(&cwd, &project_store(&cwd))?;
         let cancel = CancellationToken::new();
-        agent.run_turn(&mut session, &prompt, &system, cancel).await.map(|final_text| {
-            if mode == OutputMode::Print {
-                let _ = writeln!(stdout(), "{final_text}");
-            }
-        })
+        let validator = validate_cmd
+            .as_ref()
+            .map(|c| CommandValidator::new(c.clone(), cwd.clone(), bash_timeout));
+        agent
+            .run_turn(&mut session, &prompt, &system, validator.as_ref().map(|v| v as _), cancel)
+            .await
+            .map(|result| {
+                if mode == OutputMode::Print {
+                    let _ = writeln!(stdout(), "{}", result.text);
+                }
+            })
     } else {
-        repl(&agent, &mut session, &cwd, args.prompt.clone(), &resolved.model).await
+        repl(&agent, &mut session, &cwd, args.prompt.clone(), &resolved.model, validate_cmd, bash_timeout)
+            .await
     };
 
     // Drop every event-bus sender (the original *and* the agent's clone) so the
@@ -192,12 +212,15 @@ fn build_system_prompt(cwd: &Path, mem: &MemoryStore) -> Result<String> {
 
 // ---- REPL -----------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn repl(
     agent: &Agent,
     session: &mut Session,
     cwd: &Path,
     first: Option<String>,
     model: &str,
+    mut validate_cmd: Option<String>,
+    bash_timeout: Duration,
 ) -> Result<()> {
     use rustyline::DefaultEditor;
     use rustyline::error::ReadlineError;
@@ -205,6 +228,9 @@ async fn repl(
     let mem = project_store(cwd);
 
     println!("worksmith — model: {model}  (/help for commands, /quit to exit)");
+    if let Some(c) = &validate_cmd {
+        println!("validation: `{c}` must pass before a task is considered done");
+    }
 
     let mut editor = DefaultEditor::new().context("initializing line editor")?;
     let mut pending = first;
@@ -232,6 +258,26 @@ async fn repl(
             break;
         }
 
+        // `/validate <cmd>` sets the success check; `/validate off` clears it.
+        if let Some(rest) = trimmed.strip_prefix("/validate") {
+            let rest = rest.trim();
+            match rest {
+                "" => match &validate_cmd {
+                    Some(c) => println!("validation: `{c}`"),
+                    None => println!("validation: (none) — use `/validate <command>`"),
+                },
+                "off" | "none" => {
+                    validate_cmd = None;
+                    println!("validation cleared");
+                }
+                cmd => {
+                    validate_cmd = Some(cmd.to_string());
+                    println!("validation: `{cmd}` must pass before a task is done");
+                }
+            }
+            continue;
+        }
+
         if let Some(cmd) = trimmed.strip_prefix('/') {
             match handle_command(cmd, &mem, session, cwd) {
                 CommandResult::Quit => break,
@@ -242,19 +288,29 @@ async fn repl(
 
         let message = expand_file_mentions(trimmed, cwd);
         let system = build_system_prompt(cwd, &mem)?;
+        let validator = validate_cmd
+            .as_ref()
+            .map(|c| CommandValidator::new(c.clone(), cwd.to_path_buf(), bash_timeout));
 
         // Ctrl+C aborts the current turn (not the program).
         let cancel = CancellationToken::new();
         let result = tokio::select! {
-            r = agent.run_turn(session, &message, &system, cancel.clone()) => r,
+            r = agent.run_turn(session, &message, &system, validator.as_ref().map(|v| v as _), cancel.clone()) => r,
             _ = tokio::signal::ctrl_c() => {
                 cancel.cancel();
                 println!("\n(aborted)");
-                Ok(String::new())
+                Ok(worksmith::agent::TurnResult {
+                    text: String::new(),
+                    outcome: worksmith::agent::TurnOutcome::Aborted,
+                })
             }
         };
-        if let Err(e) = result {
-            eprintln!("\x1b[31mturn error:\x1b[0m {e:#}");
+        match result {
+            Ok(r) if !r.outcome.is_success() => {
+                println!("\x1b[2m[{}]\x1b[0m", r.outcome.label());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("\x1b[31mturn error:\x1b[0m {e:#}"),
         }
     }
 
@@ -466,14 +522,25 @@ fn render_activity(ev: &Event, print_mode: bool) {
             let line = format!("\x1b[2m  → {status}: {}{}\x1b[0m", truncate(first, 160), suffix);
             emit_line(&line, print_mode);
         }
+        Event::Nudge { reason } => {
+            let line = format!("\x1b[33m↻ {reason}\x1b[0m");
+            emit_line(&line, print_mode);
+        }
+        Event::Validation { ok, detail } => {
+            let line = if *ok {
+                format!("\x1b[32m✓ validation passed: {}\x1b[0m", truncate(detail, 120))
+            } else {
+                format!("\x1b[31m✗ validation failed: {}\x1b[0m", truncate(detail, 200))
+            };
+            emit_line(&line, print_mode);
+        }
         Event::Error { message } => {
             let line = format!("\x1b[31merror:\x1b[0m {message}");
             emit_line(&line, print_mode);
         }
-        Event::TurnComplete
-            if !print_mode => {
-                println!();
-            }
+        Event::TurnComplete { .. } if !print_mode => {
+            println!();
+        }
         _ => {}
     }
 }

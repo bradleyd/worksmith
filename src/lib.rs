@@ -10,3 +10,4 @@ pub mod llm;
 pub mod memory;
 pub mod session;
 pub mod tools;
+pub mod validation;

@@ -21,9 +21,14 @@ pub enum Event {
     ToolCall { id: String, name: String, arguments: String },
     ToolResult { id: String, name: String, ok: bool, output: String },
     Usage { prompt_tokens: u32, completion_tokens: u32, total_tokens: u32 },
+    /// The supervisor/loop nudged the model back on track (stuck detection).
+    Nudge { reason: String },
+    /// Result of running the task's validation check.
+    Validation { ok: bool, detail: String },
     Error { message: String },
-    /// The whole user turn finished (model produced no more tool calls).
-    TurnComplete,
+    /// The whole user turn finished, with its final outcome (done, validation
+    /// failed, stuck, max steps, aborted).
+    TurnComplete { outcome: String },
 }
 
 /// A cheap clonable handle to the broadcast bus.

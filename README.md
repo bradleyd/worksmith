@@ -41,7 +41,19 @@ worksmith --print "summarize src/main.rs"
 
 # machine-readable event stream
 worksmith --mode json "list the rust files"
+
+# validation-driven: keep working until a check passes (the thesis)
+worksmith --until "cargo test" "make the failing test pass"
 ```
+
+### Validation loop (§7a)
+
+With `--until "<command>"` (or `agent.validate` in config, or `/validate <cmd>`
+in the REPL), a turn isn't "done" when the model stops talking — it's done when
+the command exits 0. On failure, the command's output is fed back as a re-plan
+directive and the model tries again (bounded by `agent.max-retries`). The loop
+also detects when the model repeats identical tool calls and nudges, then
+escalates. This is what keeps weaker models on task.
 
 ### REPL commands
 

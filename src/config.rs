@@ -42,6 +42,12 @@ fn default_provider_kind() -> String {
 #[serde(rename_all = "kebab-case", default)]
 pub struct AgentConfig {
     pub max_steps: Option<usize>,
+    /// Validation retries before giving up (re-plan attempts).
+    pub max_retries: Option<usize>,
+    /// Identical-call count that triggers stuck detection.
+    pub stuck_threshold: Option<u32>,
+    /// Default validation command (`--until` overrides per-run).
+    pub validate: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -99,6 +105,18 @@ impl Config {
 
     pub fn max_steps(&self) -> usize {
         self.agent.max_steps.unwrap_or(50)
+    }
+
+    pub fn max_retries(&self) -> usize {
+        self.agent.max_retries.unwrap_or(3)
+    }
+
+    pub fn stuck_threshold(&self) -> u32 {
+        self.agent.stuck_threshold.unwrap_or(3)
+    }
+
+    pub fn validate_command(&self) -> Option<&str> {
+        self.agent.validate.as_deref()
     }
 
     pub fn bash_timeout_secs(&self) -> u64 {
