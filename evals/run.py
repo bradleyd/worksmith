@@ -32,6 +32,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "Cargo.toml"
 TASKS_DIR = Path(__file__).resolve().parent / "tasks"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def worksmith_bin() -> str:
@@ -67,6 +68,12 @@ def setup_workdir(task: dict) -> Path:
         p = d / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
+    # Binary/prepared fixtures copied from evals/fixtures/.
+    for fx in task.get("fixtures") or []:
+        src = FIXTURES_DIR / fx
+        dst = d / fx
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dst)
     return d
 
 
@@ -132,6 +139,8 @@ def main() -> int:
     ap.add_argument("--modes", default="raw,guided")
     ap.add_argument("--model")
     ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
     args = ap.parse_args()
 
@@ -148,23 +157,39 @@ def main() -> int:
     rows = []
     for task in tasks:
         for mode in modes:
-            print(f"running {task['name']} [{mode}] …", file=sys.stderr)
-            row = run_one(binp, task, mode, args.model, args.timeout)
-            rows.append(row)
-            mark = "PASS" if row["passed"] else "FAIL"
-            extra = f" ({row['error']})" if row["error"] else ""
-            print(f"  {mark}  calls={row['tool_calls']} gen_tok={row['gen_tokens']} "
-                  f"outcome={row['outcome']}{extra}", file=sys.stderr)
+            for i in range(args.repeat):
+                tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
+                print(f"running {tag} …", file=sys.stderr)
+                row = run_one(binp, task, mode, args.model, args.timeout)
+                row["run"] = i
+                rows.append(row)
+                mark = "PASS" if row["passed"] else "FAIL"
+                extra = f" ({row['error']})" if row["error"] else ""
+                print(f"  {mark}  calls={row['tool_calls']} gen_tok={row['gen_tokens']} "
+                      f"outcome={row['outcome']}{extra}", file=sys.stderr)
 
-    print("\n=== results ===")
-    print(f"{'task':<16} {'mode':<8} {'pass':<5} {'model_calls':>11} "
-          f"{'tool_calls':>10} {'gen_tokens':>10} {'outcome'}")
-    for r in rows:
-        print(f"{r['task']:<16} {r['mode']:<8} {('yes' if r['passed'] else 'no'):<5} "
-              f"{r['model_calls']:>11} {r['tool_calls']:>10} {r['gen_tokens']:>10} "
-              f"{r['outcome'] or ''}")
+    # Aggregate per (task, mode).
+    def agg(task_name, mode):
+        rs = [r for r in rows if r["task"] == task_name and r["mode"] == mode]
+        n = len(rs)
+        passed = sum(1 for r in rs if r["passed"])
+        avg_calls = sum(r["tool_calls"] for r in rs) / n if n else 0
+        avg_tok = sum(r["gen_tokens"] for r in rs) / n if n else 0
+        return passed, n, avg_calls, avg_tok
 
-    print("\n=== summary (pass rate) ===")
+    print("\n=== results (pass rate per task) ===")
+    header = f"{'task':<16}"
+    for mode in modes:
+        header += f" {mode + ' pass':>12} {mode + ' tok':>10}"
+    print(header)
+    for task in tasks:
+        line = f"{task['name']:<16}"
+        for mode in modes:
+            passed, n, _calls, tok = agg(task["name"], mode)
+            line += f" {f'{passed}/{n}':>12} {tok:>10.0f}"
+        print(line)
+
+    print("\n=== summary ===")
     for mode in modes:
         mr = [r for r in rows if r["mode"] == mode]
         passed = sum(1 for r in mr if r["passed"])

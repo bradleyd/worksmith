@@ -1,0 +1,20 @@
+name = "merge-intervals"
+description = "Implement a function with edge cases not spelled out in the goal (hidden validation catches them)"
+goal = "Create a file intervals.py with a function merge(intervals) that takes a list of [start, end] integer pairs and returns a new list of merged, non-overlapping intervals sorted by start. For example, merge([[1,3],[2,6],[8,10]]) returns [[1,6],[8,10]]."
+
+# The check enforces edge cases the goal only implies: empty input, unsorted
+# input, touching intervals, fully-contained, and overlap chains. Raw sees only
+# the goal; guided is held to (and iterates against) this check.
+validate = '''
+python3 - <<'PY'
+from intervals import merge
+assert merge([[1,3],[2,6],[8,10]]) == [[1,6],[8,10]], "basic overlap"
+assert merge([]) == [], "empty input"
+assert merge([[1,2]]) == [[1,2]], "single interval"
+assert merge([[5,6],[1,2]]) == [[1,2],[5,6]], "unsorted input must come out sorted"
+assert merge([[1,4],[4,5]]) == [[1,5]], "touching intervals must merge"
+assert merge([[1,10],[2,3],[4,5]]) == [[1,10]], "fully-contained intervals"
+assert merge([[1,3],[2,6],[8,10],[9,12]]) == [[1,6],[8,12]], "overlap chain"
+print("ok")
+PY
+'''

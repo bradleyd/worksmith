@@ -1,0 +1,26 @@
+name = "docx-styling"
+description = "Honor a document's Word paragraph styles when editing a .docx (stretch task)"
+goal = "chapter.docx is a book chapter that uses these Word paragraph styles: 'HeadA' for section titles, 'Body' for prose paragraphs, and 'Code' for code listings. Append a new section to the END of the document consisting of: a section title 'Error Handling' in the 'HeadA' style, then one prose paragraph (a sensible sentence) in the 'Body' style, then a code line `fn main() {}` in the 'Code' style. Keep ALL existing content and its styles intact. It's a .docx (a zip of XML) — you'll need to edit word/document.xml and repackage."
+fixtures = ["chapter.docx"]
+
+# Parse the resulting docx and verify the new paragraphs carry the right styles
+# and the original content survived.
+validate = '''
+python3 - <<'PY'
+import zipfile, re
+xml = zipfile.ZipFile("chapter.docx").read("word/document.xml").decode("utf-8", "replace")
+items = []
+for p in re.findall(r"<w:p\b.*?</w:p>", xml, re.S):
+    m = re.search(r'<w:pStyle w:val="([^"]+)"', p)
+    style = m.group(1) if m else "Normal"
+    text = "".join(re.findall(r"<w:t[^>]*>(.*?)</w:t>", p, re.S)).strip()
+    items.append((style, text))
+
+assert any(s == "HeadA" and t == "Introduction" for s, t in items), "original 'Introduction' HeadA lost"
+assert any(s == "HeadA" and t == "Error Handling" for s, t in items), "no 'Error Handling' in HeadA style"
+assert any(s == "Code" and "fn main() {}" in t for s, t in items), "no 'fn main() {}' in Code style"
+idx = max(i for i, (s, t) in enumerate(items) if s == "HeadA" and t == "Error Handling")
+assert any(s == "Body" for s, t in items[idx + 1:]), "no Body prose after the new heading"
+print("ok")
+PY
+'''

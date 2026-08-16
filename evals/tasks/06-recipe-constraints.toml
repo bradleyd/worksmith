@@ -1,0 +1,23 @@
+name = "recipe-constraints"
+description = "Strict multi-constraint instruction-following (dietary + structure) — easy to violate one"
+goal = "Write a dinner recipe to a file named recipe.md. It must be gluten-free and dairy-free: do NOT include wheat, pasta, bread, couscous, cheese, or yogurt. It must contain NO beans, lentils, or chickpeas. Format it with a '## Ingredients' heading followed by 6 to 12 ingredient bullet points (lines starting with '- '), then a '## Steps' heading followed by at least 7 numbered steps (lines like '1.', '2.', …). Make it a real, coherent recipe."
+
+# Checks every constraint at once; weak models tend to satisfy most but violate
+# one (sneak in an ingredient, wrong count, missing heading).
+validate = '''
+python3 - <<'PY'
+import re
+t = open("recipe.md").read()
+low = t.lower()
+forbidden = ["wheat","pasta","bread","couscous","cheese","yogurt","bean","lentil","chickpea"]
+hits = [w for w in forbidden if re.search(r"\b" + w, low)]
+assert not hits, "contains forbidden ingredient(s): %s" % hits
+assert "## ingredients" in low, "missing '## Ingredients' heading"
+assert "## steps" in low, "missing '## Steps' heading"
+ings = [l for l in t.splitlines() if l.strip().startswith("- ")]
+assert 6 <= len(ings) <= 12, "need 6-12 ingredient bullets, found %d" % len(ings)
+steps = re.findall(r"(?m)^\s*\d+\.", t)
+assert len(steps) >= 7, "need at least 7 numbered steps, found %d" % len(steps)
+print("ok")
+PY
+'''
