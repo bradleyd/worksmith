@@ -17,6 +17,8 @@ use serde_json::Value;
 
 use crate::llm::ToolDef;
 
+pub use bash::dangerous_command;
+
 /// Runtime context passed to every tool invocation.
 pub struct ToolContext {
     pub cwd: PathBuf,
@@ -29,14 +31,20 @@ pub struct ToolContext {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// If true, the whole turn is aborted (e.g. a refused destructive command).
+    pub fatal: bool,
 }
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false }
+        Self { content: content.into(), is_error: false, fatal: false }
     }
     pub fn error(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true }
+        Self { content: content.into(), is_error: true, fatal: false }
+    }
+    /// A hard stop: the command was refused and the turn should end immediately.
+    pub fn blocked(content: impl Into<String>) -> Self {
+        Self { content: content.into(), is_error: true, fatal: true }
     }
 }
 

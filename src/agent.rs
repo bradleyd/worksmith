@@ -35,6 +35,8 @@ pub enum TurnOutcome {
     ValidationFailed(String),
     /// The model got stuck repeating itself and was escalated.
     Stuck(String),
+    /// A destructive command was refused and the turn was hard-stopped.
+    Blocked(String),
     /// Hit the per-attempt step cap.
     MaxSteps,
     /// Cancelled mid-turn.
@@ -47,6 +49,7 @@ impl TurnOutcome {
             TurnOutcome::Done => "done".into(),
             TurnOutcome::ValidationFailed(r) => format!("validation failed: {r}"),
             TurnOutcome::Stuck(r) => format!("stuck: {r}"),
+            TurnOutcome::Blocked(r) => format!("blocked: {r}"),
             TurnOutcome::MaxSteps => "hit step limit".into(),
             TurnOutcome::Aborted => "aborted".into(),
         }
@@ -66,6 +69,7 @@ pub struct TurnResult {
 enum IdleReason {
     ModelDone,
     Stuck(String),
+    Blocked(String),
     MaxSteps,
     Aborted,
 }
@@ -141,6 +145,7 @@ impl Agent {
                 IdleReason::Aborted => break TurnOutcome::Aborted,
                 IdleReason::MaxSteps => break TurnOutcome::MaxSteps,
                 IdleReason::Stuck(r) => break TurnOutcome::Stuck(r),
+                IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
                 IdleReason::ModelDone => {
                     let Some(v) = validator else { break TurnOutcome::Done };
 
@@ -288,6 +293,7 @@ impl Agent {
             }
 
             // Execute tool calls and feed results back.
+            let mut blocked: Option<String> = None;
             for call in &completion.tool_calls {
                 self.bus.emit(Event::ToolCall {
                     id: call.id.clone(),
@@ -295,10 +301,11 @@ impl Agent {
                     arguments: call.arguments.clone(),
                 });
 
-                let (ok, raw) = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                let (ok, fatal, raw) = match serde_json::from_str::<serde_json::Value>(&call.arguments)
+                {
                     Ok(v) => {
                         let o = self.registry.run(&call.name, v, &self.tool_ctx).await;
-                        (!o.is_error, o.content)
+                        (!o.is_error, o.fatal, o.content)
                     }
                     Err(e) => {
                         let hint = if truncated {
@@ -307,7 +314,7 @@ impl Agent {
                         } else {
                             ""
                         };
-                        (false, format!("invalid JSON arguments for `{}`: {e}{hint}", call.name))
+                        (false, false, format!("invalid JSON arguments for `{}`: {e}{hint}", call.name))
                     }
                 };
                 let content = cap_tool_output(raw);
@@ -318,7 +325,17 @@ impl Agent {
                     ok,
                     output: content.clone(),
                 });
-                session.append_message(Message::tool_result(&call.id, &call.name, content))?;
+                session.append_message(Message::tool_result(&call.id, &call.name, content.clone()))?;
+
+                // A refused destructive command hard-stops the turn immediately.
+                if fatal {
+                    blocked = Some(content);
+                    break;
+                }
+            }
+            if let Some(reason) = blocked {
+                self.bus.emit(Event::Error { message: reason.clone() });
+                return Ok(IdleReason::Blocked(reason));
             }
 
             // Nudge once when a call first hits the stuck threshold.

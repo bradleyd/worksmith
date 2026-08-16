@@ -20,6 +20,10 @@ and document tools for PDF/DOCX (M3). MCP/plugins (M4), scoped-memory retrieval
 - **Document tools:** `doc` (read/info/convert/extract/create) for PDF/DOCX/…
   via pandoc, poppler, and LibreOffice — clean text/markdown extraction and
   format conversion, with install hints when an engine is missing.
+- **Safety guard:** catastrophic `bash` commands (recursive `rm` of `/`/`~`/`.`/`*`,
+  fork bombs, `dd`/`mkfs` to devices, `curl … | sh`, recursive `chmod` of `/`)
+  are refused and hard-stop the turn. Best-effort, not a sandbox — run untrusted
+  work in a container.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /

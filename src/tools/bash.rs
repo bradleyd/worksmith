@@ -4,12 +4,45 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use regex::Regex;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
 use super::{Tool, ToolContext, ToolOutput};
 
 pub struct BashTool;
+
+/// Best-effort guard against catastrophic commands. This is NOT a sandbox — real
+/// isolation is "run in a container" — but it hard-stops the classic disasters
+/// (recursive rm of /, ~, ., or *; fork bombs; dd/mkfs to devices; piping a
+/// remote script into a shell; recursive chmod/chown of / or home).
+pub fn dangerous_command(cmd: &str) -> Option<String> {
+    let checks: &[(&str, &str)] = &[
+        (r":\s*\(\s*\)\s*\{", "fork bomb"),
+        (r"\bdd\b[^|;&]*\bof=/dev/", "dd writing to a device"),
+        (r"\bmkfs\b", "filesystem format (mkfs)"),
+        (r">\s*/dev/(sd|nvme|disk|hd|mmcblk)", "write to a block device"),
+        (
+            r"(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|fish)\b",
+            "piping a remote script straight into a shell",
+        ),
+        (
+            r"\bch(?:mod|own)\b[^|;&]*-R[^|;&]*\s(?:/|~|\$HOME)(?:\s|$)",
+            "recursive permission change on / or home",
+        ),
+        (
+            r"\brm\b[^|;&]*\s-\S*[rR]\S*[^|;&]*\s(?:-\S+\s+)*(?:/|/\*|~|~/|\$HOME|\.|\.\.|\*|/etc|/usr|/bin|/sbin|/var|/lib|/System|/Library|/boot|/dev)(?:/\s|\s|$)",
+            "recursive rm of a dangerous path (/, ~, ., .., *, or a system dir)",
+        ),
+    ];
+    for (pat, reason) in checks {
+        // Patterns are static and known-valid.
+        if Regex::new(pat).map(|re| re.is_match(cmd)).unwrap_or(false) {
+            return Some((*reason).to_string());
+        }
+    }
+    None
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -38,6 +71,14 @@ impl Tool for BashTool {
         let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
             return ToolOutput::error("missing required argument: command");
         };
+
+        // Hard-stop destructive commands before they run.
+        if let Some(reason) = dangerous_command(command) {
+            return ToolOutput::blocked(format!(
+                "refused to run a destructive command ({reason}): {command}"
+            ));
+        }
+
         let timeout = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())

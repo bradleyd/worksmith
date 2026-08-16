@@ -253,6 +253,29 @@ async fn truncated_tool_call_recovers_without_poisoning_history() {
 }
 
 #[tokio::test]
+async fn destructive_command_blocks_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let canary = dir.path().join("canary.txt");
+    std::fs::write(&canary, "alive").unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // The model tries something catastrophic, then (never reached) claims done.
+    let client = MockClient::new(vec![
+        tool_call("bash", r#"{"command":"rm -rf *"}"#),
+        done("all clean"),
+    ]);
+    let agent = build_agent(client, dir.path(), 3);
+
+    let result = agent
+        .run_turn(&mut session, "clean up", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(matches!(result.outcome, TurnOutcome::Blocked(_)), "outcome: {:?}", result.outcome);
+    assert!(canary.exists(), "the destructive command must not have run");
+}
+
+#[tokio::test]
 async fn no_validator_completes_when_model_stops() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
