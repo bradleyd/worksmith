@@ -49,6 +49,9 @@ struct Item {
     text: String,
 }
 
+/// How many lines of a long tool result to show before capping (Ctrl+O expands).
+const TOOL_RESULT_PREVIEW_LINES: usize = 15;
+
 struct App {
     items: Vec<Item>,
     input: String,
@@ -481,80 +484,81 @@ fn ui(f: &mut Frame, app: &App) {
 }
 
 fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
-    let lines = transcript_lines(app);
+    // Wrap everything to the exact width ourselves, then slice the tail. This is
+    // reliable (ratatui's own wrapped-line count is private and tabs would throw
+    // an estimate off) so the view always follows the newest content.
+    let rows = build_rows(app, area.width);
+    let h = area.height as usize;
+    let total = rows.len();
+    let up = (app.scroll_up as usize).min(total.saturating_sub(1));
+    let end = total.saturating_sub(up);
+    let start = end.saturating_sub(h);
+    let view = rows[start..end].to_vec();
 
-    // Estimate wrapped-line count (ratatui's exact count is private) to scroll
-    // to the tail, minus any manual scroll-up.
-    let inner_w = area.width.max(1);
-    let total = count_wrapped(&lines, inner_w);
-    let max_off = total.saturating_sub(area.height);
-    let offset = max_off.saturating_sub(app.scroll_up.min(max_off));
-
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::NONE))
-        .scroll((offset, 0));
+    let para = Paragraph::new(view).block(Block::default().borders(Borders::NONE));
     f.render_widget(para, area);
 }
 
-/// Approximate how many rows the wrapped lines occupy at `width`.
-fn count_wrapped(lines: &[Line], width: u16) -> u16 {
-    let w = width.max(1) as usize;
-    let mut total: usize = 0;
-    for line in lines {
-        let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        total += if len == 0 { 1 } else { len.div_ceil(w) };
-    }
-    total.min(u16::MAX as usize) as u16
-}
+/// Build the fully-wrapped, styled rows for the transcript (each row already
+/// fits `width`). Tabs are expanded so widths are predictable.
+fn build_rows(app: &App, width: u16) -> Vec<Line<'static>> {
+    let w = (width.max(12) as usize).saturating_sub(1);
+    let mut rows: Vec<Line> = Vec::new();
 
-fn transcript_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = Vec::new();
     for item in &app.items {
-        match item.kind {
-            Kind::User => push_block(&mut lines, "▎ ", item.text.as_str(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you"),
-            Kind::Assistant => push_block(&mut lines, "  ", item.text.as_str(),
-                Style::default().fg(Color::White), ""),
-            Kind::Thinking => push_block(&mut lines, "  ", item.text.as_str(),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), "thinking"),
-            Kind::Tool => push_block(&mut lines, "⚙ ", item.text.as_str(),
-                Style::default().fg(Color::Yellow), ""),
-            Kind::ToolResult => {
-                if app.collapse_tools {
-                    let first = item.text.lines().next().unwrap_or("");
-                    let extra = item.text.lines().count().saturating_sub(1);
-                    let label = if extra > 0 { format!("→ {first} (+{extra} lines, Ctrl+O)") } else { format!("→ {first}") };
-                    lines.push(Line::from(Span::styled(label, Style::default().fg(Color::DarkGray))));
+        let (style, label): (Style, &str) = match item.kind {
+            Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
+            Kind::Assistant => (Style::default().fg(Color::White), ""),
+            Kind::Thinking => {
+                (Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), "thinking ")
+            }
+            Kind::Tool => (Style::default().fg(Color::Yellow), "⚙ "),
+            Kind::ToolResult => (Style::default().fg(Color::DarkGray), "→ "),
+            Kind::Notice => (Style::default().fg(Color::Blue), ""),
+            Kind::Error => (Style::default().fg(Color::Red), "! "),
+        };
+
+        // Show short tool results in full; cap long ones (Ctrl+O expands).
+        let expanded = item.text.replace('\t', "    ");
+        let text = if item.kind == Kind::ToolResult && app.collapse_tools {
+            let lines: Vec<&str> = expanded.lines().collect();
+            if lines.len() > TOOL_RESULT_PREVIEW_LINES {
+                let shown = lines[..TOOL_RESULT_PREVIEW_LINES].join("\n");
+                format!("{shown}\n… (+{} lines · Ctrl+O)", lines.len() - TOOL_RESULT_PREVIEW_LINES)
+            } else {
+                expanded
+            }
+        } else {
+            expanded
+        };
+
+        let indent = "  ";
+        let mut first_row = true;
+        for logical in text.split('\n') {
+            let chars: Vec<char> = logical.chars().collect();
+            let mut i = 0;
+            loop {
+                let prefix = if first_row {
+                    label.to_string()
                 } else {
-                    push_block(&mut lines, "→ ", item.text.as_str(),
-                        Style::default().fg(Color::DarkGray), "");
+                    indent.to_string()
+                };
+                let avail = w.saturating_sub(prefix.chars().count()).max(1);
+                let seg: String = chars[i..(i + avail).min(chars.len())].iter().collect();
+                rows.push(Line::from(vec![
+                    Span::styled(prefix, style.add_modifier(Modifier::DIM)),
+                    Span::styled(seg, style),
+                ]));
+                first_row = false;
+                i += avail;
+                if i >= chars.len() {
+                    break;
                 }
             }
-            Kind::Notice => push_block(&mut lines, "  ", item.text.as_str(),
-                Style::default().fg(Color::Blue), ""),
-            Kind::Error => push_block(&mut lines, "  ", item.text.as_str(),
-                Style::default().fg(Color::Red), ""),
         }
-        lines.push(Line::from(""));
+        rows.push(Line::from("")); // blank line between items
     }
-    lines
-}
-
-fn push_block(lines: &mut Vec<Line<'static>>, gutter: &str, text: &str, style: Style, tag: &str) {
-    let mut first = true;
-    for raw in text.split('\n') {
-        let prefix = if first {
-            if tag.is_empty() { gutter.to_string() } else { format!("{gutter}{tag}: ") }
-        } else {
-            "  ".to_string()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, style.add_modifier(Modifier::DIM)),
-            Span::styled(raw.to_string(), style),
-        ]));
-        first = false;
-    }
+    rows
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
@@ -617,13 +621,18 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_line_count_is_reasonable() {
-        let lines = vec![
-            Line::from("x".repeat(10)),  // fits in width 20 → 1 row
-            Line::from("y".repeat(25)),  // 25/20 → 2 rows
-            Line::from(""),              // empty → 1 row
-        ];
-        assert_eq!(count_wrapped(&lines, 20), 1 + 2 + 1);
+    fn build_rows_wraps_to_width_and_labels_channels() {
+        let mut a = app();
+        a.apply_event(Event::UserMessage { text: "hello world this is a long line".into() });
+        let rows = build_rows(&a, 16);
+        // Every row must fit the width (accounting for prefix + content spans).
+        for row in &rows {
+            let len: usize = row.spans.iter().map(|s| s.content.chars().count()).sum();
+            assert!(len <= 16, "row too wide ({len}): {row:?}");
+        }
+        // The first row carries the "you ▸" label.
+        let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.contains("you"), "first row should label the user: {first}");
     }
 }
 
