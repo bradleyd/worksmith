@@ -125,3 +125,28 @@ fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
     let path = PathBuf::from(p);
     if path.is_absolute() { path } else { ctx.cwd.join(path) }
 }
+
+/// A summary line + unified diff of a file change, for `edit`/`write` output.
+/// The TUI colorizes this (it knows the tool name); plain modes show it as text.
+fn unified_diff(label: &str, old: &str, new: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let (mut ins, mut del) = (0usize, 0usize);
+    for c in diff.iter_all_changes() {
+        match c.tag() {
+            ChangeTag::Insert => ins += 1,
+            ChangeTag::Delete => del += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    let summary = format!("{label} (+{ins} -{del})");
+    if ins == 0 && del == 0 {
+        return format!("{summary} — no changes");
+    }
+    let body = diff
+        .unified_diff()
+        .context_radius(3)
+        .header("before", "after")
+        .to_string();
+    format!("{summary}\n{body}")
+}

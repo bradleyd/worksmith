@@ -35,6 +35,10 @@ async fn edit_unique_match_replaces() {
 
     assert!(!out.is_error, "expected success: {}", out.content);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello there\n");
+    // Output is a unified diff of the change.
+    assert!(out.content.contains("edited"), "no summary: {}", out.content);
+    assert!(out.content.contains("-hello world"), "no removed line: {}", out.content);
+    assert!(out.content.contains("+hello there"), "no added line: {}", out.content);
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolContext, ToolOutput, resolve_path};
+use super::{Tool, ToolContext, ToolOutput, resolve_path, unified_diff};
 
 pub struct EditTool;
 
@@ -74,10 +74,11 @@ impl Tool for EditTool {
             Err(e) => return ToolOutput::error(e),
         };
 
-        let mut content = match std::fs::read_to_string(&full) {
+        let original = match std::fs::read_to_string(&full) {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("cannot read {}: {e}", full.display())),
         };
+        let mut content = original.clone();
 
         let mut applied = 0usize;
         for (i, op) in ops.iter().enumerate() {
@@ -107,11 +108,12 @@ impl Tool for EditTool {
         if let Err(e) = std::fs::write(&full, &content) {
             return ToolOutput::error(format!("cannot write {}: {e}", full.display()));
         }
-        ToolOutput::ok(format!(
-            "applied {} edit(s) ({applied} replacement(s)) to {}",
-            ops.len(),
-            full.display()
-        ))
+        let label = format!(
+            "edited {} ({} edit(s), {applied} replacement(s))",
+            full.display(),
+            ops.len()
+        );
+        ToolOutput::ok(unified_diff(&label, &original, &content))
     }
 }
 

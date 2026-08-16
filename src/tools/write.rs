@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolContext, ToolOutput, resolve_path};
+use super::{Tool, ToolContext, ToolOutput, resolve_path, unified_diff};
 
 pub struct WriteTool;
 
@@ -37,17 +37,19 @@ impl Tool for WriteTool {
             return ToolOutput::error("missing required argument: content");
         };
         let full = resolve_path(ctx, path);
+        let existed = full.exists();
+        let old = if existed { std::fs::read_to_string(&full).unwrap_or_default() } else { String::new() };
 
         if let Some(parent) = full.parent()
             && let Err(e) = std::fs::create_dir_all(parent) {
                 return ToolOutput::error(format!("cannot create {}: {e}", parent.display()));
             }
         match std::fs::write(&full, content) {
-            Ok(()) => ToolOutput::ok(format!(
-                "wrote {} ({} bytes)",
-                full.display(),
-                content.len()
-            )),
+            Ok(()) => {
+                let verb = if existed { "overwrote" } else { "created" };
+                let label = format!("{verb} {} ({} bytes)", full.display(), content.len());
+                ToolOutput::ok(unified_diff(&label, &old, content))
+            }
             Err(e) => ToolOutput::error(format!("cannot write {}: {e}", full.display())),
         }
     }

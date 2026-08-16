@@ -43,6 +43,7 @@ enum Kind {
     Thinking,
     Tool,
     ToolResult,
+    Diff,
     Notice,
     Error,
 }
@@ -162,9 +163,14 @@ impl App {
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
-            Event::ToolResult { ok, output, .. } => {
-                let prefix = if ok { "" } else { "[error] " };
-                self.push(Kind::ToolResult, format!("{prefix}{output}"));
+            Event::ToolResult { ok, output, name, .. } => {
+                // Successful edit/write results are unified diffs → render as such.
+                if ok && matches!(name.as_str(), "edit" | "write") {
+                    self.push(Kind::Diff, output);
+                } else {
+                    let prefix = if ok { "" } else { "[error] " };
+                    self.push(Kind::ToolResult, format!("{prefix}{output}"));
+                }
             }
             Event::Nudge { reason } => self.push(Kind::Notice, format!("↻ {reason}")),
             Event::Validation { ok, detail } => {
@@ -560,6 +566,11 @@ fn build_rows(items: &[Item], collapse_tools: bool, width: u16) -> Vec<Line<'sta
     let mut rows: Vec<Line> = Vec::new();
 
     for item in items {
+        if item.kind == Kind::Diff {
+            render_diff(&mut rows, &item.text, collapse_tools, width);
+            rows.push(Line::from(""));
+            continue;
+        }
         let (style, label): (Style, &str) = match item.kind {
             Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
             Kind::Assistant => (Style::default().fg(Color::White), ""),
@@ -570,6 +581,7 @@ fn build_rows(items: &[Item], collapse_tools: bool, width: u16) -> Vec<Line<'sta
             Kind::ToolResult => (Style::default().fg(Color::DarkGray), "→ "),
             Kind::Notice => (Style::default().fg(Color::Blue), ""),
             Kind::Error => (Style::default().fg(Color::Red), "! "),
+            Kind::Diff => unreachable!("diffs are rendered above"),
         };
 
         // Show short tool results in full; cap long ones (Ctrl+O expands).
@@ -687,6 +699,57 @@ mod tests {
         // The first row carries the "you ▸" label.
         let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(first.contains("you"), "first row should label the user: {first}");
+    }
+}
+
+/// Render a unified diff with per-line color (summary yellow, `+` green, `-`
+/// red, `@@` cyan, context dim), wrapped to width and capped when collapsed.
+fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width: u16) {
+    let w = (width.max(12) as usize).saturating_sub(1);
+    let all: Vec<&str> = text.lines().collect();
+    let (shown, extra) = if collapse && all.len() > TOOL_RESULT_PREVIEW_LINES + 5 {
+        (&all[..TOOL_RESULT_PREVIEW_LINES + 5], all.len() - (TOOL_RESULT_PREVIEW_LINES + 5))
+    } else {
+        (&all[..], 0)
+    };
+
+    for (i, raw) in shown.iter().enumerate() {
+        let line = raw.replace('\t', "    ");
+        let style = if i == 0 {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if line.starts_with("@@") {
+            Style::default().fg(Color::Cyan)
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            Style::default().fg(Color::DarkGray)
+        } else if line.starts_with('+') {
+            Style::default().fg(Color::Green)
+        } else if line.starts_with('-') {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let chars: Vec<char> = line.chars().collect();
+        let mut idx = 0;
+        loop {
+            let prefix = if idx == 0 { "  " } else { "   " };
+            let avail = w.saturating_sub(prefix.len()).max(1);
+            let seg: String = chars[idx..(idx + avail).min(chars.len())].iter().collect();
+            rows.push(Line::from(vec![
+                Span::styled(prefix.to_string(), style.add_modifier(Modifier::DIM)),
+                Span::styled(seg, style),
+            ]));
+            idx += avail;
+            if idx >= chars.len() {
+                break;
+            }
+        }
+    }
+    if extra > 0 {
+        rows.push(Line::from(Span::styled(
+            format!("  … (+{extra} more diff lines · Ctrl+O)"),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 }
 
