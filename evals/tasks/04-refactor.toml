@@ -1,0 +1,17 @@
+name = "refactor"
+description = "Multi-step edit: rename a function and add another so tests pass"
+goal = "In calc.py, rename the function `f` to `add` (updating any references), and add a new function `subtract(a, b)` that returns a - b. The test in test.py must pass when you run `python3 test.py`."
+validate = "python3 test.py"
+
+[files]
+"calc.py" = '''
+def f(a, b):
+    return a + b
+'''
+"test.py" = '''
+from calc import add, subtract
+
+assert add(2, 3) == 5, "add"
+assert subtract(5, 2) == 3, "subtract"
+print("ok")
+'''

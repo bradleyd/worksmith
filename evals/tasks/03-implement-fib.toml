@@ -1,0 +1,15 @@
+name = "implement-fib"
+description = "Implement a function so an existing test passes"
+goal = "Create a file solution.py with a function fib(n) that returns the nth Fibonacci number (fib(0)=0, fib(1)=1, fib(n)=fib(n-1)+fib(n-2)). The existing test.py must pass when you run `python3 test.py`."
+validate = "python3 test.py"
+
+[files]
+"test.py" = '''
+from solution import fib
+
+assert fib(0) == 0, "fib(0)"
+assert fib(1) == 1, "fib(1)"
+assert fib(2) == 1, "fib(2)"
+assert fib(10) == 55, "fib(10)"
+print("ok")
+'''

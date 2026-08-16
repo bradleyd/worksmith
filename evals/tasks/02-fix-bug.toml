@@ -1,0 +1,13 @@
+name = "fix-bug"
+description = "Fix a bug so the script prints the right answer (iterate-until-correct)"
+goal = "There is a bug in bug.py. Running `python3 bug.py` should print 42, but it prints something else. Find and fix the bug so it prints exactly 42."
+validate = "test \"$(python3 bug.py)\" = 42"
+
+[files]
+"bug.py" = '''
+def compute():
+    # Intended: 6 * 7 = 42
+    return 6 * 6
+
+print(compute())
+'''

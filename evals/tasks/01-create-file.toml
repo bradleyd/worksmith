@@ -1,0 +1,4 @@
+name = "create-file"
+description = "Create a file with exact content (baseline; both modes should pass)"
+goal = "Create a file named fruit.txt in the current directory whose entire contents are exactly the single word: pineapple (no trailing newline needed)."
+validate = "test \"$(cat fruit.txt)\" = pineapple"
