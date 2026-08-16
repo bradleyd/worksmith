@@ -15,8 +15,10 @@ carries the essentials.)
 
 ## Actions
 
-- `doc read {path, pages?, format?}` — extract text. `pages` is a PDF range
-  (`"1-5"` or `"3"`). `format` is `markdown` (default) or `text` for DOCX.
+- `doc read {path, pages?, format?, offset?, limit?}` — extract text. `pages`
+  is a PDF range (`"1-5"` or `"3"`). `format` is `markdown` (default) or `text`
+  for DOCX. `offset`/`limit` page through the extracted text by line — use them
+  for large DOCX/text that would otherwise be truncated by the tool-output cap.
 - `doc info {path}` — metadata (PDF: page count, size, producer; else file stat).
 - `doc convert {path, out}` — convert by file extension (e.g. `report.docx` →
   `report.pdf`, `notes.md` → `notes.docx`).

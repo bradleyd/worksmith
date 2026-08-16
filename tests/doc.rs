@@ -33,6 +33,24 @@ async fn doc_read_plaintext_needs_no_engine() {
 }
 
 #[tokio::test]
+async fn doc_read_offset_limit_pages_through_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let body: String = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    std::fs::write(dir.path().join("big.md"), &body).unwrap();
+
+    let reg = ToolRegistry::with_builtins();
+    let out = reg
+        .run("doc", json!({ "action": "read", "path": "big.md", "offset": 10, "limit": 3 }), &ctx(dir.path()))
+        .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("lines 10-12 of 100"), "header missing: {}", out.content);
+    assert!(out.content.contains("line 10") && out.content.contains("line 12"));
+    assert!(!out.content.contains("line 13"), "limit not respected");
+    assert!(!out.content.contains("line 9"), "offset not respected");
+}
+
+#[tokio::test]
 async fn doc_missing_action_errors() {
     let dir = tempfile::tempdir().unwrap();
     let reg = ToolRegistry::with_builtins();

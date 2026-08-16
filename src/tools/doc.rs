@@ -24,7 +24,8 @@ impl Tool for DocTool {
     fn description(&self) -> &str {
         "Work with documents (PDF, DOCX, ODT, etc.) via proven CLI engines. \
          Prefer this over `bash`/`read` for documents — it returns clean text. \
-         Actions: `read` (path[, pages, format]) → text/markdown; `info` (path) \
+         Actions: `read` (path[, pages, format, offset, limit]) → text/markdown \
+         (use offset/limit to page through large documents); `info` (path) \
          → metadata; `convert` (path, out) → convert by extension; `extract` \
          (path, out) → extract PDF images to a directory; `create` (path, out) \
          → build a .docx/.pdf from a markdown/text source. Requires the relevant \
@@ -43,7 +44,9 @@ impl Tool for DocTool {
                 "path": { "type": "string", "description": "Input document (read/info/convert/extract) or source file (create)." },
                 "out": { "type": "string", "description": "Output file (convert/create) or output directory (extract)." },
                 "pages": { "type": "string", "description": "PDF page range, e.g. '1-5' or '3' (read/extract)." },
-                "format": { "type": "string", "enum": ["markdown", "text"], "description": "read: output format for DOCX (default markdown)." }
+                "format": { "type": "string", "enum": ["markdown", "text"], "description": "read: output format for DOCX (default markdown)." },
+                "offset": { "type": "integer", "description": "read: 1-based line to start from in the extracted text. Use with limit to page through large documents.", "minimum": 1 },
+                "limit": { "type": "integer", "description": "read: max number of lines to return from the extracted text.", "minimum": 1 }
             },
             "required": ["action"]
         })
@@ -76,8 +79,12 @@ async fn read(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
     }
     let pages = args.get("pages").and_then(|v| v.as_str());
     let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("markdown");
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
 
-    match ext(&full).as_str() {
+    // Extract the full text, then page it with offset/limit so large documents
+    // (which the tool-output cap would truncate) can be read in chunks.
+    let text: Result<String, String> = match ext(&full).as_str() {
         "pdf" => {
             let mut pt = vec!["-layout".to_string()];
             if let Some((f, l)) = parse_pages(pages) {
@@ -89,7 +96,7 @@ async fn read(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
                 ("pdftotext", pt),
                 ("mutool", vec!["draw".into(), "-F".into(), "text".into(), full.display().to_string()]),
             ];
-            out_or_err(run_first(&jobs, &ctx.cwd, timeout).await)
+            run_first(&jobs, &ctx.cwd, timeout).await
         }
         "docx" | "doc" | "odt" | "rtf" | "epub" => {
             let to = if fmt == "text" { "plain" } else { "gfm" };
@@ -97,15 +104,49 @@ async fn read(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
                 ("pandoc", vec![full.display().to_string(), "-t".into(), to.into()]),
                 ("docx2txt", vec![full.display().to_string(), "-".into()]),
             ];
-            out_or_err(run_first(&jobs, &ctx.cwd, timeout).await)
+            run_first(&jobs, &ctx.cwd, timeout).await
         }
-        "md" | "markdown" | "txt" | "text" | "" => match std::fs::read_to_string(&full) {
-            Ok(t) => ToolOutput::ok(t),
-            Err(e) => ToolOutput::error(format!("cannot read {}: {e}", full.display())),
-        },
-        other => ToolOutput::error(format!(
-            "doc read doesn't handle .{other}; use the `read` tool for plain text or `bash` directly"
-        )),
+        "md" | "markdown" | "txt" | "text" | "" => {
+            std::fs::read_to_string(&full).map_err(|e| format!("cannot read {}: {e}", full.display()))
+        }
+        other => {
+            return ToolOutput::error(format!(
+                "doc read doesn't handle .{other}; use the `read` tool for plain text or `bash` directly"
+            ));
+        }
+    };
+
+    match text {
+        Ok(t) if t.trim().is_empty() => ToolOutput::ok("(no text extracted)"),
+        Ok(t) => ToolOutput::ok(slice_lines(&t, offset, limit)),
+        Err(e) => ToolOutput::error(e),
+    }
+}
+
+/// Return lines `[offset, offset+limit)` (1-based) with a header when the slice
+/// isn't the whole document, so the model knows there's more to page through.
+fn slice_lines(text: &str, offset: usize, limit: Option<usize>) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = offset.saturating_sub(1);
+    if start >= total {
+        return format!("(offset {offset} is past end of document — {total} lines total)");
+    }
+    let end = match limit {
+        Some(l) => (start + l).min(total),
+        None => total,
+    };
+    let body = lines[start..end].join("\n");
+    if start == 0 && end == total {
+        body
+    } else {
+        format!(
+            "[lines {}-{} of {} — pass offset/limit to read more]\n{}",
+            start + 1,
+            end,
+            total,
+            body
+        )
     }
 }
 
