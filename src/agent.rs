@@ -248,8 +248,19 @@ impl Agent {
                 total_tokens: completion.usage.total_tokens,
             });
 
-            let assistant =
-                Message::assistant(completion.content.clone(), completion.tool_calls.clone());
+            // A tool call whose arguments were cut off (hit the output-token
+            // limit) is invalid JSON. It must NOT be stored verbatim: re-sending
+            // that history makes the provider reject the whole request (HTTP
+            // 400). Store a sanitized copy and feed a clear error back so the
+            // model retries with a smaller call.
+            let truncated = completion.finish_reason.as_deref() == Some("length");
+            let mut stored_calls = completion.tool_calls.clone();
+            for c in &mut stored_calls {
+                if serde_json::from_str::<serde_json::Value>(&c.arguments).is_err() {
+                    c.arguments = "{}".to_string();
+                }
+            }
+            let assistant = Message::assistant(completion.content.clone(), stored_calls);
             session.append_message(assistant)?;
 
             if let Some(text) = &completion.content
@@ -284,15 +295,27 @@ impl Agent {
                     arguments: call.arguments.clone(),
                 });
 
-                let args: serde_json::Value =
-                    serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
-                let output = self.registry.run(&call.name, args, &self.tool_ctx).await;
-                let content = cap_tool_output(output.content);
+                let (ok, raw) = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    Ok(v) => {
+                        let o = self.registry.run(&call.name, v, &self.tool_ctx).await;
+                        (!o.is_error, o.content)
+                    }
+                    Err(e) => {
+                        let hint = if truncated {
+                            " — the response was cut off by the output-token limit; make the \
+                             call smaller (e.g. write the file in parts)"
+                        } else {
+                            ""
+                        };
+                        (false, format!("invalid JSON arguments for `{}`: {e}{hint}", call.name))
+                    }
+                };
+                let content = cap_tool_output(raw);
 
                 self.bus.emit(Event::ToolResult {
                     id: call.id.clone(),
                     name: call.name.clone(),
-                    ok: !output.is_error,
+                    ok,
                     output: content.clone(),
                 });
                 session.append_message(Message::tool_result(&call.id, &call.name, content))?;

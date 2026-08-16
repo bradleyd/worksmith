@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 
@@ -118,7 +119,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int) -
 
     row = {"task": task["name"], "mode": mode, "passed": False,
            "model_calls": 0, "tool_calls": 0, "gen_tokens": 0, "outcome": None,
-           "error": None}
+           "elapsed": 0.0, "error": None}
+    t0 = time.time()
     try:
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
                            timeout=timeout)
@@ -129,6 +131,7 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int) -
     except subprocess.TimeoutExpired:
         row["error"] = f"timeout after {timeout}s"
     finally:
+        row["elapsed"] = round(time.time() - t0, 1)
         shutil.rmtree(workdir, ignore_errors=True)
     return row
 
@@ -165,8 +168,12 @@ def main() -> int:
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"
                 extra = f" ({row['error']})" if row["error"] else ""
-                print(f"  {mark}  calls={row['tool_calls']} gen_tok={row['gen_tokens']} "
-                      f"outcome={row['outcome']}{extra}", file=sys.stderr)
+                print(f"  {mark}  {row['elapsed']}s calls={row['tool_calls']} "
+                      f"gen_tok={row['gen_tokens']} outcome={row['outcome']}{extra}",
+                      file=sys.stderr)
+                # Write partial results after each run so a killed run isn't lost.
+                if args.json:
+                    Path(args.json).write_text(json.dumps(rows, indent=2))
 
     # Aggregate per (task, mode).
     def agg(task_name, mode):

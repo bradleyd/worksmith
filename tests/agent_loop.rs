@@ -54,6 +54,18 @@ fn done(text: &str) -> Completion {
     Completion { content: Some(text.into()), ..Default::default() }
 }
 
+/// A tool call whose arguments were cut off (invalid JSON) with finish_reason
+/// "length" — simulates hitting the output-token limit mid-call.
+fn truncated_call(name: &str, partial_args: &str) -> Completion {
+    Completion {
+        content: None,
+        reasoning: None,
+        tool_calls: vec![ToolCall { id: "c1".into(), name: name.into(), arguments: partial_args.into() }],
+        usage: Default::default(),
+        finish_reason: Some("length".into()),
+    }
+}
+
 fn build_agent(client: MockClient, cwd: &std::path::Path, stuck_threshold: u32) -> Agent {
     Agent::new(
         Arc::new(client),
@@ -204,6 +216,40 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
         session.messages()[0].content.as_deref().unwrap_or("").starts_with("[Summary"),
         "first message should be the summary"
     );
+}
+
+#[tokio::test]
+async fn truncated_tool_call_recovers_without_poisoning_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // First call is truncated (invalid JSON args); then the model recovers.
+    let client = MockClient::new(vec![
+        truncated_call("write", r#"{"path":"a.txt","content":"unterminated"#),
+        done("recovered"),
+    ]);
+    let agent = build_agent(client, dir.path(), 3);
+
+    let result = agent
+        .run_turn(&mut session, "write a file", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
+
+    // Every stored tool_call must have valid-JSON arguments (so re-sending the
+    // history can't be rejected by the provider).
+    for m in session.messages() {
+        for tc in &m.tool_calls {
+            serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                .unwrap_or_else(|_| panic!("stored tool call has invalid JSON args: {}", tc.arguments));
+        }
+    }
+    // The model got a tool result explaining the failure.
+    let saw_error = session.messages().iter().any(|m| {
+        m.content.as_deref().map(|c| c.contains("invalid JSON arguments")).unwrap_or(false)
+    });
+    assert!(saw_error, "model should have received an invalid-args error result");
 }
 
 #[tokio::test]
