@@ -127,22 +127,27 @@ async fn run(args: Args) -> Result<()> {
 
     let one_shot = args.prompt.is_some() && matches!(mode, OutputMode::Print | OutputMode::Json);
 
-    if one_shot {
+    let outcome: Result<()> = if one_shot {
         let prompt = args.prompt.clone().unwrap();
         let system = build_system_prompt(&cwd, &project_store(&cwd))?;
         let cancel = CancellationToken::new();
-        let final_text = agent.run_turn(&mut session, &prompt, &system, cancel).await?;
-        if mode == OutputMode::Print {
-            let mut out = stdout();
-            writeln!(out, "{final_text}").ok();
-        }
+        agent.run_turn(&mut session, &prompt, &system, cancel).await.map(|final_text| {
+            if mode == OutputMode::Print {
+                let _ = writeln!(stdout(), "{final_text}");
+            }
+        })
     } else {
-        repl(&agent, &mut session, &cwd, args.prompt.clone(), &resolved.model).await?;
-    }
+        repl(&agent, &mut session, &cwd, args.prompt.clone(), &resolved.model).await
+    };
 
+    // Drop every event-bus sender (the original *and* the agent's clone) so the
+    // renderer sees the channel close, drains buffered events, and exits.
+    // Without dropping `agent`, its bus clone keeps the channel open and
+    // `renderer.await` hangs forever (the /quit hang).
+    drop(agent);
     drop(bus);
-    renderer.await.ok();
-    Ok(())
+    let _ = renderer.await;
+    outcome
 }
 
 fn open_session(args: &Args, cwd: &Path) -> Result<Session> {
@@ -220,6 +225,11 @@ async fn repl(
         let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
+        }
+
+        // Bare `exit`/`quit` also leave the REPL (common muscle memory).
+        if matches!(trimmed, "exit" | "quit") {
+            break;
         }
 
         if let Some(cmd) = trimmed.strip_prefix('/') {

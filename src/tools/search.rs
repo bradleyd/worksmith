@@ -9,8 +9,18 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolContext, ToolOutput, resolve_path};
 
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".worksmith"];
+const SKIP_DIRS: &[&str] =
+    &["target", "node_modules", "dist", "build", "vendor", "reference"];
 const MAX_HITS: usize = 500;
+/// Skip files larger than this when searching contents (lock files, blobs).
+const MAX_FILE_SIZE: u64 = 512 * 1024;
+/// Byte cap on total grep output fed back (defense in depth with MAX_HITS).
+const MAX_GREP_BYTES: usize = 48 * 1024;
+
+fn skip_dir(name: &str) -> bool {
+    // Skip hidden dirs (.git, .worksmith, .venv, …) and known heavy dirs.
+    name.starts_with('.') || SKIP_DIRS.contains(&name)
+}
 
 fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
     if out.len() >= limit {
@@ -23,7 +33,7 @@ fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
         let name = name.to_string_lossy();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
-            if SKIP_DIRS.contains(&name.as_ref()) {
+            if skip_dir(&name) {
                 continue;
             }
             walk(&path, out, limit);
@@ -85,14 +95,21 @@ impl Tool for GrepTool {
         let mut hits = 0usize;
         let mut out = String::new();
         for file in &files {
+            // Skip oversized files (lock files, data blobs) to avoid dumping
+            // huge or irrelevant content into the model's context.
+            if std::fs::metadata(file).map(|m| m.len()).unwrap_or(0) > MAX_FILE_SIZE {
+                continue;
+            }
             let Ok(text) = std::fs::read_to_string(file) else { continue };
             let rel = display_rel(&ctx.cwd, file);
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     out.push_str(&format!("{}:{}:{}\n", rel, i + 1, line.trim_end()));
                     hits += 1;
-                    if hits >= MAX_HITS {
-                        out.push_str(&format!("... (truncated at {MAX_HITS} matches)\n"));
+                    if hits >= MAX_HITS || out.len() >= MAX_GREP_BYTES {
+                        out.push_str(&format!(
+                            "... (truncated at {hits} matches / byte limit — narrow the pattern or scope with `path`)\n"
+                        ));
                         return ToolOutput::ok(out);
                     }
                 }

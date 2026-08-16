@@ -13,6 +13,27 @@ use crate::llm::{ChatRequest, LlmClient, Message, StreamEvent};
 use crate::session::Session;
 use crate::tools::{ToolContext, ToolRegistry};
 
+/// Hard cap on the size of any single tool result fed back to the model, so one
+/// runaway tool call (a huge grep, `cat` of a big file) can't blow the context
+/// window. Full compaction is M2; this is the M1 backstop.
+const MAX_TOOL_RESULT_BYTES: usize = 24_000;
+
+/// Truncate a tool result to the byte cap on a char boundary, with a notice.
+fn cap_tool_output(s: String) -> String {
+    if s.len() <= MAX_TOOL_RESULT_BYTES {
+        return s;
+    }
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let shown = &s[..end];
+    format!(
+        "{shown}\n\n[output truncated: showed {end} of {} bytes — narrow the query or read a specific range]",
+        s.len()
+    )
+}
+
 /// Drives one or more turns against a model + tools.
 pub struct Agent {
     client: Arc<dyn LlmClient>,
@@ -129,19 +150,16 @@ impl Agent {
                     .unwrap_or(serde_json::Value::Null);
 
                 let output = self.registry.run(&call.name, args, &self.tool_ctx).await;
+                let content = cap_tool_output(output.content);
 
                 self.bus.emit(Event::ToolResult {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     ok: !output.is_error,
-                    output: output.content.clone(),
+                    output: content.clone(),
                 });
 
-                session.append_message(Message::tool_result(
-                    &call.id,
-                    &call.name,
-                    output.content,
-                ))?;
+                session.append_message(Message::tool_result(&call.id, &call.name, content))?;
             }
         }
 
