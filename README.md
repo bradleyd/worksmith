@@ -66,9 +66,10 @@ and the model's **thinking** — with a footer showing the model, context %, and
 token counts.
 
 Keys: `Enter` send · `Esc` abort a running turn (or clear input) · `Ctrl+C`
-quit · `Ctrl+O` collapse/expand tool output · `PgUp`/`PgDn` scroll. Commands:
-`/new` `/compact` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to
-include a file. (Model cycling is a planned follow-up.)
+quit · `Ctrl+O` expand/collapse long tool output · scroll with the mouse wheel,
+`PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `↑`/`↓`, `Home`/`End`. Commands: `/new`
+`/compact` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to include a
+file. (Model cycling, vim keybindings, and themes are planned follow-ups.)
 
 ### Plain REPL commands (`--plain`)
 

@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as CEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as CEvent, EventStream, KeyCode, KeyEvent,
+    KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -93,6 +96,20 @@ impl App {
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
         self.items.push(Item { kind, text: text.into() });
+    }
+
+    /// Scroll toward older content.
+    fn scroll_up(&mut self, n: u16) {
+        self.follow = false;
+        self.scroll_up = self.scroll_up.saturating_add(n);
+    }
+
+    /// Scroll toward the newest content; re-enable follow at the bottom.
+    fn scroll_down(&mut self, n: u16) {
+        self.scroll_up = self.scroll_up.saturating_sub(n);
+        if self.scroll_up == 0 {
+            self.follow = true;
+        }
     }
 
     fn apply_event(&mut self, ev: Event) {
@@ -184,13 +201,13 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 fn setup_terminal() -> Result<Term> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen).context("entering alternate screen")?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture).context("entering alternate screen")?;
     Terminal::new(CrosstermBackend::new(out)).context("creating terminal")
 }
 
 fn restore_terminal(terminal: &mut Term) -> Result<()> {
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
     terminal.show_cursor().ok();
     Ok(())
 }
@@ -232,6 +249,11 @@ async fn run_loop(
                             Flow::Continue => {}
                         }
                     }
+                    Some(Ok(CEvent::Mouse(m))) => match m.kind {
+                        MouseEventKind::ScrollUp => app.scroll_up(3),
+                        MouseEventKind::ScrollDown => app.scroll_down(3),
+                        _ => {}
+                    },
                     Some(Ok(_)) => {} // resize etc — redraw next loop
                     Some(Err(_)) | None => break,
                 }
@@ -306,15 +328,20 @@ async fn handle_key(
                 app.input.clear();
             }
         }
-        KeyCode::PageUp => {
+        KeyCode::PageUp => app.scroll_up(10),
+        KeyCode::PageDown => app.scroll_down(10),
+        // Ctrl+U / Ctrl+D: half-page scroll (also friendlier on Mac keyboards).
+        KeyCode::Char('u') if ctrl => app.scroll_up(10),
+        KeyCode::Char('d') if ctrl => app.scroll_down(10),
+        KeyCode::Up => app.scroll_up(3),
+        KeyCode::Down => app.scroll_down(3),
+        KeyCode::Home => {
             app.follow = false;
-            app.scroll_up = app.scroll_up.saturating_add(10);
+            app.scroll_up = u16::MAX; // clamped to the top when rendering
         }
-        KeyCode::PageDown => {
-            app.scroll_up = app.scroll_up.saturating_sub(10);
-            if app.scroll_up == 0 {
-                app.follow = true;
-            }
+        KeyCode::End => {
+            app.scroll_up = 0;
+            app.follow = true;
         }
         KeyCode::Backspace => {
             app.input.pop();

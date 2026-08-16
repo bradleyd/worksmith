@@ -498,6 +498,14 @@ it's the surface open-source contributors build against.
   window (the foreground conversation) plus additional tabs for workers/agents
   activity (§7), `/tree`, etc. Tab-switching keys (vim-like). Depends on the
   agent/worker milestones landing first — see M8.
+- **Scrolling.** Mouse wheel + PageUp/Down + Ctrl+U/D (half-page) + Up/Down +
+  Home/End, with follow-tail on new output. (Shipped in M2.)
+- **Vim keybindings (later).** A vim mode for navigation/scrolling (`j/k`,
+  `gg/G`, `Ctrl+U/D`, counts) and eventually modal editing in the composer.
+  M8-era polish alongside the tabbed layout.
+- **Themes (later).** Selectable color themes (e.g. a `[theme]` config section
+  or `/theme`), plus respecting light/dark terminals. The four-channel palette
+  (user/assistant/tool/thinking) should be theme-driven rather than hard-coded.
 
 ## 10. Milestones
 
