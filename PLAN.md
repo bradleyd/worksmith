@@ -1,8 +1,10 @@
 # Plan: Worksmith — Minimal Rust Coding Agent CLI
 
-Worksmith is a pi-style terminal coding harness in Rust. Minimal core, aggressive
-extensibility, plus first-class document tools (.docx, PDF) that pi can't
-easily offer from TypeScript.
+Worksmith is a pi-style terminal coding harness in Rust. Its bet is on the
+**harness** — the guidance layer that keeps weaker/cheaper models on task and
+drives them to a validation (see §0). Minimal core, aggressive extensibility.
+It also ships first-class document tools (.docx, PDF) that pi can't easily offer
+from TypeScript — a useful capability, but not the differentiator.
 
 ## 0. Thesis (the differentiator)
 
@@ -178,7 +180,12 @@ hand-edited.
 5. Optional: `grep`, `find`, `ls` — pi ships these; cheap to add, models use
    them a lot. Include.
 
-## 5. Document tools (the differentiator)
+## 5. Document tools (a capability, not the moat)
+
+A genuinely useful workflow advantage — handling .docx/PDF well is something pi
+can't easily do from TypeScript — but the differentiator is the guidance layer
+(§0), not these wrappers. Anyone could shell out to pdftotext/pandoc; almost
+no one does the validation-driven, self-correcting loop.
 
 **Not Rust crates.** Document handling shells out to well-proven CLI tools.
 The agent harness is a Rust binary; docx/pdf work is delegated to the
@@ -506,6 +513,10 @@ it's the surface open-source contributors build against.
 - **Themes (later).** Selectable color themes (e.g. a `[theme]` config section
   or `/theme`), plus respecting light/dark terminals. The four-channel palette
   (user/assistant/tool/thinking) should be theme-driven rather than hard-coded.
+- **Command & path autocomplete (later).** In the composer: complete `/`
+  slash-commands (with a popup list + descriptions) and `@path` file references
+  (fuzzy, tab to accept). Steal the behavior from `reference/gemini-cli`'s
+  @mention/shell completion and `reference/pi`'s `fuzzy.ts`.
 
 ## 10. Milestones
 
@@ -528,8 +539,9 @@ re-plan, bounded retries via the agent-line dependency. This is the thesis
 editor pieces first; the editor feel (undo, kill ring, paste, @-refs) is
 where terminal CLIs live or die.
 
-**M3 — Document tools GA**: full §5 surface + skill file. This is where the
-project beats pi for your workflow.
+**M3 — Document tools GA**: full §5 surface + skill file. A high-value
+capability for real .docx/PDF workflows — but positioning stays clear: the
+differentiator is the guidance layer (§0), this is a useful add-on.
 
 **M4 — Extensibility**: MCP client in core (stdio), `rmcp` decision,
 plugin JSON-RPC protocol, `worksmith install/list`, tier-2 skill distribution,
