@@ -53,3 +53,18 @@ Keep `validate` dependency-light (bash/grep/python3) so tasks run anywhere.
 - **`guided` sees the check** — that's the point (it validates against it), but
   don't add tasks where the goal text leaks the exact answer.
 - This measures *task success*, not code quality.
+
+## Findings so far
+
+**2026-08, qwen3.8-27b (OpenRouter), 7 tasks ×3, raw vs `--until` guided:**
+raw 21/21, guided effectively 21/21 (the one guided loss was a since-fixed
+truncation bug), guided ~+18% tokens. **No pass-rate gain.** Even the docx
+XML-surgery task passed raw 3/3 (the model self-looped 7–12 tool calls).
+
+Interpretation: every task had a runnable check the model self-invokes via
+`bash`, so the validation loop only forces what a capable model already does.
+The differentiator ("force a check") adds nothing to a model that self-checks
+and isn't weak enough to fail. Its value is expected to show up with genuinely
+weak models, or at the **sub-worker/supervisor layer (M6/M7)** — a foreman
+keeping several weaker workers on task — not in the single-agent loop. Revisit
+these evals against a small tool-capable model, and again once workers land.
