@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use worksmith::agent::{Agent, TurnOutcome};
 use worksmith::event::EventBus;
-use worksmith::llm::{ChatRequest, Completion, LlmClient, StreamEvent, ToolCall};
+use worksmith::llm::{ChatRequest, Completion, LlmClient, Message, StreamEvent, ToolCall};
 use worksmith::session::Session;
 use worksmith::tools::{ToolContext, ToolRegistry};
 use worksmith::validation::CommandValidator;
@@ -65,6 +65,8 @@ fn build_agent(client: MockClient, cwd: &std::path::Path, stuck_threshold: u32) 
         20,              // max_steps
         3,               // max_retries
         stuck_threshold, // stuck_threshold
+        1_000_000,       // context_limit (high: no compaction in these tests)
+        6,               // keep_recent_turns
         ToolContext {
             cwd: cwd.to_path_buf(),
             session_id: "test".into(),
@@ -156,6 +158,52 @@ async fn repeated_identical_calls_escalate_to_stuck() {
         .unwrap();
 
     assert!(matches!(result.outcome, TurnOutcome::Stuck(_)), "outcome: {:?}", result.outcome);
+}
+
+#[tokio::test]
+async fn compaction_summarizes_old_turns_when_over_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Pre-fill with several bulky turns so the estimate exceeds a tiny limit.
+    for _ in 0..3 {
+        session.append_message(Message::user("x".repeat(300))).unwrap();
+        session.append_message(Message::assistant(Some("y".repeat(300)), vec![])).unwrap();
+    }
+
+    // First stream call = the summarization pass; second = the actual turn.
+    let client = MockClient::new(vec![done("SUMMARY: earlier work"), done("final answer")]);
+    let agent = Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,   // max_steps
+        3,    // max_retries
+        3,    // stuck_threshold
+        200,  // context_limit (tiny → triggers compaction)
+        1,    // keep_recent_turns
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+        },
+    );
+
+    let result = agent
+        .run_turn(&mut session, "new question", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(result.text, "final answer");
+    // History collapsed to: [summary, "new question", assistant("final answer")].
+    assert_eq!(session.messages().len(), 3, "should have compacted old turns");
+    assert!(
+        session.messages()[0].content.as_deref().unwrap_or("").starts_with("[Summary"),
+        "first message should be the summary"
+    );
 }
 
 #[tokio::test]

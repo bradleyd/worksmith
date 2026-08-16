@@ -23,6 +23,8 @@ pub enum Event {
     Usage { prompt_tokens: u32, completion_tokens: u32, total_tokens: u32 },
     /// The supervisor/loop nudged the model back on track (stuck detection).
     Nudge { reason: String },
+    /// Old history was summarized to stay under the context limit.
+    Compaction { messages_before: usize, messages_after: usize },
     /// Result of running the task's validation check.
     Validation { ok: bool, detail: String },
     Error { message: String },

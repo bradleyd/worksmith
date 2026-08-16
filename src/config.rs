@@ -48,6 +48,10 @@ pub struct AgentConfig {
     pub stuck_threshold: Option<u32>,
     /// Default validation command (`--until` overrides per-run).
     pub validate: Option<String>,
+    /// Approximate context window (tokens); compaction triggers at 75% of it.
+    pub context_limit: Option<usize>,
+    /// How many recent user turns to keep verbatim when compacting.
+    pub keep_recent_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -117,6 +121,14 @@ impl Config {
 
     pub fn validate_command(&self) -> Option<&str> {
         self.agent.validate.as_deref()
+    }
+
+    pub fn context_limit(&self) -> usize {
+        self.agent.context_limit.unwrap_or(128_000)
+    }
+
+    pub fn keep_recent_turns(&self) -> usize {
+        self.agent.keep_recent_turns.unwrap_or(6)
     }
 
     pub fn bash_timeout_secs(&self) -> u64 {

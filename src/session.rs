@@ -166,6 +166,16 @@ impl Session {
         &self.path
     }
 
+    /// Replace the in-memory message history (used by compaction). The JSONL
+    /// file keeps the full transcript — only the working context shrinks. A
+    /// `compaction` marker is logged for traceability.
+    pub fn replace_messages(&mut self, messages: Vec<Message>) -> Result<()> {
+        let count = messages.len();
+        self.write_entry("compaction", serde_json::json!({ "kept_messages": count }))?;
+        self.messages = messages;
+        Ok(())
+    }
+
     /// Append a message to both the in-memory history and the JSONL file.
     pub fn append_message(&mut self, msg: Message) -> Result<()> {
         let data = serde_json::to_value(&msg).context("serializing message")?;

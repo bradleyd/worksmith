@@ -128,6 +128,8 @@ async fn run(args: Args) -> Result<()> {
         config.max_steps(),
         config.max_retries(),
         config.stuck_threshold(),
+        config.context_limit(),
+        config.keep_recent_turns(),
         tool_ctx,
     );
 
@@ -256,6 +258,15 @@ async fn repl(
         // Bare `exit`/`quit` also leave the REPL (common muscle memory).
         if matches!(trimmed, "exit" | "quit") {
             break;
+        }
+
+        // `/compact` forces a summarization pass now.
+        if trimmed == "/compact" {
+            match agent.compact(session).await {
+                Ok(()) => println!("(compacted)"),
+                Err(e) => eprintln!("compaction error: {e:#}"),
+            }
+            continue;
         }
 
         // `/validate <cmd>` sets the success check; `/validate off` clears it.
@@ -524,6 +535,12 @@ fn render_activity(ev: &Event, print_mode: bool) {
         }
         Event::Nudge { reason } => {
             let line = format!("\x1b[33m↻ {reason}\x1b[0m");
+            emit_line(&line, print_mode);
+        }
+        Event::Compaction { messages_before, messages_after } => {
+            let line = format!(
+                "\x1b[2m⟲ compacted context: {messages_before} → {messages_after} messages\x1b[0m"
+            );
             emit_line(&line, print_mode);
         }
         Event::Validation { ok, detail } => {

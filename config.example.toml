@@ -29,7 +29,12 @@ api-key-env = "OPENROUTER_API_KEY"
 
 # --- Agent -----------------------------------------------------------------
 [agent]
-max-steps = 50            # max model<->tool iterations per turn
+max-steps = 50              # max model<->tool iterations per turn
+max-retries = 3             # validation re-plan attempts before giving up
+stuck-threshold = 3         # identical repeated tool calls before a nudge
+# validate = "cargo test"   # default success check (--until overrides per-run)
+context-limit = 128000      # approx model context (tokens); compact at 75%
+keep-recent-turns = 6       # turns kept verbatim when compacting
 
 [tools]
 bash-timeout-secs = 120

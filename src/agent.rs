@@ -81,6 +81,8 @@ pub struct Agent {
     max_steps: usize,
     max_retries: usize,
     stuck_threshold: u32,
+    context_limit: usize,
+    keep_recent_turns: usize,
     tool_ctx: ToolContext,
 }
 
@@ -96,6 +98,8 @@ impl Agent {
         max_steps: usize,
         max_retries: usize,
         stuck_threshold: u32,
+        context_limit: usize,
+        keep_recent_turns: usize,
         tool_ctx: ToolContext,
     ) -> Self {
         Self {
@@ -108,6 +112,8 @@ impl Agent {
             max_steps,
             max_retries,
             stuck_threshold,
+            context_limit,
+            keep_recent_turns,
             tool_ctx,
         }
     }
@@ -190,6 +196,14 @@ impl Agent {
         for _step in 0..self.max_steps {
             if cancel.is_cancelled() {
                 return Ok(IdleReason::Aborted);
+            }
+
+            // Compact if the working history is approaching the context limit.
+            if estimate_tokens(session.messages()) > self.compaction_trigger()
+                && let Err(e) = self.compact(session).await
+            {
+                // Compaction is best-effort; a failure shouldn't kill the turn.
+                self.bus.emit(Event::Error { message: format!("compaction failed: {e}") });
             }
 
             let mut messages = Vec::with_capacity(session.messages().len() + 1);
@@ -303,6 +317,144 @@ impl Agent {
         }
 
         Ok(IdleReason::MaxSteps)
+    }
+
+    fn compaction_trigger(&self) -> usize {
+        // Compact at 75% of the context limit, leaving headroom for the reply.
+        self.context_limit * 3 / 4
+    }
+
+    /// Summarize old turns into a single note and keep the recent turns
+    /// verbatim, shrinking the working context. The full transcript stays in the
+    /// session JSONL. Public so `/compact` can force it.
+    pub async fn compact(&self, session: &mut Session) -> Result<()> {
+        // Gather what we need, then drop the borrow before the await.
+        let (before, recent, transcript) = {
+            let msgs = session.messages();
+            let split = compaction_split(msgs, self.keep_recent_turns);
+            if split == 0 {
+                return Ok(()); // nothing old enough to summarize
+            }
+            (msgs.len(), msgs[split..].to_vec(), render_transcript(&msgs[..split]))
+        };
+
+        let sys = "You are compacting a coding-agent conversation. Summarize the \
+                   exchange below into concise notes a future agent needs to \
+                   continue: decisions made, files created or edited, key facts \
+                   learned, and any unfinished work. Preserve specifics (paths, \
+                   names, values). Omit chatter.";
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![Message::system(sys), Message::user(transcript)],
+            tools: vec![],
+            temperature: Some(0.2),
+            max_tokens: Some(1024),
+        };
+
+        // Drain the stream sink; we only want the final summary text.
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let completion = self.client.stream(req, tx, CancellationToken::new()).await?;
+        let _ = drain.await;
+
+        let summary = completion.content.unwrap_or_default();
+        if summary.trim().is_empty() {
+            return Ok(()); // don't discard history for an empty summary
+        }
+
+        let mut new_msgs =
+            Vec::with_capacity(recent.len() + 1);
+        new_msgs.push(Message::user(format!("[Summary of earlier conversation]\n{summary}")));
+        new_msgs.extend(recent);
+        let after = new_msgs.len();
+
+        session.replace_messages(new_msgs)?;
+        self.bus.emit(Event::Compaction { messages_before: before, messages_after: after });
+        Ok(())
+    }
+}
+
+/// Rough token estimate (~4 chars/token) over messages: content + tool-call
+/// arguments. Good enough to decide when to compact.
+fn estimate_tokens(messages: &[Message]) -> usize {
+    let mut chars = 0usize;
+    for m in messages {
+        if let Some(c) = &m.content {
+            chars += c.len();
+        }
+        for tc in &m.tool_calls {
+            chars += tc.name.len() + tc.arguments.len();
+        }
+    }
+    chars / 4
+}
+
+/// Choose a split index so that everything from it onward is the last
+/// `keep_turns` user-turns (a turn starts at a `User` message). Returns 0 when
+/// there aren't more turns than we keep (nothing to compact). Splitting on turn
+/// boundaries keeps assistant/tool-call/tool-result groups intact.
+fn compaction_split(messages: &[Message], keep_turns: usize) -> usize {
+    if keep_turns == 0 {
+        return 0;
+    }
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m.role, crate::llm::Role::User))
+        .map(|(i, _)| i)
+        .collect();
+    if user_indices.len() <= keep_turns {
+        return 0;
+    }
+    user_indices[user_indices.len() - keep_turns]
+}
+
+/// Render messages as a plain transcript for the summarizer.
+fn render_transcript(messages: &[Message]) -> String {
+    use crate::llm::Role;
+    let mut out = String::new();
+    for m in messages {
+        let role = match m.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        if let Some(c) = &m.content
+            && !c.is_empty()
+        {
+            out.push_str(&format!("[{role}] {c}\n"));
+        }
+        for tc in &m.tool_calls {
+            out.push_str(&format!("[{role} calls {}] {}\n", tc.name, tc.arguments));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::Message;
+
+    #[test]
+    fn split_keeps_recent_turns_on_user_boundaries() {
+        // 3 turns: user/assistant pairs.
+        let msgs = vec![
+            Message::user("t1"),
+            Message::assistant(Some("a1".into()), vec![]),
+            Message::user("t2"),
+            Message::assistant(Some("a2".into()), vec![]),
+            Message::user("t3"),
+            Message::assistant(Some("a3".into()), vec![]),
+        ];
+        // Keep last 1 turn → split at index of the 3rd user message (index 4).
+        assert_eq!(compaction_split(&msgs, 1), 4);
+        // Keep 2 turns → split at 2nd user message (index 2).
+        assert_eq!(compaction_split(&msgs, 2), 2);
+        // Keep >= number of turns → nothing to compact.
+        assert_eq!(compaction_split(&msgs, 3), 0);
+        assert_eq!(compaction_split(&msgs, 9), 0);
     }
 }
 
