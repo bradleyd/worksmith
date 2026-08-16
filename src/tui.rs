@@ -56,6 +56,17 @@ struct Item {
 /// How many lines of a long tool result to show before capping (Ctrl+O expands).
 const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 
+/// Slash commands offered by Tab-completion.
+const COMMANDS: &[&str] =
+    &["/help", "/new", "/compact", "/memory", "/validate", "/quit"];
+
+/// Active Tab-completion state (candidates for the current token).
+struct Completion {
+    candidates: Vec<String>,
+    idx: usize,
+    token_start: usize,
+}
+
 struct App {
     items: Vec<Item>,
     input: String,
@@ -77,6 +88,8 @@ struct App {
     cached_rows: Vec<Line<'static>>,
     cache_width: u16,
     dirty: bool,
+    // Tab-completion state for the composer.
+    completion: Option<Completion>,
 }
 
 impl App {
@@ -99,6 +112,7 @@ impl App {
             cached_rows: Vec::new(),
             cache_width: 0,
             dirty: true,
+            completion: None,
         }
     }
 
@@ -343,8 +357,14 @@ async fn handle_key(
 ) -> Result<Flow> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+    // Any key other than Tab ends an in-progress completion cycle.
+    if key.code != KeyCode::Tab {
+        app.completion = None;
+    }
+
     match key.code {
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
+        KeyCode::Tab => complete(app, cwd),
         KeyCode::Char('o') if ctrl => {
             app.collapse_tools = !app.collapse_tools;
             app.dirty = true;
@@ -511,6 +531,100 @@ async fn handle_command(
         }
     }
     Ok(true)
+}
+
+/// Tab-complete the current token: `/command` in command position, or `@path`
+/// file references anywhere. Repeated Tab cycles the candidates.
+fn complete(app: &mut App, cwd: &Path) {
+    if let Some(c) = &mut app.completion {
+        if c.candidates.len() > 1 {
+            c.idx = (c.idx + 1) % c.candidates.len();
+            app.input.truncate(c.token_start);
+            app.input.push_str(&c.candidates[c.idx]);
+            app.status = completion_status(c);
+        }
+        return;
+    }
+
+    let Some((start, candidates)) = compute_completions(&app.input, cwd) else {
+        return;
+    };
+    app.input.truncate(start);
+    app.input.push_str(&candidates[0]);
+    let compl = Completion { candidates, idx: 0, token_start: start };
+    app.status = completion_status(&compl);
+    app.completion = Some(compl);
+}
+
+fn completion_status(c: &Completion) -> String {
+    if c.candidates.len() == 1 {
+        return String::new();
+    }
+    let preview: Vec<String> = c
+        .candidates
+        .iter()
+        .take(8)
+        .map(|s| s.trim().trim_start_matches('@').to_string())
+        .collect();
+    format!("⇥ {}/{}  {}", c.idx + 1, c.candidates.len(), preview.join("  "))
+}
+
+/// Compute completion candidates for the current (last) token. Returns the byte
+/// offset where the token starts and the replacement strings.
+fn compute_completions(input: &str, cwd: &Path) -> Option<(usize, Vec<String>)> {
+    let token_start = input.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+    let token = &input[token_start..];
+
+    if let Some(rest) = token.strip_prefix('/') {
+        // Only in command position (first token).
+        if token_start != 0 {
+            return None;
+        }
+        let cands: Vec<String> = COMMANDS
+            .iter()
+            .filter(|c| c[1..].starts_with(rest))
+            .map(|c| format!("{c} "))
+            .collect();
+        (!cands.is_empty()).then_some((token_start, cands))
+    } else if let Some(rest) = token.strip_prefix('@') {
+        let cands: Vec<String> =
+            complete_path(rest, cwd).into_iter().map(|p| format!("@{p}")).collect();
+        (!cands.is_empty()).then_some((token_start, cands))
+    } else {
+        None
+    }
+}
+
+/// Prefix-complete a relative file path against the filesystem. Directories get
+/// a trailing `/`. Hidden entries are shown only when the prefix starts with `.`.
+fn complete_path(prefix: &str, cwd: &Path) -> Vec<String> {
+    let (dir_rel, file_start) = match prefix.rfind('/') {
+        Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+        None => ("", prefix),
+    };
+    let dir = cwd.join(dir_rel);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(file_start) {
+            continue;
+        }
+        if name.starts_with('.') && !file_start.starts_with('.') {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let mut p = format!("{dir_rel}{name}");
+        if is_dir {
+            p.push('/');
+        }
+        out.push(p);
+    }
+    out.sort();
+    out.truncate(50);
+    out
 }
 
 /// Replace `@path` tokens by appending the referenced files' contents.
@@ -684,6 +798,36 @@ mod tests {
         a.apply_event(Event::Usage { prompt_tokens: 600, completion_tokens: 30, total_tokens: 630 });
         assert_eq!(a.last_prompt_tokens, 600);
         assert_eq!(a.total_out_tokens, 50);
+    }
+
+    #[test]
+    fn completes_slash_commands() {
+        let (start, c) = compute_completions("/me", Path::new(".")).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(c, vec!["/memory ".to_string()]);
+
+        let (_, all) = compute_completions("/", Path::new(".")).unwrap();
+        assert!(all.len() >= 5);
+
+        // Not in command position → no command completion.
+        assert!(compute_completions("hi /me", Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn completes_at_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("mod.rs"), "").unwrap();
+
+        let (start, c) = compute_completions("@m", dir.path()).unwrap();
+        assert_eq!(start, 0);
+        assert!(c.contains(&"@main.rs".to_string()), "{c:?}");
+        assert!(c.contains(&"@mod.rs".to_string()), "{c:?}");
+
+        // Directories get a trailing slash.
+        let (_, d) = compute_completions("@s", dir.path()).unwrap();
+        assert!(d.contains(&"@src/".to_string()), "{d:?}");
     }
 
     #[test]
