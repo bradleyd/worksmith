@@ -72,6 +72,10 @@ struct App {
     // index of the in-progress assistant / thinking item, for delta appends
     cur_assistant: Option<usize>,
     cur_thinking: Option<usize>,
+    // Cached wrapped rows so scrolling doesn't rebuild the whole transcript.
+    cached_rows: Vec<Line<'static>>,
+    cache_width: u16,
+    dirty: bool,
 }
 
 impl App {
@@ -91,11 +95,24 @@ impl App {
             status: "/help for keys and commands".into(),
             cur_assistant: None,
             cur_thinking: None,
+            cached_rows: Vec::new(),
+            cache_width: 0,
+            dirty: true,
         }
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
         self.items.push(Item { kind, text: text.into() });
+        self.dirty = true;
+    }
+
+    /// Rebuild the wrapped-row cache only when content or width changed.
+    fn ensure_rows(&mut self, width: u16) {
+        if self.dirty || self.cache_width != width {
+            self.cached_rows = build_rows(&self.items, self.collapse_tools, width);
+            self.cache_width = width;
+            self.dirty = false;
+        }
     }
 
     /// Scroll toward older content.
@@ -119,20 +136,26 @@ impl App {
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
-            Event::Thinking { text } => match self.cur_thinking {
-                Some(i) => self.items[i].text.push_str(&text),
-                None => {
-                    self.items.push(Item { kind: Kind::Thinking, text });
-                    self.cur_thinking = Some(self.items.len() - 1);
+            Event::Thinking { text } => {
+                match self.cur_thinking {
+                    Some(i) => self.items[i].text.push_str(&text),
+                    None => {
+                        self.items.push(Item { kind: Kind::Thinking, text });
+                        self.cur_thinking = Some(self.items.len() - 1);
+                    }
                 }
-            },
-            Event::MessageDelta { text } => match self.cur_assistant {
-                Some(i) => self.items[i].text.push_str(&text),
-                None => {
-                    self.items.push(Item { kind: Kind::Assistant, text });
-                    self.cur_assistant = Some(self.items.len() - 1);
+                self.dirty = true;
+            }
+            Event::MessageDelta { text } => {
+                match self.cur_assistant {
+                    Some(i) => self.items[i].text.push_str(&text),
+                    None => {
+                        self.items.push(Item { kind: Kind::Assistant, text });
+                        self.cur_assistant = Some(self.items.len() - 1);
+                    }
                 }
-            },
+                self.dirty = true;
+            }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
             Event::ToolCall { name, arguments, .. } => {
                 self.push(Kind::Tool, format!("{name} {arguments}"));
@@ -236,6 +259,9 @@ async fn run_loop(
     let mut cancel = CancellationToken::new();
 
     loop {
+        // Rebuild the wrapped-row cache only if content/width changed, then draw.
+        let width = terminal.size().map(|s| s.width).unwrap_or(80);
+        app.ensure_rows(width);
         terminal.draw(|f| ui(f, &app))?;
 
         tokio::select! {
@@ -315,6 +341,7 @@ async fn handle_key(
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
         KeyCode::Char('o') if ctrl => {
             app.collapse_tools = !app.collapse_tools;
+            app.dirty = true;
             app.status = format!("tool output {}", if app.collapse_tools { "collapsed" } else { "expanded" });
         }
         KeyCode::Char('p') if ctrl => {
@@ -422,6 +449,7 @@ async fn handle_command(
             app.items.clear();
             app.cur_assistant = None;
             app.cur_thinking = None;
+            app.dirty = true;
             app.push(Kind::Notice, format!("started new session {}", s.id));
         }
         "compact" => {
@@ -511,10 +539,9 @@ fn ui(f: &mut Frame, app: &App) {
 }
 
 fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
-    // Wrap everything to the exact width ourselves, then slice the tail. This is
-    // reliable (ratatui's own wrapped-line count is private and tabs would throw
-    // an estimate off) so the view always follows the newest content.
-    let rows = build_rows(app, area.width);
+    // Rows are pre-wrapped and cached (see App::ensure_rows); here we just slice
+    // the tail (minus any manual scroll-up). Scrolling is therefore cheap.
+    let rows = &app.cached_rows;
     let h = area.height as usize;
     let total = rows.len();
     let up = (app.scroll_up as usize).min(total.saturating_sub(1));
@@ -528,11 +555,11 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
 
 /// Build the fully-wrapped, styled rows for the transcript (each row already
 /// fits `width`). Tabs are expanded so widths are predictable.
-fn build_rows(app: &App, width: u16) -> Vec<Line<'static>> {
+fn build_rows(items: &[Item], collapse_tools: bool, width: u16) -> Vec<Line<'static>> {
     let w = (width.max(12) as usize).saturating_sub(1);
     let mut rows: Vec<Line> = Vec::new();
 
-    for item in &app.items {
+    for item in items {
         let (style, label): (Style, &str) = match item.kind {
             Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
             Kind::Assistant => (Style::default().fg(Color::White), ""),
@@ -547,7 +574,7 @@ fn build_rows(app: &App, width: u16) -> Vec<Line<'static>> {
 
         // Show short tool results in full; cap long ones (Ctrl+O expands).
         let expanded = item.text.replace('\t', "    ");
-        let text = if item.kind == Kind::ToolResult && app.collapse_tools {
+        let text = if item.kind == Kind::ToolResult && collapse_tools {
             let lines: Vec<&str> = expanded.lines().collect();
             if lines.len() > TOOL_RESULT_PREVIEW_LINES {
                 let shown = lines[..TOOL_RESULT_PREVIEW_LINES].join("\n");
@@ -651,7 +678,7 @@ mod tests {
     fn build_rows_wraps_to_width_and_labels_channels() {
         let mut a = app();
         a.apply_event(Event::UserMessage { text: "hello world this is a long line".into() });
-        let rows = build_rows(&a, 16);
+        let rows = build_rows(&a.items, a.collapse_tools, 16);
         // Every row must fit the width (accounting for prefix + content spans).
         for row in &rows {
             let len: usize = row.spans.iter().map(|s| s.content.chars().count()).sum();
