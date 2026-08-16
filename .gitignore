@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+
+# worksmith project-local state (config is env-specific; db is binary).
+# config.example.toml at the repo root is the shared template.
+.worksmith/
+
+# reference clones are for local design study only
+/reference
+
+# env
+.env

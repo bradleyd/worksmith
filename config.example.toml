@@ -1,0 +1,35 @@
+# Worksmith configuration — copy to ~/.worksmith/config.toml (global) and/or
+# <project>/.worksmith/config.toml (project overrides global, field by field).
+
+# Default model as "provider/model" (or a bare model name if exactly one
+# provider is configured). Override per-run with --model.
+model = "vllm/Qwen/Qwen3-32B"
+temperature = 0.7
+max-tokens = 2048
+
+# --- Providers -------------------------------------------------------------
+# vLLM on RunPod (L40S). Start vLLM with tool-calling enabled, e.g.:
+#   vllm serve Qwen/Qwen3-32B \
+#     --enable-auto-tool-choice --tool-call-parser hermes
+[providers.vllm]
+type = "openai-compat"
+base-url = "https://<your-pod-id>-8000.proxy.runpod.net/v1"
+api-key-env = "VLLM_API_KEY"     # optional; omit if the endpoint needs no key
+
+# A local vLLM / llama.cpp / LM Studio server (no key needed):
+[providers.local]
+type = "openai-compat"
+base-url = "http://localhost:8000/v1"
+
+# OpenRouter (many hosted models behind one key):
+[providers.openrouter]
+type = "openai-compat"
+base-url = "https://openrouter.ai/api/v1"
+api-key-env = "OPENROUTER_API_KEY"
+
+# --- Agent -----------------------------------------------------------------
+[agent]
+max-steps = 50            # max model<->tool iterations per turn
+
+[tools]
+bash-timeout-secs = 120
