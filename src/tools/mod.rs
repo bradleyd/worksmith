@@ -2,6 +2,7 @@
 //! advertises a JSON Schema and returns a structured [`ToolOutput`].
 
 mod bash;
+mod doc;
 mod edit;
 mod read;
 mod search;
@@ -78,6 +79,7 @@ impl ToolRegistry {
         r.register(Box::new(search::GrepTool));
         r.register(Box::new(search::FindTool));
         r.register(Box::new(search::LsTool));
+        r.register(Box::new(doc::DocTool));
         r
     }
 

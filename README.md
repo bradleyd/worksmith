@@ -5,10 +5,11 @@ A minimal terminal coding-agent harness in Rust, built on the bet that the
 models on task and driving to a *validation*. See [`PLAN.md`](PLAN.md) and
 [`worksmith-memory-v1.md`](worksmith-memory-v1.md).
 
-This is **M1** (the core loop). Status: usable single-agent coding harness with
-streaming, model-driven tools, JSONL sessions, and SQLite memory. Validation
-loop, TUI polish, doc tools, MCP/plugins, and spawned workers are later
-milestones.
+Status: **M1–M3 done.** Usable single-agent coding harness with streaming,
+model-driven tools, JSONL sessions, and SQLite memory (M1); a validation-driven
+self-correcting loop, context compaction, and a four-channel ratatui TUI (M2);
+and document tools for PDF/DOCX (M3). MCP/plugins (M4), scoped-memory retrieval
+(M5), spawned workers (M6), and the supervisor (M7) are later milestones.
 
 ## What works in M1
 
@@ -16,6 +17,9 @@ milestones.
   (vLLM/Qwen, OpenRouter, RunPod, local).
 - **Built-in tools:** `read`, `write`, `edit` (exact unique-match, multi-edit,
   atomic), `bash` (timeout + `WORKSMITH_SESSION_ID`), `grep`, `find`, `ls`.
+- **Document tools:** `doc` (read/info/convert/extract/create) for PDF/DOCX/…
+  via pandoc, poppler, and LibreOffice — clean text/markdown extraction and
+  format conversion, with install hints when an engine is missing.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /
