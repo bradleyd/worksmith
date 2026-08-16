@@ -1,7 +1,7 @@
 //! Worksmith CLI: `--print` one-shot, `--mode json` event stream, and a minimal
 //! REPL. Full TUI is M2.
 
-use std::io::{Write, stderr, stdout};
+use std::io::{IsTerminal, Write, stderr, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,22 +12,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use worksmith::agent::Agent;
-use worksmith::config::{self, Config};
+use worksmith::config::Config;
 use worksmith::event::{Event, EventBus};
 use worksmith::llm::LlmClient;
 use worksmith::llm::openai::OpenAiCompatClient;
 use worksmith::memory::{MemoryStore, Scope};
+use worksmith::prompt::build_system_prompt;
 use worksmith::session::Session;
 use worksmith::tools::{ToolContext, ToolRegistry};
+use worksmith::tui::run_tui;
 use worksmith::validation::CommandValidator;
-
-const BASE_SYSTEM_PROMPT: &str = "\
-You are Worksmith, a terminal coding agent. You accomplish tasks by calling \
-tools (read, write, edit, bash, grep, find, ls) rather than by guessing. \
-Prefer reading files before editing them. Make minimal, correct changes and \
-verify your work (build/tests) when possible. Be concise in prose — the user \
-is in a terminal. When the task is complete, stop calling tools and give a \
-short summary.";
 
 #[derive(Parser, Debug)]
 #[command(name = "worksmith", version, about = "A minimal terminal coding-agent harness")]
@@ -61,10 +55,15 @@ struct Args {
     /// --until "cargo test".
     #[arg(long)]
     until: Option<String>,
+
+    /// Use the plain line-based REPL instead of the full-screen TUI.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputMode {
+    Tui,
     Repl,
     Print,
     Json,
@@ -108,8 +107,11 @@ async fn run(args: Args) -> Result<()> {
         OutputMode::Json
     } else if args.print {
         OutputMode::Print
-    } else {
+    } else if args.plain || !stdout().is_terminal() {
+        // The full-screen TUI needs a real terminal; fall back to the line REPL.
         OutputMode::Repl
+    } else {
+        OutputMode::Tui
     };
 
     let tool_ctx = ToolContext {
@@ -133,18 +135,34 @@ async fn run(args: Args) -> Result<()> {
         tool_ctx,
     );
 
-    let renderer = spawn_renderer(bus.subscribe(), mode);
-    bus.emit(Event::SessionStarted { id: session.id.clone() });
-
     // Validation command: --until overrides the configured default.
     let validate_cmd = args.until.clone().or_else(|| config.validate_command().map(String::from));
     let bash_timeout = Duration::from_secs(config.bash_timeout_secs());
+
+    // TUI owns its own rendering (it subscribes to the bus directly) and takes
+    // ownership of the agent/session, so handle it before wiring the renderer.
+    if mode == OutputMode::Tui {
+        return run_tui(
+            agent,
+            session,
+            bus,
+            cwd.clone(),
+            resolved.model.clone(),
+            validate_cmd,
+            bash_timeout,
+            config.context_limit(),
+        )
+        .await;
+    }
+
+    let renderer = spawn_renderer(bus.subscribe(), mode);
+    bus.emit(Event::SessionStarted { id: session.id.clone() });
 
     let one_shot = args.prompt.is_some() && matches!(mode, OutputMode::Print | OutputMode::Json);
 
     let outcome: Result<()> = if one_shot {
         let prompt = args.prompt.clone().unwrap();
-        let system = build_system_prompt(&cwd, &project_store(&cwd))?;
+        let system = build_system_prompt(&cwd, &project_store(&cwd));
         let cancel = CancellationToken::new();
         let validator = validate_cmd
             .as_ref()
@@ -195,21 +213,6 @@ fn project_store(cwd: &Path) -> MemoryStore {
         eprintln!("(memory unavailable: {e})");
         MemoryStore::open(None).expect("global memory")
     })
-}
-
-fn build_system_prompt(cwd: &Path, mem: &MemoryStore) -> Result<String> {
-    let mut s = String::from(BASE_SYSTEM_PROMPT);
-    let instructions = config::load_project_instructions(cwd);
-    if !instructions.trim().is_empty() {
-        s.push_str("\n\n");
-        s.push_str(&instructions);
-    }
-    let memory = mem.memory_section(20).unwrap_or_default();
-    if !memory.trim().is_empty() {
-        s.push_str("\n\n");
-        s.push_str(&memory);
-    }
-    Ok(s)
 }
 
 // ---- REPL -----------------------------------------------------------------
@@ -298,7 +301,7 @@ async fn repl(
         }
 
         let message = expand_file_mentions(trimmed, cwd);
-        let system = build_system_prompt(cwd, &mem)?;
+        let system = build_system_prompt(cwd, &mem);
         let validator = validate_cmd
             .as_ref()
             .map(|c| CommandValidator::new(c.clone(), cwd.to_path_buf(), bash_timeout));
@@ -498,6 +501,7 @@ fn render(ev: &Event, mode: OutputMode) {
         }
         OutputMode::Print => render_activity(ev, true),
         OutputMode::Repl => render_activity(ev, false),
+        OutputMode::Tui => {} // the TUI renders itself; this path is unused
     }
 }
 

@@ -33,8 +33,11 @@ $EDITOR ~/.worksmith/config.toml     # set your vLLM/Qwen base-url
 # 2. Build
 cargo build --release
 
-# 3. Run — interactive REPL
+# 3. Run — full-screen TUI (default in a real terminal)
 worksmith
+
+# force the plain line REPL instead of the TUI
+worksmith --plain
 
 # one-shot, pipe-friendly
 worksmith --print "summarize src/main.rs"
@@ -55,7 +58,19 @@ directive and the model tries again (bounded by `agent.max-retries`). The loop
 also detects when the model repeats identical tool calls and nudges, then
 escalates. This is what keeps weaker models on task.
 
-### REPL commands
+### TUI
+
+The default interactive mode is a full-screen ratatui interface that renders
+four visually distinct channels — **you**, the **assistant**, **tool** activity,
+and the model's **thinking** — with a footer showing the model, context %, and
+token counts.
+
+Keys: `Enter` send · `Esc` abort a running turn (or clear input) · `Ctrl+C`
+quit · `Ctrl+O` collapse/expand tool output · `PgUp`/`PgDn` scroll. Commands:
+`/new` `/compact` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to
+include a file. (Model cycling is a planned follow-up.)
+
+### Plain REPL commands (`--plain`)
 
 ```
 /help                     show commands

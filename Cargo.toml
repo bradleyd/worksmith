@@ -31,9 +31,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 
-# cli / repl
+# cli / repl / tui
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 async-trait = "0.1"
 regex = "1"
 

@@ -8,6 +8,8 @@ pub mod config;
 pub mod event;
 pub mod llm;
 pub mod memory;
+pub mod prompt;
 pub mod session;
 pub mod tools;
+pub mod tui;
 pub mod validation;
