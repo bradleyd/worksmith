@@ -79,8 +79,9 @@ what changed.
 The composer is multi-line and paste-safe (bracketed paste drops a whole
 snippet in at the cursor instead of sending it line-by-line), with input history.
 
-Keys: `Enter` send · `Alt+Enter` newline · `↑`/`↓` input history · `←`/`→`/`Home`/`End`
-move cursor · `Ctrl+W` delete word · `Tab` autocomplete (`/command` and `@path`;
+Keys: `Enter` send · `Alt+Enter` newline · `Ctrl+G` edit in `$EDITOR` · `↑`/`↓`
+input history · `←`/`→`/`Home`/`End` move cursor · `Ctrl+W` delete word · `Tab`
+autocomplete (`/command` and `@path`;
 repeat to cycle) · `Esc` abort a running turn (or clear input) · `Ctrl+C` quit ·
 `Ctrl+O` expand/collapse long tool output & diffs · `Ctrl+T` show/hide thinking
 · scroll with the mouse wheel,

@@ -242,6 +242,13 @@ impl App {
         self.completion = None;
     }
 
+    fn set_input(&mut self, text: String) {
+        self.cursor = text.chars().count();
+        self.input = text;
+        self.history_idx = None;
+        self.completion = None;
+    }
+
     /// Take the composed input for submission, resetting the composer and
     /// recording history.
     fn take_input(&mut self) -> String {
@@ -443,8 +450,10 @@ async fn run_loop(
 
     let mut app = App::new(model, context_limit, validate_cmd);
     let mut bus_rx = bus.subscribe();
-    let mut events = EventStream::new();
+    // Option so we can drop the input reader while an external editor owns the tty.
+    let mut events: Option<EventStream> = Some(EventStream::new());
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
+    let mut pending_edit = false;
 
     // Startup header.
     app.push(Kind::Notice, format!("worksmith · {}", app.model));
@@ -471,13 +480,14 @@ async fn run_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = events.next() => {
+            maybe_ev = events.as_mut().unwrap().next(), if events.is_some() => {
                 match maybe_ev {
                     Some(Ok(CEvent::Key(key))) => {
                         match handle_key(key, &mut app, &agent, &session, &mem, &cwd,
                                          bash_timeout, &mut turn, &mut cancel).await? {
                             Flow::Quit => break,
                             Flow::Continue => {}
+                            Flow::ExternalEdit => pending_edit = true,
                         }
                     }
                     Some(Ok(CEvent::Mouse(m))) => match m.kind {
@@ -524,6 +534,22 @@ async fn run_loop(
                 }
             }
         }
+
+        // Ctrl+G: suspend the TUI, edit the composer in $EDITOR, resume.
+        if pending_edit {
+            pending_edit = false;
+            restore_terminal(terminal).ok();
+            drop(events.take()); // stop the input reader so the editor owns the tty
+            let edited = external_edit(&app.input);
+            *terminal = setup_terminal()?;
+            events = Some(EventStream::new());
+            terminal.clear().ok();
+            app.dirty = true;
+            if let Some(text) = edited {
+                app.set_input(text);
+                app.status = "loaded from editor".into();
+            }
+        }
     }
 
     // If a turn is still running on quit, cancel and let it wind down.
@@ -537,6 +563,8 @@ async fn run_loop(
 enum Flow {
     Continue,
     Quit,
+    /// Suspend the TUI and open the composer in `$EDITOR`.
+    ExternalEdit,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -574,6 +602,7 @@ async fn handle_key(
         KeyCode::Char('p') if ctrl => {
             app.status = "model cycling: configure multiple models (coming soon)".into();
         }
+        KeyCode::Char('g') if ctrl => return Ok(Flow::ExternalEdit),
         KeyCode::Esc => {
             if app.running {
                 cancel.cancel();
@@ -906,6 +935,33 @@ fn complete_path(prefix: &str, cwd: &Path) -> Vec<String> {
     out
 }
 
+/// Open `current` in `$VISUAL`/`$EDITOR` (fallback `vi`); return the edited text
+/// on success. The TUI must already be suspended (raw mode off) when called.
+fn external_edit(current: &str) -> Option<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    external_edit_with(&editor, current)
+}
+
+fn external_edit_with(editor: &str, current: &str) -> Option<String> {
+    let path = std::env::temp_dir().join(format!("worksmith-compose-{}.md", std::process::id()));
+    std::fs::write(&path, current).ok()?;
+
+    // `EDITOR` may include args (e.g. "code -w"); the file path goes last.
+    let mut parts = editor.split_whitespace();
+    let prog = parts.next()?;
+    let status = std::process::Command::new(prog).args(parts).arg(&path).status();
+
+    let result = match status {
+        Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
+        _ => None,
+    };
+    let _ = std::fs::remove_file(&path);
+    // Drop the trailing newline editors add, keep internal ones.
+    result.map(|s| s.strip_suffix('\n').map(str::to_string).unwrap_or(s))
+}
+
 /// Replace `@path` tokens by appending the referenced files' contents.
 fn expand_file_mentions(input: &str, cwd: &Path) -> String {
     let mut appended = String::new();
@@ -1162,6 +1218,21 @@ mod tests {
         assert_eq!(a.cursor, 0);
         a.move_end();
         assert_eq!(a.cursor, a.char_len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_edit_runs_editor_and_reads_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("ed.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf 'edited by editor' > \"$1\"\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let out = external_edit_with(script.to_str().unwrap(), "original text");
+        assert_eq!(out.as_deref(), Some("edited by editor"));
     }
 
     #[test]
