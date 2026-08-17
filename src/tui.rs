@@ -971,24 +971,51 @@ fn compute_completions(input: &str, cwd: &Path) -> Option<(usize, Vec<String>)> 
     let token_start = input.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
     let token = &input[token_start..];
 
-    if let Some(rest) = token.strip_prefix('/') {
-        // Only in command position (first token).
-        if token_start != 0 {
-            return None;
-        }
+    // @path references anywhere.
+    if let Some(rest) = token.strip_prefix('@') {
+        let cands: Vec<String> =
+            complete_path(rest, cwd).into_iter().map(|p| format!("@{p}")).collect();
+        return (!cands.is_empty()).then_some((token_start, cands));
+    }
+
+    // /command in the first-token position.
+    if token_start == 0 {
+        let rest = token.strip_prefix('/')?;
         let cands: Vec<String> = COMMANDS
             .iter()
             .filter(|c| c[1..].starts_with(rest))
             .map(|c| format!("{c} "))
             .collect();
-        (!cands.is_empty()).then_some((token_start, cands))
-    } else if let Some(rest) = token.strip_prefix('@') {
-        let cands: Vec<String> =
-            complete_path(rest, cwd).into_iter().map(|p| format!("@{p}")).collect();
-        (!cands.is_empty()).then_some((token_start, cands))
-    } else {
-        None
+        return (!cands.is_empty()).then_some((token_start, cands));
     }
+
+    // Subcommand / argument completion for a /command.
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    let first = *tokens.first()?;
+    if !first.starts_with('/') {
+        return None;
+    }
+    let prev = input[..token_start].split_whitespace().count();
+    let cands = arg_completions(first, prev, token, &tokens)?;
+    (!cands.is_empty()).then_some((token_start, cands))
+}
+
+/// Complete a subcommand or argument for a `/command`.
+fn arg_completions(first: &str, prev: usize, token: &str, tokens: &[&str]) -> Option<Vec<String>> {
+    let opts: &[&str] = match first.trim_start_matches('/') {
+        "agents" | "workers" if prev == 1 => &["list", "show", "kill"],
+        "validate" if prev == 1 => &["off"],
+        "memory" | "mem" => match prev {
+            1 => &["list", "global", "project", "show", "forget", "add"],
+            2 if tokens.get(1) == Some(&"add") => &["global", "project"],
+            3 if tokens.get(1) == Some(&"add") => {
+                &["decision", "constraint", "preference", "fact", "lesson"]
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(opts.iter().filter(|o| o.starts_with(token)).map(|o| format!("{o} ")).collect())
 }
 
 /// Prefix-complete a relative file path against the filesystem. Directories get
@@ -1354,6 +1381,23 @@ mod tests {
 
         // Not in command position → no command completion.
         assert!(compute_completions("hi /me", Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn completes_subcommands_and_args() {
+        // /agents subcommands
+        let (_, c) = compute_completions("/agents ", Path::new(".")).unwrap();
+        assert!(c.contains(&"list ".to_string()) && c.contains(&"kill ".to_string()), "{c:?}");
+        let (_, c) = compute_completions("/agents k", Path::new(".")).unwrap();
+        assert_eq!(c, vec!["kill ".to_string()]);
+
+        // /memory subcommands, then add's scope + kind
+        let (_, c) = compute_completions("/memory ", Path::new(".")).unwrap();
+        assert!(c.contains(&"forget ".to_string()) && c.contains(&"add ".to_string()), "{c:?}");
+        let (_, c) = compute_completions("/memory add ", Path::new(".")).unwrap();
+        assert_eq!(c, vec!["global ".to_string(), "project ".to_string()]);
+        let (_, c) = compute_completions("/memory add project ", Path::new(".")).unwrap();
+        assert!(c.contains(&"decision ".to_string()) && c.contains(&"lesson ".to_string()), "{c:?}");
     }
 
     #[test]
