@@ -13,3 +13,4 @@ pub mod session;
 pub mod tools;
 pub mod tui;
 pub mod validation;
+pub mod worker;

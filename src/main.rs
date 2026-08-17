@@ -151,6 +151,7 @@ async fn run(args: Args) -> Result<()> {
             validate_cmd,
             bash_timeout,
             config.context_limit(),
+            config.agents_max(),
         )
         .await;
     }

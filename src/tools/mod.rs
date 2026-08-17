@@ -20,6 +20,7 @@ use crate::llm::ToolDef;
 pub use bash::dangerous_command;
 
 /// Runtime context passed to every tool invocation.
+#[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
     pub session_id: String,

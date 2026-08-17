@@ -38,5 +38,8 @@ stuck-threshold = 3         # identical repeated tool calls before a nudge
 context-limit = 128000      # approx model context (tokens); compact at 75%
 keep-recent-turns = 6       # turns kept verbatim when compacting
 
+[agents]
+max = 4                     # max concurrently-running spawned workers (/spawn)
+
 [tools]
 bash-timeout-secs = 120

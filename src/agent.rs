@@ -122,6 +122,27 @@ impl Agent {
         }
     }
 
+    /// Create a sibling agent that shares this one's client, tools, and config
+    /// but runs on its own event bus and session. Used to spawn workers.
+    pub fn fork(&self, bus: EventBus, session_id: String) -> Agent {
+        let mut tool_ctx = self.tool_ctx.clone();
+        tool_ctx.session_id = session_id;
+        Agent {
+            client: self.client.clone(),
+            registry: self.registry.clone(),
+            bus,
+            model: self.model.clone(),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            max_steps: self.max_steps,
+            max_retries: self.max_retries,
+            stuck_threshold: self.stuck_threshold,
+            context_limit: self.context_limit,
+            keep_recent_turns: self.keep_recent_turns,
+            tool_ctx,
+        }
+    }
+
     /// Run one user turn to completion. `validator` (if any) gates success:
     /// the turn isn't done until it passes or retries run out.
     pub async fn run_turn(

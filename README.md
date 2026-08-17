@@ -5,11 +5,12 @@ A minimal terminal coding-agent harness in Rust, built on the bet that the
 models on task and driving to a *validation*. See [`PLAN.md`](PLAN.md) and
 [`worksmith-memory-v1.md`](worksmith-memory-v1.md).
 
-Status: **M1–M3 done.** Usable single-agent coding harness with streaming,
-model-driven tools, JSONL sessions, and SQLite memory (M1); a validation-driven
-self-correcting loop, context compaction, and a four-channel ratatui TUI (M2);
-and document tools for PDF/DOCX (M3). MCP/plugins (M4), scoped-memory retrieval
-(M5), spawned workers (M6), and the supervisor (M7) are later milestones.
+Status: **M1–M3 done, plus M6 sub-workers.** Usable single-agent coding harness
+with streaming, model-driven tools, JSONL sessions, and SQLite memory (M1); a
+validation-driven self-correcting loop, context compaction, and a four-channel
+ratatui TUI with a full input editor (M2); document tools for PDF/DOCX (M3); and
+spawned background workers (M6, `/spawn`). MCP/plugins (M4), scoped-memory
+retrieval + auto-memory (M5), and the supervisor (M7) are still ahead.
 
 ## What works in M1
 
@@ -24,6 +25,10 @@ and document tools for PDF/DOCX (M3). MCP/plugins (M4), scoped-memory retrieval
   fork bombs, `dd`/`mkfs` to devices, `curl … | sh`, recursive `chmod` of `/`)
   are refused and hard-stop the turn. Best-effort, not a sandbox — run untrusted
   work in a container.
+- **Sub-workers:** `/spawn <task>` runs a delegated task in a background worker
+  (its own session, shared tools/model); `/agents` lists them with live status,
+  `/agents show <id>` / `/agents kill <id>`. Footer shows `↑N agents`. Concurrency
+  capped by `agents.max`.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /

@@ -34,6 +34,7 @@ use crate::memory::{MemoryStore, Scope};
 use crate::prompt::build_system_prompt;
 use crate::session::Session;
 use crate::validation::CommandValidator;
+use crate::worker::WorkerManager;
 
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,7 @@ struct App {
     show_thinking: bool,
     spinner: usize,
     turn_start: Option<std::time::Instant>,
+    agents_running: usize,
 }
 
 impl App {
@@ -134,6 +136,7 @@ impl App {
             show_thinking: true,
             spinner: 0,
             turn_start: None,
+            agents_running: 0,
         }
     }
 
@@ -391,6 +394,7 @@ pub async fn run_tui(
     validate_cmd: Option<String>,
     bash_timeout: Duration,
     context_limit: usize,
+    agents_max: usize,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let res = run_loop(
@@ -403,6 +407,7 @@ pub async fn run_tui(
         validate_cmd,
         bash_timeout,
         context_limit,
+        agents_max,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -443,10 +448,12 @@ async fn run_loop(
     validate_cmd: Option<String>,
     bash_timeout: Duration,
     context_limit: usize,
+    agents_max: usize,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let session = Arc::new(AsyncMutex::new(session));
     let mem = MemoryStore::open(Some(&cwd)).or_else(|_| MemoryStore::open(None))?;
+    let mut workers = WorkerManager::new(agent.clone(), cwd.clone(), agents_max);
 
     let mut app = App::new(model, context_limit, validate_cmd);
     let mut bus_rx = bus.subscribe();
@@ -474,6 +481,7 @@ async fn run_loop(
 
     loop {
         // Rebuild the wrapped-row cache only if content/width changed, then draw.
+        app.agents_running = workers.running_count();
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
         app.ensure_rows(width);
         terminal.draw(|f| ui(f, &app))?;
@@ -484,7 +492,7 @@ async fn run_loop(
                 match maybe_ev {
                     Some(Ok(CEvent::Key(key))) => {
                         match handle_key(key, &mut app, &agent, &session, &mem, &cwd,
-                                         bash_timeout, &mut turn, &mut cancel).await? {
+                                         bash_timeout, &mut turn, &mut cancel, &mut workers).await? {
                             Flow::Quit => break,
                             Flow::Continue => {}
                             Flow::ExternalEdit => pending_edit = true,
@@ -578,6 +586,7 @@ async fn handle_key(
     bash_timeout: Duration,
     turn: &mut Option<JoinHandle<Result<TurnResult>>>,
     cancel: &mut CancellationToken,
+    workers: &mut WorkerManager,
 ) -> Result<Flow> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -641,7 +650,7 @@ async fn handle_key(
                 return Ok(Flow::Quit);
             }
             if input.starts_with('/')
-                && handle_command(&input, app, agent, session, mem, cwd).await?
+                && handle_command(&input, app, agent, session, mem, cwd, workers).await?
             {
                 return Ok(Flow::Continue);
             }
@@ -687,6 +696,7 @@ async fn handle_command(
     session: &Arc<AsyncMutex<Session>>,
     mem: &MemoryStore,
     cwd: &Path,
+    workers: &mut WorkerManager,
 ) -> Result<bool> {
     let mut parts = input.trim_start_matches('/').split_whitespace();
     let head = parts.next().unwrap_or("");
@@ -694,9 +704,10 @@ async fn handle_command(
         "help" | "h" => {
             app.push(
                 Kind::Notice,
-                "keys: Enter=send  Esc=abort/clear  Ctrl+C=quit  Ctrl+O=collapse tools  \
-                 PgUp/PgDn=scroll\ncommands: /new /compact /memory [list|global|project] \
-                 /validate <cmd|off> /quit   @path includes a file"
+                "keys: Enter=send  Alt+Enter=newline  Ctrl+G=$EDITOR  Esc=abort/clear  \
+                 Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
+                 commands: /new /compact /memory /validate <cmd|off> /spawn <task> \
+                 /agents [kill|show <id>] /quit   @path includes a file"
                     .to_string(),
             );
         }
@@ -721,6 +732,19 @@ async fn handle_command(
             }
         }
         "memory" | "mem" => memory_command(app, mem, parts),
+        "spawn" => {
+            let task = parts.collect::<Vec<_>>().join(" ");
+            if task.trim().is_empty() {
+                app.push(Kind::Notice, "usage: /spawn <task>".to_string());
+            } else {
+                let system = format!("{}\n\n{}", build_system_prompt(cwd, mem), WORKER_PREAMBLE);
+                match workers.spawn(task.clone(), system) {
+                    Ok(id) => app.push(Kind::Notice, format!("spawned {id}: {}", truncate(&task, 80))),
+                    Err(e) => app.push(Kind::Error, format!("spawn failed: {e}")),
+                }
+            }
+        }
+        "agents" | "workers" => agents_command(app, workers, parts),
         "validate" => {
             let rest: Vec<&str> = parts.collect();
             let rest = rest.join(" ");
@@ -810,6 +834,70 @@ fn memory_list(app: &mut App, mem: &MemoryStore, scope: Option<Scope>) {
             }
         }
         Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+    }
+}
+
+const WORKER_PREAMBLE: &str = "You are a background worker executing a delegated \
+task autonomously. Do not ask the user questions; make reasonable assumptions, \
+complete the task, and finish with a concise summary of what you did.";
+
+/// `/agents [list | kill <id> | show <id>]`
+fn agents_command<'a>(
+    app: &mut App,
+    workers: &mut WorkerManager,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
+    match parts.next().unwrap_or("list") {
+        "list" | "" => {
+            let list = workers.list();
+            if list.is_empty() {
+                app.push(Kind::Notice, "(no agents)".to_string());
+            } else {
+                for w in list {
+                    app.push(
+                        Kind::Notice,
+                        format!(
+                            "{} [{}] {} tools · {} — {}",
+                            w.id,
+                            w.status.label(),
+                            w.tool_calls,
+                            truncate(&w.last, 50),
+                            truncate(&w.task, 50)
+                        ),
+                    );
+                }
+            }
+        }
+        "kill" | "stop" => match parts.next() {
+            Some(id) if workers.kill(id) => app.push(Kind::Notice, format!("killing {id}")),
+            Some(id) => app.push(Kind::Notice, format!("(no agent {id})")),
+            None => app.push(Kind::Notice, "usage: /agents kill <id>".to_string()),
+        },
+        "show" | "result" => match parts.next() {
+            Some(id) => match workers.get(id) {
+                Some(w) => {
+                    let body = if w.result.is_empty() {
+                        format!("[{}] {}", w.status.label(), w.last)
+                    } else {
+                        format!("[{}]\n{}", w.status.label(), w.result)
+                    };
+                    app.push(Kind::Notice, format!("{id} {body}"));
+                }
+                None => app.push(Kind::Notice, format!("(no agent {id})")),
+            },
+            None => app.push(Kind::Notice, "usage: /agents show <id>".to_string()),
+        },
+        other => app.push(Kind::Error, format!("unknown /agents subcommand: {other}")),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let one = s.replace('\n', " ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        let cut: String = one.chars().take(max).collect();
+        format!("{cut}…")
     }
 }
 
@@ -1357,9 +1445,14 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .checked_div(app.context_limit)
         .unwrap_or(0)
         .min(999);
+    let agents = if app.agents_running > 0 {
+        format!("  ↑{} agents", app.agents_running)
+    } else {
+        String::new()
+    };
     let left = format!(
-        " {}  ctx {}% ({}/{})  ↓{}",
-        app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens
+        " {}  ctx {}% ({}/{})  ↓{}{}",
+        app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, agents
     );
 
     // While a turn runs, show an animated spinner + elapsed seconds.

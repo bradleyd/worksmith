@@ -20,6 +20,14 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     pub agent: AgentConfig,
     pub tools: ToolsConfig,
+    pub agents: AgentsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct AgentsConfig {
+    /// Max concurrently-running spawned workers.
+    pub max: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +107,9 @@ impl Config {
         for (k, v) in other.providers {
             self.providers.insert(k, v);
         }
+        if other.agents.max.is_some() {
+            self.agents.max = other.agents.max;
+        }
         if other.agent.max_steps.is_some() {
             self.agent.max_steps = other.agent.max_steps;
         }
@@ -129,6 +140,10 @@ impl Config {
 
     pub fn keep_recent_turns(&self) -> usize {
         self.agent.keep_recent_turns.unwrap_or(6)
+    }
+
+    pub fn agents_max(&self) -> usize {
+        self.agents.max.unwrap_or(4)
     }
 
     pub fn bash_timeout_secs(&self) -> u64 {
