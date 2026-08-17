@@ -58,6 +58,8 @@ struct Worker {
     task: String,
     runtime: Arc<Mutex<Runtime>>,
     cancel: CancellationToken,
+    /// Whether this worker's terminal status has been surfaced to the user.
+    reported: bool,
     _handle: JoinHandle<()>,
 }
 
@@ -158,8 +160,32 @@ impl WorkerManager {
             }
         });
 
-        self.workers.push(Worker { id: id.clone(), task, runtime, cancel, _handle: handle });
+        self.workers.push(Worker {
+            id: id.clone(),
+            task,
+            runtime,
+            cancel,
+            reported: false,
+            _handle: handle,
+        });
         Ok(id)
+    }
+
+    /// Workers that reached a terminal state since the last call (each returned
+    /// once). Used to surface completions to the user without polling.
+    pub fn take_newly_finished(&mut self) -> Vec<WorkerSummary> {
+        let mut out = Vec::new();
+        for w in &mut self.workers {
+            if w.reported {
+                continue;
+            }
+            let s = w.summary();
+            if !s.status.is_running() {
+                w.reported = true;
+                out.push(s);
+            }
+        }
+        out
     }
 
     pub fn list(&self) -> Vec<WorkerSummary> {

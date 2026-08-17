@@ -88,6 +88,23 @@ async fn worker_runs_task_to_completion() {
 }
 
 #[tokio::test]
+async fn newly_finished_reports_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Arc::new(template_agent(vec![done("all done")], dir.path()));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+
+    let id = mgr.spawn("task".into(), "system".into()).unwrap();
+    let _ = wait_terminal(&mgr, &id).await;
+
+    let first = mgr.take_newly_finished();
+    assert_eq!(first.len(), 1, "should report the finished worker once");
+    assert_eq!(first[0].id, id);
+
+    let second = mgr.take_newly_finished();
+    assert!(second.is_empty(), "should not report the same worker again");
+}
+
+#[tokio::test]
 async fn worker_respects_concurrency_cap() {
     let dir = tempfile::tempdir().unwrap();
     // A worker whose mock never returns "done" (always a tool call) stays busy.

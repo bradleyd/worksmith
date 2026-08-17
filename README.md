@@ -26,9 +26,10 @@ retrieval + auto-memory (M5), and the supervisor (M7) are still ahead.
   are refused and hard-stop the turn. Best-effort, not a sandbox — run untrusted
   work in a container.
 - **Sub-workers:** `/spawn <task>` runs a delegated task in a background worker
-  (its own session, shared tools/model); `/agents` lists them with live status,
-  `/agents show <id>` / `/agents kill <id>`. Footer shows `↑N agents`. Concurrency
-  capped by `agents.max`.
+  (its own session, shared tools/model). When a worker finishes it's announced
+  in the transcript with its result; `/agents` lists live status, `/agents show
+  <id>` shows the full result, `/agents kill <id>` cancels. Footer shows
+  `↑N agents`. Concurrency capped by `agents.max`.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /

@@ -34,7 +34,7 @@ use crate::memory::{MemoryStore, Scope};
 use crate::prompt::build_system_prompt;
 use crate::session::Session;
 use crate::validation::CommandValidator;
-use crate::worker::WorkerManager;
+use crate::worker::{WorkerManager, WorkerStatus};
 
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -480,6 +480,24 @@ async fn run_loop(
     let mut cancel = CancellationToken::new();
 
     loop {
+        // Surface any workers that just finished (so you don't have to poll).
+        for w in workers.take_newly_finished() {
+            let glyph = match w.status {
+                WorkerStatus::Done => "✓",
+                WorkerStatus::Failed => "✗",
+                _ => "◼",
+            };
+            let summary = if w.result.trim().is_empty() {
+                w.last.clone()
+            } else {
+                truncate(&w.result, 300)
+            };
+            app.push(Kind::Notice, format!("{glyph} agent {} [{}]: {}", w.id, w.status.label(), summary));
+            if app.follow {
+                app.scroll_up = 0;
+            }
+        }
+
         // Rebuild the wrapped-row cache only if content/width changed, then draw.
         app.agents_running = workers.running_count();
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
