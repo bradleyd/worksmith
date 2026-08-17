@@ -39,6 +39,8 @@ struct Runtime {
     status: WorkerStatus,
     last: String,
     tool_calls: usize,
+    /// Files the worker created/edited (deterministic, from write/edit calls).
+    changed: Vec<String>,
     result: String,
 }
 
@@ -50,12 +52,16 @@ pub struct WorkerSummary {
     pub status: WorkerStatus,
     pub last: String,
     pub tool_calls: usize,
+    pub changed: Vec<String>,
     pub result: String,
+    /// The worker's session id (its full transcript is at that session file).
+    pub session_id: String,
 }
 
 struct Worker {
     id: String,
     task: String,
+    session_id: String,
     runtime: Arc<Mutex<Runtime>>,
     cancel: CancellationToken,
     /// Whether this worker's terminal status has been surfaced to the user.
@@ -72,7 +78,9 @@ impl Worker {
             status: r.status,
             last: r.last.clone(),
             tool_calls: r.tool_calls,
+            changed: r.changed.clone(),
             result: r.result.clone(),
+            session_id: self.session_id.clone(),
         }
     }
 }
@@ -105,8 +113,9 @@ impl WorkerManager {
         let id = format!("w{}", self.counter);
 
         let session = Session::create(&self.cwd).map_err(|e| format!("session: {e}"))?;
+        let session_id = session.id.clone();
         let bus = EventBus::new();
-        let agent = self.template.fork(bus.clone(), session.id.clone());
+        let agent = self.template.fork(bus.clone(), session_id.clone());
         let mut rx = bus.subscribe();
         drop(bus); // the forked agent keeps a sender clone
 
@@ -114,6 +123,7 @@ impl WorkerManager {
             status: WorkerStatus::Running,
             last: "starting…".into(),
             tool_calls: 0,
+            changed: Vec::new(),
             result: String::new(),
         }));
         let cancel = CancellationToken::new();
@@ -163,6 +173,7 @@ impl WorkerManager {
         self.workers.push(Worker {
             id: id.clone(),
             task,
+            session_id,
             runtime,
             cancel,
             reported: false,
@@ -210,9 +221,18 @@ impl WorkerManager {
 
 fn update_last(g: &mut Runtime, e: Event) {
     match e {
-        Event::ToolCall { name, .. } => {
+        Event::ToolCall { name, arguments, .. } => {
             g.tool_calls += 1;
             g.last = format!("⚙ {name}");
+            // Deterministically record file mutations for the parent/supervisor.
+            if matches!(name.as_str(), "write" | "edit")
+                && let Some(path) = serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                && !g.changed.contains(&path)
+            {
+                g.changed.push(path);
+            }
         }
         Event::AssistantMessage { text } => {
             if let Some(l) = text.lines().rev().find(|l| !l.trim().is_empty()) {

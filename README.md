@@ -27,8 +27,9 @@ retrieval + auto-memory (M5), and the supervisor (M7) are still ahead.
   work in a container.
 - **Sub-workers:** `/spawn <task>` runs a delegated task in a background worker
   (its own session, shared tools/model). When a worker finishes it's announced
-  in the transcript with its result; `/agents` lists live status, `/agents show
-  <id>` shows the full result, `/agents kill <id>` cancels. Footer shows
+  in the transcript with the **files it changed** and its result; `/agents`
+  lists live status, `/agents show <id>` shows changed files, the session-file
+  path, and the full result, `/agents kill <id>` cancels. Footer shows
   `↑N agents`. Concurrency capped by `agents.max`.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.

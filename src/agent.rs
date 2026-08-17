@@ -154,13 +154,17 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
         session.append_message(Message::user(user_input))?;
-        self.bus.emit(Event::UserMessage { text: user_input.to_string() });
+        self.bus.emit(Event::UserMessage {
+            text: user_input.to_string(),
+        });
 
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
 
         let outcome = loop {
-            let idle = self.run_until_idle(session, system_prompt, &mut final_text, &cancel).await?;
+            let idle = self
+                .run_until_idle(session, system_prompt, &mut final_text, &cancel)
+                .await?;
 
             match idle {
                 IdleReason::Aborted => break TurnOutcome::Aborted,
@@ -168,7 +172,9 @@ impl Agent {
                 IdleReason::Stuck(r) => break TurnOutcome::Stuck(r),
                 IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
                 IdleReason::ModelDone => {
-                    let Some(v) = validator else { break TurnOutcome::Done };
+                    let Some(v) = validator else {
+                        break TurnOutcome::Done;
+                    };
 
                     match v.validate().await {
                         Ok(()) => {
@@ -194,7 +200,9 @@ impl Agent {
                                 reason
                             );
                             self.bus.emit(Event::Nudge {
-                                reason: format!("validation failed; re-planning ({retries_left} retries left)"),
+                                reason: format!(
+                                    "validation failed; re-planning ({retries_left} retries left)"
+                                ),
                             });
                             session.append_message(Message::user(directive))?;
                         }
@@ -203,8 +211,13 @@ impl Agent {
             }
         };
 
-        self.bus.emit(Event::TurnComplete { outcome: outcome.label() });
-        Ok(TurnResult { text: final_text, outcome })
+        self.bus.emit(Event::TurnComplete {
+            outcome: outcome.label(),
+        });
+        Ok(TurnResult {
+            text: final_text,
+            outcome,
+        })
     }
 
     /// Inner loop: run model↔tool steps until the model stops calling tools,
@@ -229,7 +242,9 @@ impl Agent {
                 && let Err(e) = self.compact(session).await
             {
                 // Compaction is best-effort; a failure shouldn't kill the turn.
-                self.bus.emit(Event::Error { message: format!("compaction failed: {e}") });
+                self.bus.emit(Event::Error {
+                    message: format!("compaction failed: {e}"),
+                });
             }
 
             let mut messages = Vec::with_capacity(session.messages().len() + 1);
@@ -263,7 +278,9 @@ impl Agent {
             let completion = match completion {
                 Ok(c) => c,
                 Err(e) => {
-                    self.bus.emit(Event::Error { message: e.to_string() });
+                    self.bus.emit(Event::Error {
+                        message: e.to_string(),
+                    });
                     return Err(e);
                 }
             };
@@ -292,7 +309,8 @@ impl Agent {
             if let Some(text) = &completion.content
                 && !text.is_empty()
             {
-                self.bus.emit(Event::AssistantMessage { text: text.clone() });
+                self.bus
+                    .emit(Event::AssistantMessage { text: text.clone() });
                 *final_text = text.clone();
             }
 
@@ -322,22 +340,26 @@ impl Agent {
                     arguments: call.arguments.clone(),
                 });
 
-                let (ok, fatal, raw) = match serde_json::from_str::<serde_json::Value>(&call.arguments)
-                {
-                    Ok(v) => {
-                        let o = self.registry.run(&call.name, v, &self.tool_ctx).await;
-                        (!o.is_error, o.fatal, o.content)
-                    }
-                    Err(e) => {
-                        let hint = if truncated {
-                            " — the response was cut off by the output-token limit; make the \
+                let (ok, fatal, raw) =
+                    match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                        Ok(v) => {
+                            let o = self.registry.run(&call.name, v, &self.tool_ctx).await;
+                            (!o.is_error, o.fatal, o.content)
+                        }
+                        Err(e) => {
+                            let hint = if truncated {
+                                " — the response was cut off by the output-token limit; make the \
                              call smaller (e.g. write the file in parts)"
-                        } else {
-                            ""
-                        };
-                        (false, false, format!("invalid JSON arguments for `{}`: {e}{hint}", call.name))
-                    }
-                };
+                            } else {
+                                ""
+                            };
+                            (
+                                false,
+                                false,
+                                format!("invalid JSON arguments for `{}`: {e}{hint}", call.name),
+                            )
+                        }
+                    };
                 let content = cap_tool_output(raw);
 
                 self.bus.emit(Event::ToolResult {
@@ -346,7 +368,11 @@ impl Agent {
                     ok,
                     output: content.clone(),
                 });
-                session.append_message(Message::tool_result(&call.id, &call.name, content.clone()))?;
+                session.append_message(Message::tool_result(
+                    &call.id,
+                    &call.name,
+                    content.clone(),
+                ))?;
 
                 // A refused destructive command hard-stops the turn immediately.
                 if fatal {
@@ -355,7 +381,9 @@ impl Agent {
                 }
             }
             if let Some(reason) = blocked {
-                self.bus.emit(Event::Error { message: reason.clone() });
+                self.bus.emit(Event::Error {
+                    message: reason.clone(),
+                });
                 return Ok(IdleReason::Blocked(reason));
             }
 
@@ -371,7 +399,9 @@ impl Agent {
                          Step back and try a different approach.",
                         call.name
                     );
-                    self.bus.emit(Event::Nudge { reason: reason.clone() });
+                    self.bus.emit(Event::Nudge {
+                        reason: reason.clone(),
+                    });
                     session.append_message(Message::user(reason))?;
                 }
             }
@@ -396,7 +426,11 @@ impl Agent {
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
             }
-            (msgs.len(), msgs[split..].to_vec(), render_transcript(&msgs[..split]))
+            (
+                msgs.len(),
+                msgs[split..].to_vec(),
+                render_transcript(&msgs[..split]),
+            )
         };
 
         let sys = "You are compacting a coding-agent conversation. Summarize the \
@@ -415,7 +449,10 @@ impl Agent {
         // Drain the stream sink; we only want the final summary text.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let completion = self.client.stream(req, tx, CancellationToken::new()).await?;
+        let completion = self
+            .client
+            .stream(req, tx, CancellationToken::new())
+            .await?;
         let _ = drain.await;
 
         let summary = completion.content.unwrap_or_default();
@@ -423,14 +460,18 @@ impl Agent {
             return Ok(()); // don't discard history for an empty summary
         }
 
-        let mut new_msgs =
-            Vec::with_capacity(recent.len() + 1);
-        new_msgs.push(Message::user(format!("[Summary of earlier conversation]\n{summary}")));
+        let mut new_msgs = Vec::with_capacity(recent.len() + 1);
+        new_msgs.push(Message::user(format!(
+            "[Summary of earlier conversation]\n{summary}"
+        )));
         new_msgs.extend(recent);
         let after = new_msgs.len();
 
         session.replace_messages(new_msgs)?;
-        self.bus.emit(Event::Compaction { messages_before: before, messages_after: after });
+        self.bus.emit(Event::Compaction {
+            messages_before: before,
+            messages_after: after,
+        });
         Ok(())
     }
 }
@@ -493,6 +534,22 @@ fn render_transcript(messages: &[Message]) -> String {
     out
 }
 
+/// Truncate a tool result to the byte cap on a char boundary, with a notice.
+fn cap_tool_output(s: String) -> String {
+    if s.len() <= MAX_TOOL_RESULT_BYTES {
+        return s;
+    }
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let shown = &s[..end];
+    format!(
+        "{shown}\n\n[output truncated: showed {end} of {} bytes — narrow the query or read a specific range]",
+        s.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,20 +574,4 @@ mod tests {
         assert_eq!(compaction_split(&msgs, 3), 0);
         assert_eq!(compaction_split(&msgs, 9), 0);
     }
-}
-
-/// Truncate a tool result to the byte cap on a char boundary, with a notice.
-fn cap_tool_output(s: String) -> String {
-    if s.len() <= MAX_TOOL_RESULT_BYTES {
-        return s;
-    }
-    let mut end = MAX_TOOL_RESULT_BYTES;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let shown = &s[..end];
-    format!(
-        "{shown}\n\n[output truncated: showed {end} of {} bytes — narrow the query or read a specific range]",
-        s.len()
-    )
 }

@@ -492,7 +492,15 @@ async fn run_loop(
             } else {
                 truncate(&w.result, 300)
             };
-            app.push(Kind::Notice, format!("{glyph} agent {} [{}]: {}", w.id, w.status.label(), summary));
+            let changed = if w.changed.is_empty() {
+                String::new()
+            } else {
+                format!(" · changed {} file(s): {}", w.changed.len(), w.changed.join(", "))
+            };
+            app.push(
+                Kind::Notice,
+                format!("{glyph} agent {} [{}]{}: {}", w.id, w.status.label(), changed, summary),
+            );
             if app.follow {
                 app.scroll_up = 0;
             }
@@ -875,12 +883,13 @@ fn agents_command<'a>(
                     app.push(
                         Kind::Notice,
                         format!(
-                            "{} [{}] {} tools · {} — {}",
+                            "{} [{}] {} tools · {} changed · {} — {}",
                             w.id,
                             w.status.label(),
                             w.tool_calls,
-                            truncate(&w.last, 50),
-                            truncate(&w.task, 50)
+                            w.changed.len(),
+                            truncate(&w.last, 40),
+                            truncate(&w.task, 40)
                         ),
                     );
                 }
@@ -894,11 +903,18 @@ fn agents_command<'a>(
         "show" | "result" => match parts.next() {
             Some(id) => match workers.get(id) {
                 Some(w) => {
-                    let body = if w.result.is_empty() {
-                        format!("[{}] {}", w.status.label(), w.last)
+                    let mut body = format!("[{}]", w.status.label());
+                    if !w.changed.is_empty() {
+                        body.push_str(&format!("\nchanged: {}", w.changed.join(", ")));
+                    }
+                    if let Ok(p) = Session::path_for_id(&w.session_id) {
+                        body.push_str(&format!("\nsession: {}", p.display()));
+                    }
+                    if w.result.is_empty() {
+                        body.push_str(&format!("\n{}", w.last));
                     } else {
-                        format!("[{}]\n{}", w.status.label(), w.result)
-                    };
+                        body.push_str(&format!("\n{}", w.result));
+                    }
                     app.push(Kind::Notice, format!("{id} {body}"));
                 }
                 None => app.push(Kind::Notice, format!("(no agent {id})")),
@@ -1265,6 +1281,88 @@ fn cursor_rowcol(input: &str, cursor: usize) -> (usize, usize) {
     (row, col)
 }
 
+/// Render a unified diff with per-line color (summary yellow, `+` green, `-`
+/// red, `@@` cyan, context dim), wrapped to width and capped when collapsed.
+fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width: u16) {
+    let w = (width.max(12) as usize).saturating_sub(1);
+    let all: Vec<&str> = text.lines().collect();
+    let (shown, extra) = if collapse && all.len() > TOOL_RESULT_PREVIEW_LINES + 5 {
+        (&all[..TOOL_RESULT_PREVIEW_LINES + 5], all.len() - (TOOL_RESULT_PREVIEW_LINES + 5))
+    } else {
+        (&all[..], 0)
+    };
+
+    for (i, raw) in shown.iter().enumerate() {
+        let line = raw.replace('\t', "    ");
+        let style = if i == 0 {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if line.starts_with("@@") {
+            Style::default().fg(Color::Cyan)
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            Style::default().fg(Color::DarkGray)
+        } else if line.starts_with('+') {
+            Style::default().fg(Color::Green)
+        } else if line.starts_with('-') {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let chars: Vec<char> = line.chars().collect();
+        let mut idx = 0;
+        loop {
+            let prefix = if idx == 0 { "  " } else { "   " };
+            let avail = w.saturating_sub(prefix.len()).max(1);
+            let seg: String = chars[idx..(idx + avail).min(chars.len())].iter().collect();
+            rows.push(Line::from(vec![
+                Span::styled(prefix.to_string(), style.add_modifier(Modifier::DIM)),
+                Span::styled(seg, style),
+            ]));
+            idx += avail;
+            if idx >= chars.len() {
+                break;
+            }
+        }
+    }
+    if extra > 0 {
+        rows.push(Line::from(Span::styled(
+            format!("  … (+{extra} more diff lines · Ctrl+O)"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+}
+
+fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    let pct = (app.last_prompt_tokens as usize * 100)
+        .checked_div(app.context_limit)
+        .unwrap_or(0)
+        .min(999);
+    let agents = if app.agents_running > 0 {
+        format!("  ↑{} agents", app.agents_running)
+    } else {
+        String::new()
+    };
+    let left = format!(
+        " {}  ctx {}% ({}/{})  ↓{}{}",
+        app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, agents
+    );
+
+    // While a turn runs, show an animated spinner + elapsed seconds.
+    let status = if app.running {
+        const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let elapsed = app.turn_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
+    } else {
+        app.status.clone()
+    };
+    let line = Line::from(vec![
+        Span::styled(left, Style::default().fg(Color::Black).bg(Color::Cyan)),
+        Span::raw("  "),
+        Span::styled(status, Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1449,86 +1547,4 @@ mod tests {
         let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(first.contains("you"), "first row should label the user: {first}");
     }
-}
-
-/// Render a unified diff with per-line color (summary yellow, `+` green, `-`
-/// red, `@@` cyan, context dim), wrapped to width and capped when collapsed.
-fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width: u16) {
-    let w = (width.max(12) as usize).saturating_sub(1);
-    let all: Vec<&str> = text.lines().collect();
-    let (shown, extra) = if collapse && all.len() > TOOL_RESULT_PREVIEW_LINES + 5 {
-        (&all[..TOOL_RESULT_PREVIEW_LINES + 5], all.len() - (TOOL_RESULT_PREVIEW_LINES + 5))
-    } else {
-        (&all[..], 0)
-    };
-
-    for (i, raw) in shown.iter().enumerate() {
-        let line = raw.replace('\t', "    ");
-        let style = if i == 0 {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else if line.starts_with("@@") {
-            Style::default().fg(Color::Cyan)
-        } else if line.starts_with("+++") || line.starts_with("---") {
-            Style::default().fg(Color::DarkGray)
-        } else if line.starts_with('+') {
-            Style::default().fg(Color::Green)
-        } else if line.starts_with('-') {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let chars: Vec<char> = line.chars().collect();
-        let mut idx = 0;
-        loop {
-            let prefix = if idx == 0 { "  " } else { "   " };
-            let avail = w.saturating_sub(prefix.len()).max(1);
-            let seg: String = chars[idx..(idx + avail).min(chars.len())].iter().collect();
-            rows.push(Line::from(vec![
-                Span::styled(prefix.to_string(), style.add_modifier(Modifier::DIM)),
-                Span::styled(seg, style),
-            ]));
-            idx += avail;
-            if idx >= chars.len() {
-                break;
-            }
-        }
-    }
-    if extra > 0 {
-        rows.push(Line::from(Span::styled(
-            format!("  … (+{extra} more diff lines · Ctrl+O)"),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-}
-
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let pct = (app.last_prompt_tokens as usize * 100)
-        .checked_div(app.context_limit)
-        .unwrap_or(0)
-        .min(999);
-    let agents = if app.agents_running > 0 {
-        format!("  ↑{} agents", app.agents_running)
-    } else {
-        String::new()
-    };
-    let left = format!(
-        " {}  ctx {}% ({}/{})  ↓{}{}",
-        app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, agents
-    );
-
-    // While a turn runs, show an animated spinner + elapsed seconds.
-    let status = if app.running {
-        const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let elapsed = app.turn_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
-    } else {
-        app.status.clone()
-    };
-    let line = Line::from(vec![
-        Span::styled(left, Style::default().fg(Color::Black).bg(Color::Cyan)),
-        Span::raw("  "),
-        Span::styled(status, Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
 }

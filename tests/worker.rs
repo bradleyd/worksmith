@@ -34,6 +34,17 @@ fn done(text: &str) -> Completion {
     Completion { content: Some(text.into()), ..Default::default() }
 }
 
+fn tool_call(name: &str, args: &str) -> Completion {
+    Completion {
+        tool_calls: vec![worksmith::llm::ToolCall {
+            id: "c".into(),
+            name: name.into(),
+            arguments: args.into(),
+        }],
+        ..Default::default()
+    }
+}
+
 fn template_agent(responses: Vec<Completion>, cwd: &std::path::Path) -> Agent {
     Agent::new(
         Arc::new(MockClient { responses: Mutex::new(responses.into()) }),
@@ -57,10 +68,8 @@ fn template_agent(responses: Vec<Completion>, cwd: &std::path::Path) -> Agent {
 
 async fn wait_terminal(mgr: &WorkerManager, id: &str) -> WorkerStatus {
     for _ in 0..200 {
-        if let Some(s) = mgr.get(id) {
-            if !s.status.is_running() {
-                return s.status;
-            }
+        if let Some(s) = mgr.get(id) && !s.status.is_running() {
+            return s.status;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -102,6 +111,27 @@ async fn newly_finished_reports_once() {
 
     let second = mgr.take_newly_finished();
     assert!(second.is_empty(), "should not report the same worker again");
+}
+
+#[tokio::test]
+async fn worker_records_changed_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Arc::new(template_agent(
+        vec![
+            tool_call("write", r#"{"path":"out.txt","content":"hi"}"#),
+            done("wrote the file"),
+        ],
+        dir.path(),
+    ));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+
+    let id = mgr.spawn("make out.txt".into(), "system".into()).unwrap();
+    let _ = wait_terminal(&mgr, &id).await;
+
+    let summary = mgr.get(&id).unwrap();
+    assert_eq!(summary.changed, vec!["out.txt".to_string()], "should record the changed file");
+    assert!(dir.path().join("out.txt").exists(), "worker should have written the file");
+    assert!(!summary.session_id.is_empty());
 }
 
 #[tokio::test]
