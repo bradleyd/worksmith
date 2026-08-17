@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CEvent, EventStream, KeyCode, KeyEvent,
-    KeyModifiers, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -23,7 +23,7 @@ use crossterm::terminal::{
 };
 use futures_util::StreamExt;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -67,9 +67,19 @@ struct Completion {
     token_start: usize,
 }
 
+/// Max visible rows for the multi-line composer before it scrolls internally.
+const MAX_INPUT_ROWS: usize = 8;
+
 struct App {
     items: Vec<Item>,
     input: String,
+    /// Cursor position as a char index into `input` (0..=char_count).
+    cursor: usize,
+    /// Submitted-prompt history and the current navigation position.
+    history: Vec<String>,
+    history_idx: Option<usize>,
+    /// The in-progress line stashed while browsing history.
+    draft: String,
     /// Lines scrolled up from the bottom; 0 = following the tail.
     scroll_up: u16,
     follow: bool,
@@ -101,6 +111,10 @@ impl App {
         App {
             items: Vec::new(),
             input: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_idx: None,
+            draft: String::new(),
             scroll_up: 0,
             follow: true,
             collapse_tools: false,
@@ -136,6 +150,147 @@ impl App {
             self.cache_width = width;
             self.dirty = false;
         }
+    }
+
+    // ---- composer (input editing) ----
+
+    fn byte_at(&self, char_idx: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(self.input.len())
+    }
+
+    fn char_len(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    fn insert_str(&mut self, s: &str) {
+        let at = self.byte_at(self.cursor);
+        self.input.insert_str(at, s);
+        self.cursor += s.chars().count();
+        self.completion = None;
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let at = self.byte_at(self.cursor);
+        self.input.insert(at, c);
+        self.cursor += 1;
+        self.completion = None;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = self.byte_at(self.cursor - 1);
+        let end = self.byte_at(self.cursor);
+        self.input.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    /// Delete the word (and preceding whitespace) before the cursor.
+    fn delete_word(&mut self) {
+        let mut i = self.cursor;
+        let chars: Vec<char> = self.input.chars().collect();
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        let start = self.byte_at(i);
+        let end = self.byte_at(self.cursor);
+        self.input.replace_range(start..end, "");
+        self.cursor = i;
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor < self.char_len() {
+            self.cursor += 1;
+        }
+    }
+
+    /// Move to the start / end of the current logical line.
+    fn move_home(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i > 0 && chars[i - 1] != '\n' {
+            i -= 1;
+        }
+        self.cursor = i;
+    }
+
+    fn move_end(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i < chars.len() && chars[i] != '\n' {
+            i += 1;
+        }
+        self.cursor = i;
+    }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+        self.history_idx = None;
+        self.completion = None;
+    }
+
+    /// Take the composed input for submission, resetting the composer and
+    /// recording history.
+    fn take_input(&mut self) -> String {
+        let text = std::mem::take(&mut self.input);
+        self.cursor = 0;
+        self.history_idx = None;
+        self.completion = None;
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && self.history.last().map(String::as_str) != Some(trimmed) {
+            self.history.push(trimmed.to_string());
+        }
+        text
+    }
+
+    /// Recall the previous / next history entry into the composer.
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_idx {
+            None => {
+                self.draft = self.input.clone();
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.history_idx = Some(next);
+        self.input = self.history[next].clone();
+        self.cursor = self.char_len();
+        self.completion = None;
+    }
+
+    fn history_next(&mut self) {
+        match self.history_idx {
+            None => {}
+            Some(i) if i + 1 < self.history.len() => {
+                self.history_idx = Some(i + 1);
+                self.input = self.history[i + 1].clone();
+                self.cursor = self.char_len();
+            }
+            Some(_) => {
+                // Past the newest entry → restore the stashed draft.
+                self.history_idx = None;
+                self.input = std::mem::take(&mut self.draft);
+                self.cursor = self.char_len();
+            }
+        }
+        self.completion = None;
     }
 
     /// Scroll toward older content.
@@ -252,13 +407,20 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 fn setup_terminal() -> Result<Term> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).context("entering alternate screen")?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)
+        .context("entering alternate screen")?;
     Terminal::new(CrosstermBackend::new(out)).context("creating terminal")
 }
 
 fn restore_terminal(terminal: &mut Term) -> Result<()> {
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )
+    .ok();
     terminal.show_cursor().ok();
     Ok(())
 }
@@ -323,6 +485,9 @@ async fn run_loop(
                         MouseEventKind::ScrollDown => app.scroll_down(3),
                         _ => {}
                     },
+                    // Bracketed paste: insert the whole payload at the cursor
+                    // (multi-line and all) instead of firing Enter per line.
+                    Some(Ok(CEvent::Paste(text))) => app.insert_str(&text),
                     Some(Ok(_)) => {} // resize etc — redraw next loop
                     Some(Err(_)) | None => break,
                 }
@@ -414,33 +579,33 @@ async fn handle_key(
                 cancel.cancel();
                 app.status = "aborting…".into();
             } else {
-                app.input.clear();
+                app.clear_input();
             }
         }
+        // Transcript scrolling (mouse wheel also works).
         KeyCode::PageUp => app.scroll_up(10),
         KeyCode::PageDown => app.scroll_down(10),
-        // Ctrl+U / Ctrl+D: half-page scroll (also friendlier on Mac keyboards).
         KeyCode::Char('u') if ctrl => app.scroll_up(10),
         KeyCode::Char('d') if ctrl => app.scroll_down(10),
-        KeyCode::Up => app.scroll_up(3),
-        KeyCode::Down => app.scroll_down(3),
-        KeyCode::Home => {
-            app.follow = false;
-            app.scroll_up = u16::MAX; // clamped to the top when rendering
-        }
-        KeyCode::End => {
-            app.scroll_up = 0;
-            app.follow = true;
-        }
-        KeyCode::Backspace => {
-            app.input.pop();
+        // Composer editing.
+        KeyCode::Up => app.history_prev(),
+        KeyCode::Down => app.history_next(),
+        KeyCode::Left => app.move_left(),
+        KeyCode::Right => app.move_right(),
+        KeyCode::Home => app.move_home(),
+        KeyCode::End => app.move_end(),
+        KeyCode::Char('w') if ctrl => app.delete_word(),
+        KeyCode::Backspace => app.backspace(),
+        // Alt/Shift+Enter inserts a newline; plain Enter sends.
+        KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+            app.insert_char('\n');
         }
         KeyCode::Enter => {
-            let input = app.input.trim().to_string();
+            let raw = app.take_input();
+            let input = raw.trim().to_string();
             if input.is_empty() {
                 return Ok(Flow::Continue);
             }
-            app.input.clear();
 
             // Commands (start with '/', or bare quit/exit).
             if input == "/quit" || input == "/exit" || input == "quit" || input == "exit" {
@@ -478,8 +643,8 @@ async fn handle_key(
                 a.run_turn(&mut sess, &message, &sys, validator.as_ref().map(|v| v as _), tok).await
             }));
         }
-        // Ignore control-chords; accept normal (and shifted) chars.
-        KeyCode::Char(c) if !ctrl => app.input.push(c),
+        // Ignore control-chords; accept normal (and shifted) chars at the cursor.
+        KeyCode::Char(c) if !ctrl => app.insert_char(c),
         _ => {}
     }
     Ok(Flow::Continue)
@@ -603,7 +768,9 @@ fn complete(app: &mut App, cwd: &Path) {
             c.idx = (c.idx + 1) % c.candidates.len();
             app.input.truncate(c.token_start);
             app.input.push_str(&c.candidates[c.idx]);
-            app.status = completion_status(c);
+            let status = completion_status(c);
+            app.cursor = app.char_len();
+            app.status = status;
         }
         return;
     }
@@ -615,6 +782,7 @@ fn complete(app: &mut App, cwd: &Path) {
     app.input.push_str(&candidates[0]);
     let compl = Completion { candidates, idx: 0, token_start: start };
     app.status = completion_status(&compl);
+    app.cursor = app.char_len();
     app.completion = Some(compl);
 }
 
@@ -710,9 +878,16 @@ fn expand_file_mentions(input: &str, cwd: &Path) -> String {
 // ---- rendering ------------------------------------------------------------
 
 fn ui(f: &mut Frame, app: &App) {
+    // The composer grows with its content (up to MAX_INPUT_ROWS), + borders.
+    let lines = app.input.split('\n').count().clamp(1, MAX_INPUT_ROWS);
+    let input_height = (lines + 2) as u16;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
         .split(f.area());
 
     render_transcript(f, chunks[0], app);
@@ -812,14 +987,44 @@ fn build_rows(
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
-    let title = if app.running { " working… " } else { " message " };
+    let title = if app.running {
+        " working… ".to_string()
+    } else {
+        " message · Enter send · Alt+Enter newline ".to_string()
+    };
+
+    let (crow, ccol) = cursor_rowcol(&app.input, app.cursor);
+    let inner_h = area.height.saturating_sub(2) as usize;
+    // Vertical scroll so the cursor's row stays visible.
+    let scroll = (crow + 1).saturating_sub(inner_h.max(1)) as u16;
+
+    // No wrap: keeps cursor row/col math exact (long lines clip at the edge).
     let para = Paragraph::new(app.input.as_str())
         .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
+        .scroll((scroll, 0));
     f.render_widget(para, area);
-    // Cursor at end of input.
-    let x = area.x + 1 + (app.input.chars().count() as u16 % area.width.saturating_sub(2).max(1));
-    f.set_cursor_position((x, area.y + 1));
+
+    let inner_w = area.width.saturating_sub(2);
+    let x = area.x + 1 + (ccol as u16).min(inner_w.saturating_sub(1));
+    let y = area.y + 1 + (crow as u16).saturating_sub(scroll);
+    f.set_cursor_position((x, y));
+}
+
+/// Cursor (row, col) in logical lines for a char index into `input`.
+fn cursor_rowcol(input: &str, cursor: usize) -> (usize, usize) {
+    let (mut row, mut col) = (0usize, 0usize);
+    for (i, ch) in input.chars().enumerate() {
+        if i == cursor {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (row, col)
 }
 
 #[cfg(test)]
@@ -868,6 +1073,66 @@ mod tests {
         a.apply_event(Event::Usage { prompt_tokens: 600, completion_tokens: 30, total_tokens: 630 });
         assert_eq!(a.last_prompt_tokens, 600);
         assert_eq!(a.total_out_tokens, 50);
+    }
+
+    #[test]
+    fn composer_edits_at_cursor() {
+        let mut a = app();
+        for c in "helo".chars() {
+            a.insert_char(c);
+        }
+        assert_eq!(a.input, "helo");
+        assert_eq!(a.cursor, 4);
+        // Cursor before 'o'; insert the missing 'l' → "hello".
+        a.move_left();
+        a.insert_char('l');
+        assert_eq!(a.input, "hello");
+        assert_eq!(a.cursor, 4); // between the new 'l' and 'o'
+        a.move_end();
+        a.backspace();
+        assert_eq!(a.input, "hell");
+    }
+
+    #[test]
+    fn composer_paste_is_multiline_at_cursor() {
+        let mut a = app();
+        a.insert_str("line1\nline2\nline3");
+        assert_eq!(a.input.split('\n').count(), 3);
+        assert_eq!(a.cursor, a.char_len());
+        let (row, _col) = cursor_rowcol(&a.input, a.cursor);
+        assert_eq!(row, 2, "cursor should be on the last pasted line");
+    }
+
+    #[test]
+    fn composer_delete_word_and_home_end() {
+        let mut a = app();
+        a.insert_str("foo bar baz");
+        a.delete_word();
+        assert_eq!(a.input, "foo bar ");
+        a.move_home();
+        assert_eq!(a.cursor, 0);
+        a.move_end();
+        assert_eq!(a.cursor, a.char_len());
+    }
+
+    #[test]
+    fn composer_history_recall() {
+        let mut a = app();
+        a.insert_str("first");
+        let _ = a.take_input();
+        a.insert_str("second");
+        let _ = a.take_input();
+        assert_eq!(a.history.len(), 2);
+
+        a.insert_str("draft");
+        a.history_prev();
+        assert_eq!(a.input, "second");
+        a.history_prev();
+        assert_eq!(a.input, "first");
+        a.history_next();
+        assert_eq!(a.input, "second");
+        a.history_next();
+        assert_eq!(a.input, "draft", "past newest restores the draft");
     }
 
     #[test]
