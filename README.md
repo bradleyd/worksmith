@@ -78,7 +78,8 @@ what changed.
 
 Keys: `Enter` send · `Tab` autocomplete (`/command` and `@path`; repeat to cycle)
 · `Esc` abort a running turn (or clear input) · `Ctrl+C` quit · `Ctrl+O`
-expand/collapse long tool output & diffs · scroll with the mouse wheel,
+expand/collapse long tool output & diffs · `Ctrl+T` show/hide thinking · scroll
+with the mouse wheel,
 `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `↑`/`↓`, `Home`/`End`. Commands: `/new`
 `/compact` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to include a
 file. (Model cycling, vim keybindings, and themes are planned follow-ups.)

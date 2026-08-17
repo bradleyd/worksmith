@@ -90,6 +90,10 @@ struct App {
     dirty: bool,
     // Tab-completion state for the composer.
     completion: Option<Completion>,
+    // Cosmetic/among-turn state.
+    show_thinking: bool,
+    spinner: usize,
+    turn_start: Option<std::time::Instant>,
 }
 
 impl App {
@@ -113,6 +117,9 @@ impl App {
             cache_width: 0,
             dirty: true,
             completion: None,
+            show_thinking: true,
+            spinner: 0,
+            turn_start: None,
         }
     }
 
@@ -124,7 +131,8 @@ impl App {
     /// Rebuild the wrapped-row cache only when content or width changed.
     fn ensure_rows(&mut self, width: u16) {
         if self.dirty || self.cache_width != width {
-            self.cached_rows = build_rows(&self.items, self.collapse_tools, width);
+            self.cached_rows =
+                build_rows(&self.items, self.collapse_tools, self.show_thinking, width);
             self.cache_width = width;
             self.dirty = false;
         }
@@ -173,7 +181,7 @@ impl App {
             }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
             Event::ToolCall { name, arguments, .. } => {
-                self.push(Kind::Tool, format!("{name} {arguments}"));
+                self.push(Kind::Tool, tool_summary(&name, &arguments));
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
@@ -274,6 +282,21 @@ async fn run_loop(
     let mut app = App::new(model, context_limit, validate_cmd);
     let mut bus_rx = bus.subscribe();
     let mut events = EventStream::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(120));
+
+    // Startup header.
+    app.push(Kind::Notice, format!("worksmith · {}", app.model));
+    app.push(Kind::Notice, format!("cwd: {}", cwd.display()));
+    if !crate::config::load_project_instructions(&cwd).trim().is_empty() {
+        app.push(Kind::Notice, "loaded project instructions (AGENTS.md/CLAUDE.md)".to_string());
+    }
+    if let Some(c) = app.validate_cmd.clone() {
+        app.push(Kind::Notice, format!("validation: {c}"));
+    }
+    app.push(
+        Kind::Notice,
+        "Tab complete · Ctrl+O tools · Ctrl+T thinking · Esc abort · /help · /quit".to_string(),
+    );
 
     let mut turn: Option<JoinHandle<Result<TurnResult>>> = None;
     let mut cancel = CancellationToken::new();
@@ -321,10 +344,18 @@ async fn run_loop(
             res = async { turn.as_mut().unwrap().await }, if turn.is_some() => {
                 turn = None;
                 app.running = false;
+                app.turn_start = None;
                 match res {
                     Ok(Ok(r)) => app.status = format!("[{}]", r.outcome.label()),
                     Ok(Err(e)) => app.push(Kind::Error, format!("turn error: {e:#}")),
                     Err(_) => app.push(Kind::Error, "turn task failed".to_string()),
+                }
+            }
+
+            // Spinner animation while a turn runs.
+            _ = ticker.tick() => {
+                if app.running {
+                    app.spinner = app.spinner.wrapping_add(1);
                 }
             }
         }
@@ -369,6 +400,11 @@ async fn handle_key(
             app.collapse_tools = !app.collapse_tools;
             app.dirty = true;
             app.status = format!("tool output {}", if app.collapse_tools { "collapsed" } else { "expanded" });
+        }
+        KeyCode::Char('t') if ctrl => {
+            app.show_thinking = !app.show_thinking;
+            app.dirty = true;
+            app.status = format!("thinking {}", if app.show_thinking { "shown" } else { "hidden" });
         }
         KeyCode::Char('p') if ctrl => {
             app.status = "model cycling: configure multiple models (coming soon)".into();
@@ -431,7 +467,8 @@ async fn handle_key(
             let cmd = app.validate_cmd.clone();
             let cwd2 = cwd.to_path_buf();
             app.running = true;
-            app.status = "working… (Esc aborts)".into();
+            app.turn_start = Some(std::time::Instant::now());
+            app.status = "working (Esc aborts)".into();
             app.follow = true;
             app.scroll_up = 0;
             *turn = Some(tokio::spawn(async move {
@@ -531,6 +568,31 @@ async fn handle_command(
         }
     }
     Ok(true)
+}
+
+/// A compact, readable one-liner for a tool call instead of raw JSON args.
+fn tool_summary(name: &str, arguments: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    match name {
+        "bash" => s("command").map(|c| format!("bash: {c}")),
+        "read" | "write" | "edit" | "ls" => s("path").map(|p| format!("{name} {p}")),
+        "grep" => match (s("pattern"), s("path")) {
+            (Some(p), Some(path)) => Some(format!("grep /{p}/ {path}")),
+            (Some(p), None) => Some(format!("grep /{p}/")),
+            _ => None,
+        },
+        "find" => s("name").map(|n| format!("find /{n}/")),
+        "doc" => {
+            let action = s("action").unwrap_or_default();
+            match s("path").or_else(|| s("out")) {
+                Some(p) => Some(format!("doc {action} {p}")),
+                None => Some(format!("doc {action}")),
+            }
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("{name} {arguments}"))
 }
 
 /// Tab-complete the current token: `/command` in command position, or `@path`
@@ -675,11 +737,19 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
 
 /// Build the fully-wrapped, styled rows for the transcript (each row already
 /// fits `width`). Tabs are expanded so widths are predictable.
-fn build_rows(items: &[Item], collapse_tools: bool, width: u16) -> Vec<Line<'static>> {
+fn build_rows(
+    items: &[Item],
+    collapse_tools: bool,
+    show_thinking: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
     let w = (width.max(12) as usize).saturating_sub(1);
     let mut rows: Vec<Line> = Vec::new();
 
     for item in items {
+        if item.kind == Kind::Thinking && !show_thinking {
+            continue;
+        }
         if item.kind == Kind::Diff {
             render_diff(&mut rows, &item.text, collapse_tools, width);
             rows.push(Line::from(""));
@@ -834,7 +904,7 @@ mod tests {
     fn build_rows_wraps_to_width_and_labels_channels() {
         let mut a = app();
         a.apply_event(Event::UserMessage { text: "hello world this is a long line".into() });
-        let rows = build_rows(&a.items, a.collapse_tools, 16);
+        let rows = build_rows(&a.items, a.collapse_tools, true, 16);
         // Every row must fit the width (accounting for prefix + content spans).
         for row in &rows {
             let len: usize = row.spans.iter().map(|s| s.content.chars().count()).sum();
@@ -906,10 +976,19 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         " {}  ctx {}% ({}/{})  ↓{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens
     );
+
+    // While a turn runs, show an animated spinner + elapsed seconds.
+    let status = if app.running {
+        const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let elapsed = app.turn_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
+    } else {
+        app.status.clone()
+    };
     let line = Line::from(vec![
         Span::styled(left, Style::default().fg(Color::Black).bg(Color::Cyan)),
         Span::raw("  "),
-        Span::styled(app.status.clone(), Style::default().fg(Color::DarkGray)),
+        Span::styled(status, Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
