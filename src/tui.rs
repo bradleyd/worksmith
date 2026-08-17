@@ -691,25 +691,7 @@ async fn handle_command(
                 }
             }
         }
-        "memory" | "mem" => {
-            let scope = match parts.next() {
-                Some("global") => Some(Scope::Global),
-                Some("project") => Some(Scope::Project),
-                _ => None,
-            };
-            match mem.list(scope) {
-                Ok(rows) if rows.is_empty() => app.push(Kind::Notice, "(no memories)".to_string()),
-                Ok(rows) => {
-                    for r in rows {
-                        app.push(
-                            Kind::Notice,
-                            format!("[{}/{}] {}: {}", r.scope, r.kind, r.subject, r.content),
-                        );
-                    }
-                }
-                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
-            }
-        }
+        "memory" | "mem" => memory_command(app, mem, parts),
         "validate" => {
             let rest: Vec<&str> = parts.collect();
             let rest = rest.join(" ");
@@ -733,6 +715,73 @@ async fn handle_command(
         }
     }
     Ok(true)
+}
+
+/// `/memory [list|global|project | show <id> | forget <id> | add <scope> <kind> <subject> <content…>]`
+fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator<Item = &'a str>) {
+    let sub = parts.next().unwrap_or("list");
+    match sub {
+        "list" | "" => memory_list(app, mem, None),
+        "global" => memory_list(app, mem, Some(Scope::Global)),
+        "project" => memory_list(app, mem, Some(Scope::Project)),
+        "show" => match parts.next() {
+            Some(id) => match mem.get(id) {
+                Ok(Some(r)) => app.push(
+                    Kind::Notice,
+                    format!(
+                        "[{}/{}] {} (importance {}, {})\n{}",
+                        r.scope, r.kind, r.subject, r.importance, r.status, r.content
+                    ),
+                ),
+                Ok(None) => app.push(Kind::Notice, format!("(no memory {id})")),
+                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+            },
+            None => app.push(Kind::Notice, "usage: /memory show <id>".to_string()),
+        },
+        "forget" => match parts.next() {
+            Some(id) => match mem.forget(id) {
+                Ok(true) => app.push(Kind::Notice, format!("forgot {id}")),
+                Ok(false) => app.push(Kind::Notice, format!("(no memory {id})")),
+                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+            },
+            None => app.push(Kind::Notice, "usage: /memory forget <id>".to_string()),
+        },
+        "add" => {
+            let scope = parts.next().and_then(Scope::parse);
+            let kind = parts.next().map(str::to_string);
+            let subject = parts.next().map(str::to_string);
+            let content = parts.collect::<Vec<_>>().join(" ");
+            match (scope, kind, subject) {
+                (Some(scope), Some(kind), Some(subject)) if !content.is_empty() => {
+                    match mem.remember(scope, &kind, &subject, &content, 60) {
+                        Ok(r) => app.push(Kind::Notice, format!("remembered {} [{}] {}", r.id, r.kind, r.subject)),
+                        Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                    }
+                }
+                _ => app.push(
+                    Kind::Notice,
+                    "usage: /memory add <global|project> <decision|constraint|preference|fact|lesson> <subject> <content…>"
+                        .to_string(),
+                ),
+            }
+        }
+        other => app.push(Kind::Error, format!("unknown /memory subcommand: {other}")),
+    }
+}
+
+fn memory_list(app: &mut App, mem: &MemoryStore, scope: Option<Scope>) {
+    match mem.list(scope) {
+        Ok(rows) if rows.is_empty() => app.push(Kind::Notice, "(no memories)".to_string()),
+        Ok(rows) => {
+            for r in rows {
+                app.push(
+                    Kind::Notice,
+                    format!("{}  [{}/{}] {}: {}", r.id, r.scope, r.kind, r.subject, r.content),
+                );
+            }
+        }
+        Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+    }
 }
 
 /// A compact, readable one-liner for a tool call instead of raw JSON args.
