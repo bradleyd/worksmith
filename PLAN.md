@@ -567,6 +567,20 @@ subscription logins (Anthropic/OpenAI OAuth), brew/binstall distribution,
 agent-line-style workflow definitions, and porting rustopedia's Rust-development brain in as a skill so one binary
 covers both general and Rust-specific work.
 
+**M9 — Metrics & cost tracking**: surface useful numbers in the UI (expanding
+the footer, plus a `/stats` command and/or a metrics panel):
+- tokens in / out / **cached** — parse `prompt_tokens_details.cached_tokens`
+  from OpenAI-compat usage to show a cache hit-rate.
+- **cost** — a per-model price table in config (`[models.<id>] input/output
+  price`); accumulate per-turn and per-session spend. Local vLLM = free.
+- **speed** — generation tok/s and time-to-first-token.
+- **context %** and turn / tool-call / step counts; retry & nudge counts.
+- session totals + validation pass-rate over the session.
+Prompt caching itself: automatic server-side today (vLLM `--enable-prefix-
+caching`, OpenAI/OpenRouter auto-cache) because we keep a stable message prefix;
+explicit Anthropic `cache_control` breakpoints land with the Anthropic client
+(§3). Keeping the system-prompt/`<MEMORY>` prefix stable maximizes cache hits.
+
 ## 11. Open decisions
 
 1. `rig` vs hand-rolled provider layer (M0 decides). Rig's OpenAI-compat
