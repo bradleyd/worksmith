@@ -503,8 +503,9 @@ it's the surface open-source contributors build against.
   lines, plain assistant text. M2 makes it a proper styled layout.)
 - **Tabbed layout (later, vim-style).** Split the screen into tabs: a main
   window (the foreground conversation) plus additional tabs for workers/agents
-  activity (§7), `/tree`, etc. Tab-switching keys (vim-like). Depends on the
-  agent/worker milestones landing first — see M8.
+  activity (§7), a **metrics tab** (M9 depth view), `/tree`, etc. Tab-switching
+  keys (vim-like). Depends on the agent/worker milestones landing first — see
+  M8. The main-view footer stays a quick-glance summary; depth lives in tabs.
 - **Scrolling.** Mouse wheel + PageUp/Down + Ctrl+U/D (half-page) + Up/Down +
   Home/End, with follow-tail on new output. (Shipped in M2.)
 - **Vim keybindings (later).** A vim mode for navigation/scrolling (`j/k`,
@@ -567,15 +568,18 @@ subscription logins (Anthropic/OpenAI OAuth), brew/binstall distribution,
 agent-line-style workflow definitions, and porting rustopedia's Rust-development brain in as a skill so one binary
 covers both general and Rust-specific work.
 
-**M9 — Metrics & cost tracking**: surface useful numbers in the UI (expanding
-the footer, plus a `/stats` command and/or a metrics panel):
-- tokens in / out / **cached** — parse `prompt_tokens_details.cached_tokens`
-  from OpenAI-compat usage to show a cache hit-rate.
-- **cost** — a per-model price table in config (`[models.<id>] input/output
-  price`); accumulate per-turn and per-session spend. Local vLLM = free.
-- **speed** — generation tok/s and time-to-first-token.
-- **context %** and turn / tool-call / step counts; retry & nudge counts.
-- session totals + validation pass-rate over the session.
+**M9 — Metrics & cost tracking**: two tiers of visibility.
+- **Quick-glance (footer, main view):** only the few numbers you watch live —
+  model, context %, tokens ↑/↓, session cost, gen tok/s. Can land early
+  (footer already shows some). Keep it minimal; the main view is for the work.
+- **Metrics tab (depth):** a dedicated tab (rides on the tabbed layout, §9 /
+  M8, which depends on M6) for everything else — per-turn token/cost history,
+  cache hit-rate (parse `prompt_tokens_details.cached_tokens`), cost breakdown
+  by turn, time-to-first-token + tok/s trends, turn / tool-call / step counts,
+  retry & nudge counts, per-tool usage, validation pass-rate, and session
+  totals. A `/stats` command dumps the same for `--plain`/non-tab contexts.
+- **Cost** needs a per-model price table in config (`[models.<id>] input/output
+  price`); local vLLM = free.
 Prompt caching itself: automatic server-side today (vLLM `--enable-prefix-
 caching`, OpenAI/OpenRouter auto-cache) because we keep a stable message prefix;
 explicit Anthropic `cache_control` breakpoints land with the Anthropic client
