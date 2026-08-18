@@ -220,3 +220,42 @@ fn session_round_trip() {
     assert_eq!(reopened.messages()[0].content.as_deref(), Some("hello"));
     assert_eq!(reopened.cwd(), dir.path().display().to_string());
 }
+
+#[test]
+fn a_mistyped_config_section_fails_loudly() {
+    common::isolate_home();
+    // `[agent]` (the loop) vs `[agents]` (the workers) is one character apart,
+    // and silently ignoring the wrong one cost a whole dogfooding session:
+    // every supervisor setting was dropped without a word.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".worksmith");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        "model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\n\
+         [agent]\nsupervisor = \"rules\"\n",
+    )
+    .unwrap();
+
+    let err = worksmith::config::Config::load(dir.path()).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("supervisor"), "the error must name the offending key: {msg}");
+}
+
+#[test]
+fn a_correct_config_still_loads() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".worksmith");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        "model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\n\
+         [agents]\nsupervisor = \"rules\"\nmax-nudges = 2\nmodel = \"p/small\"\n",
+    )
+    .unwrap();
+
+    let c = worksmith::config::Config::load(dir.path()).unwrap();
+    assert_eq!(c.supervisor().max_nudges, 2);
+    assert_eq!(c.agents_model(), Some("p/small"));
+}

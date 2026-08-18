@@ -14,7 +14,7 @@ use crate::supervisor::{Mode, SupervisorConfig};
 
 /// Merged Worksmith configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct Config {
     /// Default model as `provider/model` (or bare `model` if one provider).
     pub model: Option<String>,
@@ -47,7 +47,7 @@ impl WebProvider {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct WebConfig {
     /// `brave` | `tavily` | `searxng`. Unset = web search is unavailable.
     pub provider: Option<String>,
@@ -65,7 +65,7 @@ pub struct ResolvedWeb {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct AgentsConfig {
     /// Max concurrently-running spawned workers.
     pub max: Option<usize>,
@@ -89,7 +89,7 @@ pub struct AgentsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ProviderConfig {
     /// `openai-compat` (default) or `anthropic` (later).
     #[serde(rename = "type", default = "default_provider_kind")]
@@ -105,7 +105,7 @@ fn default_provider_kind() -> String {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct AgentConfig {
     pub max_steps: Option<usize>,
     /// Validation retries before giving up (re-plan attempts).
@@ -121,7 +121,7 @@ pub struct AgentConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct ToolsConfig {
     pub bash_timeout_secs: Option<u64>,
 }
