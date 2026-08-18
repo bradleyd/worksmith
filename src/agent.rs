@@ -555,7 +555,18 @@ impl Agent {
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let completion = self.client.stream(req, tx, CancellationToken::new()).await?;
         let _ = drain.await;
-        Ok(completion.content.unwrap_or_default())
+        let text = completion.content.unwrap_or_default();
+        if text.trim().is_empty() {
+            // Empty is never a useful answer to a helper call, and silently
+            // returning it makes the caller blame its own parsing. The usual
+            // cause is a thinking model spending the whole budget before it
+            // starts answering.
+            anyhow::bail!(
+                "model returned no content (max_tokens may have been consumed by reasoning \
+                 — try --fast or a larger budget)"
+            );
+        }
+        Ok(text)
     }
 
     /// Summarize old turns into a single note and keep the recent turns

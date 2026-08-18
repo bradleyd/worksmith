@@ -1,6 +1,8 @@
 //! End-to-end test of the OpenAI-compatible SSE parser + tool-call assembly,
 //! against a tiny in-process mock server. No real model needed.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -82,4 +84,40 @@ data: [DONE]\n\n";
         }
     }
     assert_eq!(text, "Reading file.");
+}
+
+#[tokio::test]
+async fn a_mid_stream_error_fails_instead_of_returning_nothing() {
+    common::isolate_home();
+    // Providers report failures in band: HTTP 200, then an error frame. Treating
+    // that as an unparseable chunk produced an empty *successful* completion —
+    // a rate-limited planner came back as "the model said nothing", and three
+    // fan-out diagnoses were wrong because of it.
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n\
+               data: {\"error\":{\"message\":\"rate-limited upstream\",\"code\":429}}\n\n\
+               data: [DONE]\n\n";
+    let base = spawn_mock(sse);
+    let client = OpenAiCompatClient::new(reqwest::Client::new(), base, None);
+
+    let (tx, mut rx) = mpsc::channel::<StreamEvent>(32);
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let err = client
+        .stream(
+            ChatRequest {
+                model: "m".into(),
+                messages: vec![Message::user("hi")],
+                tools: vec![],
+                temperature: None,
+                max_tokens: None,
+                thinking: None,
+            },
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an error frame must fail the call");
+    let _ = drain.await;
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("rate-limited upstream"), "the provider's reason must survive: {msg}");
 }

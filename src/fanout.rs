@@ -243,7 +243,9 @@ pub async fn plan_fanout(
     };
 
     let want_n = want.unwrap_or(max);
-    match agent.ask(&system, &task, 1024).await {
+    // Generous, because a thinking model reasons inside this budget and an
+    // exhausted one returns nothing at all.
+    match agent.ask(&system, &task, 2048).await {
         Ok(text) => match parse_subtasks(&text, want, max) {
             Ok(tasks) => {
                 let note = format!("planner split the work into {} task(s)", tasks.len());

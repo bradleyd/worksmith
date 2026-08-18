@@ -87,6 +87,21 @@ impl LlmClient for OpenAiCompatClient {
                 if data.is_empty() {
                     continue;
                 }
+                // Providers report mid-stream failures *in band*: HTTP 200,
+                // then `data: {"error": {...}}`. Dropping those as unparseable
+                // turns a rate-limited request into an empty, successful-looking
+                // answer — which is exactly how a 429'd planner came back as
+                // "the model said nothing" instead of "the call failed".
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
+                    && let Some(err) = v.get("error")
+                {
+                    let msg = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| err.to_string());
+                    bail!("LLM stream error: {msg}");
+                }
                 let chunk: ChunkResp = match serde_json::from_str(data) {
                     Ok(c) => c,
                     Err(_) => continue, // tolerate keep-alives / partials
