@@ -7,6 +7,10 @@ validation command passes afterward:
   raw     — `worksmith --mode json "<goal>"`         (model stops when it decides)
   guided  — `worksmith --mode json --until "<validate>" "<goal>"`
             (the validation-driven loop: re-plan until the check passes)
+  workers — `worksmith --mode json spawn -n N "<goal>"`
+            (fan out to N workers, parent synthesizes; needs `workers = N` in
+            the task, and is *unguided* — workers have no validator, so the
+            honest comparison is raw vs workers, not guided vs workers)
 
 Both are judged by the SAME criterion — the harness runs `validate` in the
 scratch dir after the agent finishes — so the comparison is fair. The question
@@ -109,13 +113,20 @@ def validate(workdir: Path, cmd: str) -> bool:
 
 
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
-            keep: bool = False) -> dict:
+            keep: bool = False, worker_model: str | None = None) -> dict:
     workdir = setup_workdir(task)
     cmd = [binp, "--mode", "json"]
-    if mode == "guided":
-        cmd += ["--until", task["validate"]]
     if model:
         cmd += ["--model", model]
+    if mode == "workers":
+        # `spawn` is a subcommand, so its args come after it. The task declares
+        # how many workers it decomposes into; a task that doesn't decompose
+        # isn't run in this mode at all (see main).
+        cmd += ["spawn", "-n", str(task["workers"])]
+        if worker_model:
+            cmd += ["--worker-model", worker_model]
+    elif mode == "guided":
+        cmd += ["--until", task["validate"]]
     cmd.append(task["goal"])
 
     row = {"task": task["name"], "mode": mode, "passed": False,
@@ -152,6 +163,11 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=1,
                     help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
+    ap.add_argument("--worker-model",
+                    help="model the spawned workers run on (workers mode); the "
+                         "synthesis still uses --model")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the command for each run without executing it")
     ap.add_argument("--keep", action="store_true",
                     help="keep the scratch dir of any run that fails, for inspection")
     args = ap.parse_args()
@@ -169,10 +185,30 @@ def main() -> int:
     rows = []
     for task in tasks:
         for mode in modes:
+            if mode == "workers" and not task.get("workers"):
+                print(f"skipping {task['name']} [workers]: no `workers = N` in the task "
+                      "(it doesn't decompose)", file=sys.stderr)
+                continue
             for i in range(args.repeat):
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
+                if args.dry_run:
+                    wd = setup_workdir(task)
+                    cmd = [binp, "--mode", "json"]
+                    if args.model:
+                        cmd += ["--model", args.model]
+                    if mode == "workers":
+                        cmd += ["spawn", "-n", str(task["workers"])]
+                        if args.worker_model:
+                            cmd += ["--worker-model", args.worker_model]
+                    elif mode == "guided":
+                        cmd += ["--until", "<validate>"]
+                    cmd.append("<goal>")
+                    shutil.rmtree(wd, ignore_errors=True)
+                    print(f"  {tag}: {' '.join(cmd)}", file=sys.stderr)
+                    continue
                 print(f"running {tag} …", file=sys.stderr)
-                row = run_one(binp, task, mode, args.model, args.timeout, args.keep)
+                row = run_one(binp, task, mode, args.model, args.timeout, args.keep,
+                              args.worker_model)
                 row["run"] = i
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"
@@ -202,12 +238,17 @@ def main() -> int:
         line = f"{task['name']:<16}"
         for mode in modes:
             passed, n, _calls, tok = agg(task["name"], mode)
-            line += f" {f'{passed}/{n}':>12} {tok:>10.0f}"
+            if n == 0:
+                line += f" {'—':>12} {'—':>10}"
+            else:
+                line += f" {f'{passed}/{n}':>12} {tok:>10.0f}"
         print(line)
 
     print("\n=== summary ===")
     for mode in modes:
         mr = [r for r in rows if r["mode"] == mode]
+        if not mr:
+            continue
         passed = sum(1 for r in mr if r["passed"])
         gen = sum(r["gen_tokens"] for r in mr)
         print(f"  {mode:<8} {passed}/{len(mr)} passed   total gen_tokens={gen}")

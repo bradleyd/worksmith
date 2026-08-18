@@ -1,6 +1,12 @@
 name = "newsletter-judge"
 description = "Long-form generation + self-judgment against a real editorial rubric (the bluecollar-newsletter skill)"
 
+# Three drafts are three independent jobs, so this task can also run in
+# `workers` mode: one worker per draft, the parent judging what comes back.
+# One model writing all three sequentially in a single context is the worst
+# arrangement of this work, and that's what raw/guided measure.
+workers = 3
+
 # The skill is copied into the workdir because worksmith has no skill loader yet
 # (PLAN tier-1). Once it does, this task becomes the skill-loading test too.
 fixtures = [

@@ -589,6 +589,27 @@ subscription logins (Anthropic/OpenAI OAuth), brew/binstall distribution,
 agent-line-style workflow definitions, and porting rustopedia's Rust-development brain in as a skill so one binary
 covers both general and Rust-specific work.
 
+On workflow definitions specifically: chaining workers (draft → review → revise)
+should be a **file, not TUI syntax**. A pipeline you'd reuse is one you'd rather
+store than retype, and a pipe-style `/spawn "a" | "b"` is shell idiom in a place
+where you write prose to a model. The reviewer stage in particular needs more
+structure than a freeform skill gives — it has to produce a *decision*, not
+prose, so the loop can act on it deterministically: a fixed verdict shape
+(pass/fail + reason + optional line refs), a named rubric, and a retry budget.
+Call it a workflow, a contract, a review spec — the point is the shape is fixed
+even when the prompt isn't.
+
+Two rules learned before building any of it:
+- **Stages pass paths, not payloads.** Workers already share a cwd, so stage 2
+  reads the file stage 1 wrote. Re-sending a 2,000-word draft through four
+  stages is 4× the context for no gain.
+- **Don't add a knob the default can infer.** When the parent judges, a
+  per-worker reviewer is duplicated work — the parent reads everything anyway.
+  Worker-level validation earns its keep only when the check is cheap and
+  objective (a shell command), or when the parent's context can't hold every
+  worker's output. Otherwise it's N extra model calls to reach a judgment that
+  was going to happen regardless.
+
 **M9 — Metrics & cost tracking**: two tiers of visibility.
 - **Quick-glance (footer, main view):** only the few numbers you watch live —
   model, context %, tokens ↑/↓, session cost, gen tok/s. Can land early

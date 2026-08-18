@@ -11,9 +11,29 @@ after the agent finishes:
   it's done)
 - **guided** — `worksmith --mode json --until "<validate>" "<goal>"` (the
   validation-driven loop re-plans until the check passes)
+- **workers** — `worksmith --mode json spawn -n N "<goal>"` (fan out to N
+  workers, parent synthesizes what comes back)
 
 If guidance is doing its job, `guided` should have a higher pass rate than
 `raw`, especially on the iterate-until-correct tasks.
+
+`workers` mode is opt-in per task: it only runs where the task declares
+`workers = N`, because most of the suite is a single action and fanning that
+out measures nothing but overhead. Two things to keep straight when reading
+its numbers:
+
+- **It is unguided.** Workers currently run with no validator, so the honest
+  comparison is `raw` vs `workers` — both stop when the model says so.
+  `guided` vs `workers` moves two variables at once.
+- **Its token count includes the workers.** Worker spend never reaches the
+  parent's event stream (each runs on its own bus), so `worksmith spawn`
+  re-emits the total. Without that a fan-out would score as free.
+
+`--worker-model` runs the workers on a different (usually cheaper) model while
+the synthesis stays on `--model`. On one machine, be careful pointing both at
+a local server: two resident models can exhaust unified memory. Straddling
+(local workers, remote judge) avoids it, as does `--no-synthesis` plus a
+second command with the models swapped.
 
 ## Run
 
@@ -23,6 +43,9 @@ python3 evals/run.py --task fix-bug     # one task
 python3 evals/run.py --modes guided     # one mode
 python3 evals/run.py --model openrouter/qwen/qwen3-32b
 python3 evals/run.py --timeout 240 --json results.json
+python3 evals/run.py --modes workers --worker-model openrouter/qwen/qwen3.5-9b
+python3 evals/run.py --dry-run              # print commands, run nothing
+python3 evals/run.py --keep                 # keep the scratch dir of failures
 ```
 
 It reuses `<repo>/.worksmith/config.toml` for the provider/model, so make sure
@@ -35,6 +58,7 @@ name = "fix-bug"
 description = "..."
 goal = "<prompt given to the agent>"
 validate = "<shell command; exit 0 = success>"
+workers = 3             # optional: run in `workers` mode with N workers
 
 [files]                 # optional: files written into the scratch dir first
 "bug.py" = '''
