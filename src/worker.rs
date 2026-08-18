@@ -100,8 +100,51 @@ impl Worker {
             changed: r.changed.clone(),
             result: r.result.clone(),
             session_id: self.session_id.clone(),
+            nudges: r.nudges,
+            escalation: r.escalation.clone(),
+            group: self.group,
         }
     }
+}
+
+/// A task waiting for a free worker slot.
+struct PendingTask {
+    task: String,
+    system: String,
+    group: Option<u64>,
+}
+
+/// A fan-out: several workers answering one request together.
+struct GroupInfo {
+    request: String,
+    total: usize,
+}
+
+/// What happened to a spawn request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnOutcome {
+    Started(String),
+    /// All slots were busy; queued at this 1-based position.
+    Queued(usize),
+}
+
+impl SpawnOutcome {
+    /// The worker id, if it started immediately.
+    pub fn started(&self) -> Option<&str> {
+        match self {
+            SpawnOutcome::Started(id) => Some(id),
+            SpawnOutcome::Queued(_) => None,
+        }
+    }
+}
+
+/// The result of a fan-out: what started now, what's waiting.
+#[derive(Debug, Clone, Default)]
+pub struct FanOutReport {
+    pub started: Vec<String>,
+    pub queued: usize,
+    /// Set when this fan-out is a group whose results are reported together.
+    pub group: Option<u64>,
 }
 
 /// Tracks spawned workers and enforces the concurrency cap.
@@ -109,32 +152,155 @@ pub struct WorkerManager {
     template: Arc<Agent>,
     cwd: PathBuf,
     max: usize,
+    supervisor: SupervisorConfig,
     workers: Vec<Worker>,
+    queued: VecDeque<PendingTask>,
+    groups: HashMap<u64, GroupInfo>,
     counter: usize,
+    next_group: u64,
 }
 
 impl WorkerManager {
     pub fn new(template: Arc<Agent>, cwd: PathBuf, max: usize) -> Self {
-        Self { template, cwd, max, workers: Vec::new(), counter: 0 }
+        Self {
+            template,
+            cwd,
+            max,
+            supervisor: SupervisorConfig::default(),
+            workers: Vec::new(),
+            queued: VecDeque::new(),
+            groups: HashMap::new(),
+            counter: 0,
+            next_group: 0,
+        }
+    }
+
+    /// Watch spawned workers with this policy (`agents.supervisor` et al).
+    pub fn with_supervisor(mut self, cfg: SupervisorConfig) -> Self {
+        self.supervisor = cfg;
+        self
+    }
+
+    pub fn supervisor_config(&self) -> &SupervisorConfig {
+        &self.supervisor
     }
 
     pub fn running_count(&self) -> usize {
         self.workers.iter().filter(|w| w.summary().status.is_running()).count()
     }
 
-    /// Spawn a worker for `task` with the given `system` prompt. Returns the new
-    /// worker's id, or an error if the concurrency cap is reached.
-    pub fn spawn(&mut self, task: String, system: String) -> Result<String, String> {
+    /// Spawn a worker for `task` with the given `system` prompt. At the
+    /// concurrency cap the task is queued instead and started by [`Self::pump`]
+    /// when a slot frees.
+    pub fn spawn(&mut self, task: String, system: String) -> Result<SpawnOutcome, String> {
+        self.spawn_in(task, system, None)
+    }
+
+    fn spawn_in(
+        &mut self,
+        task: String,
+        system: String,
+        group: Option<u64>,
+    ) -> Result<SpawnOutcome, String> {
         if self.running_count() >= self.max {
-            return Err(format!("worker limit reached ({} running)", self.max));
+            self.queued.push_back(PendingTask { task, system, group });
+            return Ok(SpawnOutcome::Queued(self.queued.len()));
         }
+        self.start(task, system, group).map(SpawnOutcome::Started)
+    }
+
+    /// Spawn one worker per task. More than one becomes a *group*: they're
+    /// answering `request` together, so the parent can report on them as a unit.
+    /// A session-creation failure drops that one task, not the whole fan-out.
+    pub fn spawn_many(
+        &mut self,
+        tasks: Vec<String>,
+        system: String,
+        request: String,
+    ) -> FanOutReport {
+        let group = if tasks.len() > 1 {
+            self.next_group += 1;
+            self.groups.insert(
+                self.next_group,
+                GroupInfo { request, total: tasks.len() },
+            );
+            Some(self.next_group)
+        } else {
+            None
+        };
+
+        let mut report = FanOutReport { group, ..Default::default() };
+        for task in tasks {
+            match self.spawn_in(task, system.clone(), group) {
+                Ok(SpawnOutcome::Started(id)) => report.started.push(id),
+                Ok(SpawnOutcome::Queued(_)) => report.queued += 1,
+                Err(_) => {
+                    // The group is now one worker short; don't wait forever on it.
+                    if let Some(g) = group.and_then(|g| self.groups.get_mut(&g)) {
+                        g.total = g.total.saturating_sub(1);
+                    }
+                }
+            }
+        }
+        report
+    }
+
+    /// The request a fan-out was serving, and how many workers are in it.
+    pub fn group_info(&self, group: u64) -> Option<(&str, usize)> {
+        self.groups.get(&group).map(|g| (g.request.as_str(), g.total))
+    }
+
+    /// Start queued tasks while slots are free. Returns the ids just started.
+    /// Called from the UI loop's poll, beside `take_newly_finished`.
+    pub fn pump(&mut self) -> Vec<String> {
+        let mut started = Vec::new();
+        while self.running_count() < self.max {
+            let Some(p) = self.queued.pop_front() else {
+                break;
+            };
+            match self.start(p.task, p.system, p.group) {
+                Ok(id) => started.push(id),
+                Err(_) => continue, // couldn't create a session; skip this one
+            }
+        }
+        started
+    }
+
+    pub fn queued_count(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// Discard everything still waiting. Returns how many were dropped.
+    /// Dropped tasks are removed from their group's expected count, so a group
+    /// that loses members still completes instead of hanging forever.
+    pub fn drop_queued(&mut self) -> usize {
+        let n = self.queued.len();
+        for p in self.queued.drain(..) {
+            if let Some(g) = p.group.and_then(|g| self.groups.get_mut(&g)) {
+                g.total = g.total.saturating_sub(1);
+            }
+        }
+        n
+    }
+
+    /// Actually launch a worker. Callers gate on the concurrency cap.
+    fn start(
+        &mut self,
+        task: String,
+        system: String,
+        group: Option<u64>,
+    ) -> Result<String, String> {
         self.counter += 1;
         let id = format!("w{}", self.counter);
 
         let session = Session::create(&self.cwd).map_err(|e| format!("session: {e}"))?;
         let session_id = session.id.clone();
         let bus = EventBus::new();
-        let agent = self.template.fork(bus.clone(), session_id.clone());
+        let steering = Steering::new();
+        let agent = self
+            .template
+            .fork(bus.clone(), session_id.clone())
+            .with_steering(steering.clone());
         let mut rx = bus.subscribe();
         drop(bus); // the forked agent keeps a sender clone
 

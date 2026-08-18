@@ -17,11 +17,12 @@ use worksmith::event::{Event, EventBus};
 use worksmith::llm::LlmClient;
 use worksmith::llm::openai::OpenAiCompatClient;
 use worksmith::memory::{MemoryStore, Scope};
-use worksmith::prompt::build_system_prompt;
+use worksmith::prompt::{build_system_prompt, build_worker_prompt};
 use worksmith::session::Session;
 use worksmith::tools::{ToolContext, ToolRegistry};
 use worksmith::tui::run_tui;
 use worksmith::validation::CommandValidator;
+use worksmith::worker::WorkerManager;
 
 #[derive(Parser, Debug)]
 #[command(name = "worksmith", version, about = "A minimal terminal coding-agent harness")]
@@ -152,10 +153,15 @@ async fn run(args: Args) -> Result<()> {
             bash_timeout,
             config.context_limit(),
             config.agents_max(),
+            config.supervisor(),
+            config.fanout_auto(),
+            config.synthesize(),
         )
         .await;
     }
 
+    // Workers need a shared handle to the agent; the TUI path already owns it.
+    let agent = Arc::new(agent);
     let renderer = spawn_renderer(bus.subscribe(), mode);
     bus.emit(Event::SessionStarted { id: session.id.clone() });
 
@@ -177,8 +183,17 @@ async fn run(args: Args) -> Result<()> {
                 }
             })
     } else {
-        repl(&agent, &mut session, &cwd, args.prompt.clone(), &resolved.model, validate_cmd, bash_timeout)
-            .await
+        repl(
+            agent.clone(),
+            &mut session,
+            &cwd,
+            args.prompt.clone(),
+            &resolved.model,
+            validate_cmd,
+            bash_timeout,
+            &config,
+        )
+        .await
     };
 
     // Drop every event-bus sender (the original *and* the agent's clone) so the
@@ -259,6 +274,7 @@ async fn repl(
 
         let trimmed = input.trim();
         if trimmed.is_empty() {
+            drain_workers(&mut workers, session);
             continue;
         }
 
@@ -297,9 +313,12 @@ async fn repl(
         }
 
         if let Some(cmd) = trimmed.strip_prefix('/') {
-            match handle_command(cmd, &mem, session, cwd) {
+            match handle_command(cmd, &mem, session, cwd, &mut workers, &agent, config).await {
                 CommandResult::Quit => break,
-                CommandResult::Handled => continue,
+                CommandResult::Handled => {
+                    drain_workers(&mut workers, session);
+                    continue;
+                }
                 CommandResult::NotACommand => {}
             }
         }
@@ -330,9 +349,54 @@ async fn repl(
             Ok(_) => {}
             Err(e) => eprintln!("\x1b[31mturn error:\x1b[0m {e:#}"),
         }
+        drain_workers(&mut workers, session);
     }
 
     Ok(())
+}
+
+/// Start anything queued, then print and record whatever finished. The plain
+/// REPL has no event loop, so this runs at the natural pauses instead.
+/// Results are appended to the session so the next turn can use them — the
+/// same contract as the TUI, minus the automatic synthesis turn (there's no
+/// loop here to fire one while you're at the prompt).
+fn drain_workers(workers: &mut WorkerManager, session: &mut Session) {
+    for id in workers.pump() {
+        println!("(started {id} from the queue)");
+    }
+    for w in workers.take_newly_finished() {
+        println!("{}", worksmith::report::worker_headline(&w));
+        let report = worksmith::report::single_report(&w);
+        if let Err(e) = session.append_message(worksmith::llm::Message::user(report)) {
+            eprintln!("(could not record the worker's result: {e})");
+        }
+    }
+}
+
+/// The tail of a session as plain text for the memory classifier. Tool output
+/// is dropped — it's exactly what must never become durable memory.
+fn render_recent(session: &Session, max_messages: usize) -> String {
+    use worksmith::llm::Role;
+    let msgs = session.messages();
+    let start = msgs.len().saturating_sub(max_messages);
+    let mut out = String::new();
+    for m in &msgs[start..] {
+        let role = match m.role {
+            Role::System | Role::Tool => continue,
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        if let Some(c) = &m.content
+            && !c.trim().is_empty()
+        {
+            let body: String = c.chars().take(2_000).collect();
+            out.push_str(&format!("[{role}] {body}\n"));
+        }
+        for tc in &m.tool_calls {
+            out.push_str(&format!("[{role} called {}]\n", tc.name));
+        }
+    }
+    out
 }
 
 enum CommandResult {
@@ -341,11 +405,15 @@ enum CommandResult {
     NotACommand,
 }
 
-fn handle_command(
+#[allow(clippy::too_many_arguments)]
+async fn handle_command(
     cmd: &str,
     mem: &MemoryStore,
     session: &mut Session,
     cwd: &Path,
+    workers: &mut WorkerManager,
+    agent: &Arc<Agent>,
+    config: &Config,
 ) -> CommandResult {
     let mut parts = cmd.split_whitespace();
     let head = parts.next().unwrap_or("");

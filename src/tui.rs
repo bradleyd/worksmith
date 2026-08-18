@@ -31,10 +31,18 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, TurnResult};
 use crate::event::{Event, EventBus};
 use crate::memory::{MemoryStore, Scope};
-use crate::prompt::build_system_prompt;
+use crate::prompt::{build_system_prompt, build_worker_prompt};
 use crate::session::Session;
 use crate::validation::CommandValidator;
-use crate::worker::{WorkerManager, WorkerStatus};
+use crate::fanout::{
+    FanOut, PendingFanOut, assign, fanout_notice, matching_files, parse_spawn, plan_fanout,
+    spawn_notice,
+};
+use crate::report::{
+    GroupAcc, group_report, single_report, truncate, truncate_chars, worker_headline,
+};
+use crate::supervisor::SupervisorConfig;
+use crate::worker::WorkerManager;
 
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,6 +114,17 @@ struct App {
     spinner: usize,
     turn_start: Option<std::time::Instant>,
     agents_running: usize,
+    agents_queued: usize,
+    /// `agents.fanout = "auto"` — bare `/spawn` may fan out on its own.
+    fanout_auto: bool,
+    /// `agents.synthesize` — after a fan-out group reports back, run a turn
+    /// that combines their results into one answer.
+    synthesize: bool,
+    /// Set by `/spawn` when the fan-out needs a planner call; run_loop picks it
+    /// up and runs it off the UI task.
+    pending_fanout: Option<PendingFanOut>,
+    /// Set by `/memory extract`; run_loop runs the classifier off the UI task.
+    pending_extract: bool,
 }
 
 impl App {
@@ -137,6 +156,11 @@ impl App {
             spinner: 0,
             turn_start: None,
             agents_running: 0,
+            agents_queued: 0,
+            fanout_auto: true,
+            synthesize: true,
+            pending_fanout: None,
+            pending_extract: false,
         }
     }
 
@@ -411,6 +435,9 @@ pub async fn run_tui(
         bash_timeout,
         context_limit,
         agents_max,
+        supervisor,
+        fanout_auto,
+        synthesize,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -452,13 +479,19 @@ async fn run_loop(
     bash_timeout: Duration,
     context_limit: usize,
     agents_max: usize,
+    supervisor: SupervisorConfig,
+    fanout_auto: bool,
+    synthesize: bool,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let session = Arc::new(AsyncMutex::new(session));
     let mem = MemoryStore::open(Some(&cwd)).or_else(|_| MemoryStore::open(None))?;
-    let mut workers = WorkerManager::new(agent.clone(), cwd.clone(), agents_max);
+    let mut workers = WorkerManager::new(agent.clone(), cwd.clone(), agents_max)
+        .with_supervisor(supervisor);
 
     let mut app = App::new(model, context_limit, validate_cmd);
+    app.fanout_auto = fanout_auto;
+    app.synthesize = synthesize;
     let mut bus_rx = bus.subscribe();
     // Option so we can drop the input reader while an external editor owns the tty.
     let mut events: Option<EventStream> = Some(EventStream::new());
@@ -484,36 +517,76 @@ async fn run_loop(
 
     let mut turn: Option<JoinHandle<Result<TurnResult>>> = None;
     let mut cancel = CancellationToken::new();
+    // A planner call in flight, with the system prompt its workers will use.
+    let mut fanout: Option<(JoinHandle<Vec<String>>, String, String)> = None;
+    // Fan-out groups still collecting their members' results.
+    let mut groups: Vec<GroupAcc> = Vec::new();
+    // A memory-extraction classifier call in flight.
+    let mut extract: Option<JoinHandle<String>> = None;
 
     loop {
+        // Start queued workers whose slot just freed.
+        for id in workers.pump() {
+            app.push(Kind::Notice, format!("started {id} (from the queue)"));
+        }
+
         // Surface any workers that just finished (so you don't have to poll).
         for w in workers.take_newly_finished() {
-            let glyph = match w.status {
-                WorkerStatus::Done => "✓",
-                WorkerStatus::Failed => "✗",
-                _ => "◼",
-            };
-            let summary = if w.result.trim().is_empty() {
-                w.last.clone()
-            } else {
-                truncate(&w.result, 300)
-            };
-            let changed = if w.changed.is_empty() {
-                String::new()
-            } else {
-                format!(" · changed {} file(s): {}", w.changed.len(), w.changed.join(", "))
-            };
-            app.push(
-                Kind::Notice,
-                format!("{glyph} agent {} [{}]{}: {}", w.id, w.status.label(), changed, summary),
-            );
+            app.push(Kind::Notice, worker_headline(&w));
             if app.follow {
                 app.scroll_up = 0;
+            }
+
+            // A grouped worker waits for its siblings so the parent gets one
+            // combined report instead of N disconnected ones.
+            match w.group.and_then(|g| workers.group_info(g).map(|(r, t)| (g, r.to_string(), t))) {
+                Some((group, request, total)) => {
+                    let acc = match groups.iter_mut().find(|a| a.group == group) {
+                        Some(a) => a,
+                        None => {
+                            groups.push(GroupAcc {
+                                group,
+                                request,
+                                total,
+                                done: Vec::new(),
+                            });
+                            groups.last_mut().unwrap()
+                        }
+                    };
+                    acc.done.push(w);
+                    if acc.done.len() < acc.total {
+                        continue;
+                    }
+                    let acc = groups.swap_remove(
+                        groups.iter().position(|a| a.group == group).unwrap(),
+                    );
+                    let report = group_report(&acc);
+                    app.push(Kind::Notice, format!("all {} workers finished", acc.done.len()));
+                    deliver_to_parent(&app, &agent, &session, report).await;
+                    // Ask the parent to turn the pieces into one answer.
+                    if app.synthesize && turn.is_none() {
+                        let ask = format!(
+                            "Your {} background workers just reported back (above). Combine \
+                             their results into one answer to the original request: {}",
+                            acc.done.len(),
+                            acc.request
+                        );
+                        start_turn(
+                            ask, &mut app, &agent, &session, &mem, &cwd, bash_timeout,
+                            &mut turn, &mut cancel,
+                        );
+                    }
+                }
+                None => {
+                    let report = single_report(&w);
+                    deliver_to_parent(&app, &agent, &session, report).await;
+                }
             }
         }
 
         // Rebuild the wrapped-row cache only if content/width changed, then draw.
         app.agents_running = workers.running_count();
+        app.agents_queued = workers.queued_count();
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
         app.ensure_rows(width);
         terminal.draw(|f| ui(f, &app))?;
@@ -553,6 +626,62 @@ async fn run_loop(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                 }
+            }
+
+            // Memory extraction finished.
+            res = async { (&mut extract.as_mut().unwrap()).await }, if extract.is_some() => {
+                extract = None;
+                app.status = "/help for keys and commands".into();
+                match res {
+                    Ok(text) => {
+                        let candidates = crate::memory::parse_candidates(&text);
+                        if candidates.is_empty() {
+                            app.push(Kind::Notice, "nothing worth remembering".to_string());
+                        }
+                        for c in candidates {
+                            match mem.remember_deduped(
+                                c.scope, &c.kind, &c.subject, &c.content, c.importance,
+                            ) {
+                                Ok((row, true)) => app.push(
+                                    Kind::Notice,
+                                    format!(
+                                        "remembered {} [{}/{}] {}: {}",
+                                        row.id, row.scope, row.kind, row.subject, row.content
+                                    ),
+                                ),
+                                Ok((row, false)) => app.push(
+                                    Kind::Notice,
+                                    format!("already known: {}: {}", row.subject, row.content),
+                                ),
+                                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                            }
+                        }
+                    }
+                    Err(e) => app.push(Kind::Error, format!("extraction failed: {e}")),
+                }
+                if app.follow { app.scroll_up = 0; }
+            }
+
+            // Fan-out planning finished.
+            res = async { (&mut fanout.as_mut().unwrap().0).await }, if fanout.is_some() => {
+                let (_, system, request) = fanout.take().unwrap();
+                app.status = "/help for keys and commands".into();
+                match res {
+                    Ok(tasks) if tasks.is_empty() => {
+                        app.push(Kind::Error, "fan-out planning produced no tasks".to_string());
+                    }
+                    Ok(tasks) => {
+                        if tasks.len() > 1 {
+                            for (i, t) in tasks.iter().enumerate() {
+                                app.push(Kind::Notice, format!("  {}. {}", i + 1, truncate(t, 100)));
+                            }
+                        }
+                        let report = workers.spawn_many(tasks, system, request);
+                        app.push(Kind::Notice, fanout_notice(&report));
+                    }
+                    Err(e) => app.push(Kind::Error, format!("fan-out planning failed: {e}")),
+                }
+                if app.follow { app.scroll_up = 0; }
             }
 
             // Turn finished.
@@ -693,25 +822,8 @@ async fn handle_key(
             }
 
             // Start a turn.
-            let sys = build_system_prompt(cwd, mem);
             let message = expand_file_mentions(&input, cwd);
-            *cancel = CancellationToken::new();
-            let a = agent.clone();
-            let s = session.clone();
-            let tok = cancel.clone();
-            let cmd = app.validate_cmd.clone();
-            let cwd2 = cwd.to_path_buf();
-            app.running = true;
-            app.turn_start = Some(std::time::Instant::now());
-            app.status = "working (Esc aborts)".into();
-            app.follow = true;
-            app.scroll_up = 0;
-            *turn = Some(tokio::spawn(async move {
-                let validator =
-                    cmd.map(|c| CommandValidator::new(c, cwd2.clone(), bash_timeout));
-                let mut sess = s.lock().await;
-                a.run_turn(&mut sess, &message, &sys, validator.as_ref().map(|v| v as _), tok).await
-            }));
+            start_turn(message, app, agent, session, mem, cwd, bash_timeout, turn, cancel);
         }
         // Ignore control-chords; accept normal (and shifted) chars at the cursor.
         KeyCode::Char(c) if !ctrl => app.insert_char(c),
@@ -765,18 +877,49 @@ async fn handle_command(
         }
         "memory" | "mem" => memory_command(app, mem, parts),
         "spawn" => {
-            let task = parts.collect::<Vec<_>>().join(" ");
-            if task.trim().is_empty() {
-                app.push(Kind::Notice, "usage: /spawn <task>".to_string());
-            } else {
-                let system = format!("{}\n\n{}", build_system_prompt(cwd, mem), WORKER_PREAMBLE);
-                match workers.spawn(task.clone(), system) {
-                    Ok(id) => app.push(Kind::Notice, format!("spawned {id}: {}", truncate(&task, 80))),
-                    Err(e) => app.push(Kind::Error, format!("spawn failed: {e}")),
+            let args = input.trim_start_matches('/')[head.len()..].trim();
+            match parse_spawn(args, app.fanout_auto) {
+                Err(msg) => app.push(Kind::Notice, msg),
+                Ok(req) => {
+                    let system = build_worker_prompt(cwd, mem);
+                    match req.fanout {
+                        // Planner-driven: hand off to the caller, which runs it
+                        // off the UI thread (a model call would freeze the TUI).
+                        FanOut::Auto | FanOut::Count(_) if !matches!(req.fanout, FanOut::Count(1)) => {
+                            let want = match req.fanout {
+                                FanOut::Count(n) => Some(n),
+                                _ => None,
+                            };
+                            app.status = "planning fan-out…".into();
+                            app.pending_fanout =
+                                Some(PendingFanOut { task: req.task, want, system });
+                        }
+                        FanOut::Files(pattern) => {
+                            match matching_files(cwd, &pattern) {
+                                Err(e) => app.push(Kind::Error, e),
+                                Ok(files) if files.is_empty() => {
+                                    app.push(Kind::Notice, format!("no files match `{pattern}`"));
+                                }
+                                Ok(files) => {
+                                    let tasks: Vec<String> =
+                                        files.iter().map(|f| assign(&req.task, f)).collect();
+                                    let report =
+                                        workers.spawn_many(tasks, system, req.task.clone());
+                                    app.push(Kind::Notice, fanout_notice(&report));
+                                }
+                            }
+                        }
+                        // -n 1 (or an explicit single): today's path, no planner.
+                        _ => match workers.spawn(req.task.clone(), system) {
+                            Ok(outcome) => app.push(Kind::Notice, spawn_notice(&outcome, &req.task)),
+                            Err(e) => app.push(Kind::Error, format!("spawn failed: {e}")),
+                        },
+                    }
                 }
             }
         }
         "agents" | "workers" => agents_command(app, workers, parts),
+        "knowledge" | "know" => knowledge_command(app, cwd, parts),
         "validate" => {
             let rest: Vec<&str> = parts.collect();
             let rest = rest.join(" ");
@@ -882,23 +1025,47 @@ fn agents_command<'a>(
     match parts.next().unwrap_or("list") {
         "list" | "" => {
             let list = workers.list();
-            if list.is_empty() {
+            if list.is_empty() && workers.queued_count() == 0 {
                 app.push(Kind::Notice, "(no agents)".to_string());
             } else {
                 for w in list {
+                    let nudges =
+                        if w.nudges > 0 { format!(" · {} nudges", w.nudges) } else { String::new() };
                     app.push(
                         Kind::Notice,
                         format!(
-                            "{} [{}] {} tools · {} changed · {} — {}",
+                            "{} [{}] {} tools · {} changed{} · {} — {}",
                             w.id,
                             w.status.label(),
                             w.tool_calls,
                             w.changed.len(),
+                            nudges,
                             truncate(&w.last, 40),
                             truncate(&w.task, 40)
                         ),
                     );
                 }
+                if workers.queued_count() > 0 {
+                    app.push(Kind::Notice, format!("({} queued)", workers.queued_count()));
+                }
+            }
+        }
+        "drop-queued" | "clear-queue" => {
+            let n = workers.drop_queued();
+            app.push(Kind::Notice, format!("dropped {n} queued task(s)"));
+        }
+        "nudge" | "steer" => {
+            let id = parts.next().map(str::to_string);
+            let message = parts.collect::<Vec<_>>().join(" ");
+            match id {
+                Some(id) if !message.trim().is_empty() => {
+                    if workers.nudge(&id, &message) {
+                        app.push(Kind::Notice, format!("nudged {id}"));
+                    } else {
+                        app.push(Kind::Notice, format!("(no agent {id})"));
+                    }
+                }
+                _ => app.push(Kind::Notice, "usage: /agents nudge <id> <message>".to_string()),
             }
         }
         "kill" | "stop" => match parts.next() {
@@ -934,16 +1101,6 @@ fn agents_command<'a>(
             None => app.push(Kind::Notice, "usage: /agents show <id>".to_string()),
         },
         other => app.push(Kind::Error, format!("unknown /agents subcommand: {other}")),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let one = s.replace('\n', " ");
-    if one.chars().count() <= max {
-        one
-    } else {
-        let cut: String = one.chars().take(max).collect();
-        format!("{cut}…")
     }
 }
 
@@ -1349,8 +1506,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .checked_div(app.context_limit)
         .unwrap_or(0)
         .min(999);
-    let agents = if app.agents_running > 0 {
-        format!("  ↑{} agents", app.agents_running)
+    let agents = if app.agents_running > 0 || app.agents_queued > 0 {
+        let queued =
+            if app.agents_queued > 0 { format!(" · {} queued", app.agents_queued) } else { String::new() };
+        format!("  ↑{} agents{}", app.agents_running, queued)
     } else {
         String::new()
     };
@@ -1378,6 +1537,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::Event;
 
     fn app() -> App {
         App::new("m".into(), 1000, None)

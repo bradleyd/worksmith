@@ -22,7 +22,7 @@ fn skip_dir(name: &str) -> bool {
     name.starts_with('.') || SKIP_DIRS.contains(&name)
 }
 
-fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
+pub(crate) fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
     if out.len() >= limit {
         return;
     }
@@ -240,6 +240,6 @@ impl Tool for LsTool {
     }
 }
 
-fn display_rel(cwd: &Path, path: &Path) -> String {
+pub(crate) fn display_rel(cwd: &Path, path: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }

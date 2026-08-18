@@ -409,10 +409,16 @@ it gives us directly:
 1. **Workflow definition:** a later `workflows/` feature (TOML or SKILL.md
    with steps + outcomes, on top of agent-line's `Runner`/`Outcome::Next`)
    that the harness executes as a chain of spawned agents. M8+.
-2. **Fan-out pattern:** `/spawn --each "file glob" "task template"` —
-   N workers, one per match, results collected into one file. This is the
-   parallel.rs example, productized. Fits doc tools beautifully
-   ("convert every docx in this folder").
+2. **Fan-out pattern** *(done)*: one `/spawn` → N workers. Shipped as
+   `-n N` (exact count), `--each-files <regex>` (one per matching file — a
+   regex, matching the `find` tool's idiom rather than a glob), and a default
+   `auto` mode where a cheap planner call decides whether the request divides at
+   all. Deliberately **no task template/placeholder syntax**: the task stays
+   prose and the assignment is appended, because `{}` interpolation is shell
+   idiom in a harness where you're writing to a model. Over-cap fan-outs queue.
+   Results are collected: a fan-out is a *group*, held until every member
+   finishes, then reported to the parent as one block and (by default)
+   synthesized into a single answer by one more parent turn.
 
 ## 8. Memory (and sharing it)
 

@@ -76,6 +76,15 @@ async fn wait_terminal(mgr: &WorkerManager, id: &str) -> WorkerStatus {
     panic!("worker {id} did not finish in time");
 }
 
+/// Spawn a worker that is expected to start immediately (not queue).
+fn started(mgr: &mut WorkerManager, task: &str) -> String {
+    mgr.spawn(task.into(), "system".into())
+        .unwrap()
+        .started()
+        .expect("expected an immediate start, not a queued task")
+        .to_string()
+}
+
 #[tokio::test]
 async fn worker_runs_task_to_completion() {
     let dir = tempfile::tempdir().unwrap();
@@ -84,7 +93,7 @@ async fn worker_runs_task_to_completion() {
     let agent = Arc::new(template_agent(vec![done("worker finished the job")], dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
 
-    let id = mgr.spawn("do the thing".into(), "system".into()).unwrap();
+    let id = started(&mut mgr, "do the thing");
     assert_eq!(mgr.running_count(), 1);
 
     let status = wait_terminal(&mgr, &id).await;
@@ -102,7 +111,7 @@ async fn newly_finished_reports_once() {
     let agent = Arc::new(template_agent(vec![done("all done")], dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
 
-    let id = mgr.spawn("task".into(), "system".into()).unwrap();
+    let id = started(&mut mgr, "task");
     let _ = wait_terminal(&mgr, &id).await;
 
     let first = mgr.take_newly_finished();
@@ -125,7 +134,7 @@ async fn worker_records_changed_files() {
     ));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
 
-    let id = mgr.spawn("make out.txt".into(), "system".into()).unwrap();
+    let id = started(&mut mgr, "make out.txt");
     let _ = wait_terminal(&mgr, &id).await;
 
     let summary = mgr.get(&id).unwrap();
@@ -151,8 +160,12 @@ async fn worker_respects_concurrency_cap() {
     let agent = Arc::new(template_agent(busy, dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1);
 
-    let _id = mgr.spawn("busy".into(), "system".into()).unwrap();
-    // Second spawn should be rejected while the first is still running.
-    let second = mgr.spawn("another".into(), "system".into());
-    assert!(second.is_err(), "cap of 1 should reject a second worker");
+    let _id = started(&mut mgr, "busy");
+    // At the cap, a second spawn queues instead of starting.
+    let second = mgr.spawn("another".into(), "system".into()).unwrap();
+    assert_eq!(second, worksmith::worker::SpawnOutcome::Queued(1));
+    assert_eq!(mgr.running_count(), 1, "cap of 1 must not be exceeded");
+    assert_eq!(mgr.queued_count(), 1);
+    assert_eq!(mgr.drop_queued(), 1, "queued work can be called off");
+    assert_eq!(mgr.queued_count(), 0);
 }

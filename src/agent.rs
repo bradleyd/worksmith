@@ -9,7 +9,7 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -463,6 +463,25 @@ impl Agent {
         self.context_limit * 3 / 4
     }
 
+    /// One-shot helper completion: no tools, no session, no streaming to the
+    /// bus — just the model's text. Used for the harness's own side calls
+    /// (compaction, fan-out planning), not for user turns.
+    pub async fn ask(&self, system: &str, user: &str, max_tokens: u32) -> Result<String> {
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![Message::system(system), Message::user(user)],
+            tools: vec![],
+            temperature: Some(0.2),
+            max_tokens: Some(max_tokens),
+        };
+        // Drain the stream sink; we only want the assembled text.
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let completion = self.client.stream(req, tx, CancellationToken::new()).await?;
+        let _ = drain.await;
+        Ok(completion.content.unwrap_or_default())
+    }
+
     /// Summarize old turns into a single note and keep the recent turns
     /// verbatim, shrinking the working context. The full transcript stays in the
     /// session JSONL. Public so `/compact` can force it.
@@ -486,24 +505,7 @@ impl Agent {
                    continue: decisions made, files created or edited, key facts \
                    learned, and any unfinished work. Preserve specifics (paths, \
                    names, values). Omit chatter.";
-        let req = ChatRequest {
-            model: self.model.clone(),
-            messages: vec![Message::system(sys), Message::user(transcript)],
-            tools: vec![],
-            temperature: Some(0.2),
-            max_tokens: Some(1024),
-        };
-
-        // Drain the stream sink; we only want the final summary text.
-        let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
-        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let completion = self
-            .client
-            .stream(req, tx, CancellationToken::new())
-            .await?;
-        let _ = drain.await;
-
-        let summary = completion.content.unwrap_or_default();
+        let summary = self.ask(sys, &transcript, 1024).await?;
         if summary.trim().is_empty() {
             return Ok(()); // don't discard history for an empty summary
         }
