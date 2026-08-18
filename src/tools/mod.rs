@@ -5,7 +5,10 @@ mod bash;
 mod doc;
 mod edit;
 mod read;
+mod recall;
 mod search;
+mod web;
+pub(crate) use search::{display_rel, walk};
 mod write;
 
 use std::collections::HashMap;
@@ -25,6 +28,8 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub session_id: String,
     pub bash_timeout: Duration,
+    /// Spawned workers *propose* memories instead of writing them (§8).
+    pub is_worker: bool,
 }
 
 /// The structured result of a tool run.
@@ -89,6 +94,9 @@ impl ToolRegistry {
         r.register(Box::new(search::FindTool));
         r.register(Box::new(search::LsTool));
         r.register(Box::new(doc::DocTool));
+        r.register(Box::new(recall::MemoryTool));
+        r.register(Box::new(recall::KnowledgeTool));
+        r.register(Box::new(web::WebTool));
         r
     }
 

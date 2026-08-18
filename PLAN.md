@@ -550,23 +550,37 @@ where terminal CLIs live or die.
 capability for real .docx/PDF workflows — but positioning stays clear: the
 differentiator is the guidance layer (§0), this is a useful add-on.
 
-**M4 — Extensibility**: MCP client in core (stdio), `rmcp` decision,
+**M4 — Extensibility** *(web tool landed early)*: a `web` tool (search via
+Brave/Tavily/SearXNG + URL fetch with HTML→text) ships now because agents need
+current docs; the rest is still ahead — MCP client in core (stdio), `rmcp` decision,
 plugin JSON-RPC protocol, `worksmith install/list`, tier-2 skill distribution,
 prompt templates.
 
-**M5 — Memory**: SQLite `memory.db` (global + project), CRUD, supersede,
-exact-subject + FTS5 retrieval into prompt, `/memory`, `worksmith memory
-export/import/sync` via git, auto-memory at compaction (opt-in). Follows
-`worksmith-memory-v1.md`.
+**M5 — Memory** *(done, minus export/sync)*: SQLite `memory.db` (global +
+project), CRUD, supersede, exact-subject + FTS5 hybrid retrieval, `/memory`
+(incl. `search`, `pending`/`approve`, `extract`), a `memory` tool the model
+calls, write-time dedup, and worker proposals. Plus **knowledge**
+(`knowledge.db`): the repo's text chunked + FTS5-indexed behind a `knowledge`
+tool and `/knowledge`. Not done: `worksmith memory export/import/sync` via git,
+auto-extraction at compaction (today `/memory extract` is explicit), and
+semantic/vector retrieval (`worksmith-memory-v1.md` §30 stage 4).
 
-**M6 — Spawned agents**: `/spawn`, `/agents` panel, `worksmith spawn`,
-per-agent model override, `--each` fan-out, `propose_memory` from workers.
+**M6 — Spawned agents** *(done, minus `worksmith spawn` + per-agent model
+override)*: `/spawn`, `/agents` panel, fan-out (`-n`, `--each-files`, planner
+`auto`) with a queue past `agents.max`. Worker results now feed back into the
+parent's history (via the steering mailbox mid-turn, or the session between
+turns), with fan-out groups reported as one block and synthesized into a single
+answer. Not done: `propose_memory` from workers, `worksmith spawn`, per-agent
+model override.
 (Unblocked by the M1 JSONL stream — that's why the stream is designed first.)
 
-**M7 — Supervisor**: watch worker event streams; rules-based stuck detection
-(idle timeout, repeated tool calls, runaway spend), bounded nudges via
-steering, escalate/stop/re-spawn. Optional cheap-model observer.
-`agents.supervisor = off | rules | model`. (§7 — depends on M6.)
+**M7 — Supervisor** *(done, minus the model observer)*: watches worker event
+streams; rules-based stuck detection (idle timeout, repeated tool calls,
+explicit "I'm blocked", runaway spend), bounded nudges via a steering mailbox on
+the agent, escalate/stop with the reason reported to the parent.
+`agents.supervisor = off | rules | model` — `model` (the cheap-model observer)
+and re-spawn-with-a-refined-task are not built yet; `model` behaves as `rules`.
+(§7 — depends on M6.)
 
 **M8 — Nice to have**: vim-style tabbed TUI layout (main window + worker/agent
 tabs + `/tree`, §9), `/tree` branching UI, `--mode rpc`, sandbox modes,

@@ -119,6 +119,7 @@ async fn run(args: Args) -> Result<()> {
         cwd: cwd.clone(),
         session_id: session.id.clone(),
         bash_timeout: Duration::from_secs(config.bash_timeout_secs()),
+        is_worker: false,
     };
 
     let agent = Agent::new(
@@ -429,6 +430,13 @@ async fn handle_command(
                  /memory show <id>        show a memory\n  \
                  /memory forget <id>      delete a memory\n  \
                  /memory add <scope> <kind> <subject> <content...>\n  \
+                 /memory search <query>   search memories\n  \
+                 /memory extract          distill this session into memories\n  \
+                 /memory pending | /memory approve <id>   review worker proposals\n  \
+                 /knowledge [index|search <query>|status]  the project's own text\n  \
+                 /spawn [-n N | --each-files <regex>] <task>   background worker(s)\n  \
+                 /agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]\n  \
+                 /validate <cmd|off>      success check for a turn\n  \
                  @path                    include a file's contents in your message"
             );
             CommandResult::Handled
@@ -445,16 +453,281 @@ async fn handle_command(
             }
         },
         "memory" | "mem" => {
-            handle_memory(parts, mem);
+            handle_memory(parts, mem, agent, session).await;
+            CommandResult::Handled
+        }
+        "knowledge" | "know" => {
+            handle_knowledge(parts, cwd);
+            CommandResult::Handled
+        }
+        "spawn" => {
+            handle_spawn(cmd, cwd, mem, workers, agent, config).await;
+            CommandResult::Handled
+        }
+        "agents" | "workers" => {
+            handle_agents(parts, workers);
             CommandResult::Handled
         }
         _ => CommandResult::NotACommand,
     }
 }
 
-fn handle_memory<'a>(mut parts: impl Iterator<Item = &'a str>, mem: &MemoryStore) {
+/// `/spawn` in the line REPL. The planner call blocks the prompt, which is fine
+/// here — unlike the TUI there's no frame to keep drawing.
+async fn handle_spawn(
+    cmd: &str,
+    cwd: &Path,
+    mem: &MemoryStore,
+    workers: &mut WorkerManager,
+    agent: &Arc<Agent>,
+    config: &Config,
+) {
+    use worksmith::fanout::{
+        FanOut, assign, fanout_notice, matching_files, parse_spawn, plan_fanout, spawn_notice,
+    };
+
+    let args = cmd.strip_prefix("spawn").unwrap_or("").trim();
+    let req = match parse_spawn(args, config.fanout_auto()) {
+        Ok(r) => r,
+        Err(msg) => {
+            println!("{msg}");
+            return;
+        }
+    };
+    let system = build_worker_prompt(cwd, mem);
+
+    let (tasks, request) = match req.fanout {
+        FanOut::Files(pattern) => match matching_files(cwd, &pattern) {
+            Ok(files) if files.is_empty() => {
+                println!("no files match `{pattern}`");
+                return;
+            }
+            Ok(files) => (
+                files.iter().map(|f| assign(&req.task, f)).collect::<Vec<_>>(),
+                req.task.clone(),
+            ),
+            Err(e) => {
+                eprintln!("{e}");
+                return;
+            }
+        },
+        FanOut::Count(1) => {
+            match workers.spawn(req.task.clone(), system) {
+                Ok(outcome) => println!("{}", spawn_notice(&outcome, &req.task)),
+                Err(e) => eprintln!("spawn failed: {e}"),
+            }
+            return;
+        }
+        FanOut::Count(n) => {
+            println!("(planning fan-out…)");
+            let tasks =
+                plan_fanout(agent.clone(), req.task.clone(), Some(n), config.agents_max()).await;
+            (tasks, req.task.clone())
+        }
+        FanOut::Auto => {
+            let tasks =
+                plan_fanout(agent.clone(), req.task.clone(), None, config.agents_max()).await;
+            (tasks, req.task.clone())
+        }
+    };
+
+    if tasks.len() > 1 {
+        for (i, t) in tasks.iter().enumerate() {
+            println!("  {}. {t}", i + 1);
+        }
+    }
+    let report = workers.spawn_many(tasks, build_worker_prompt(cwd, mem), request);
+    println!("{}", fanout_notice(&report));
+}
+
+fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut WorkerManager) {
+    match parts.next().unwrap_or("list") {
+        "list" | "" => {
+            let list = workers.list();
+            if list.is_empty() && workers.queued_count() == 0 {
+                println!("(no agents)");
+            }
+            for w in list {
+                let nudges =
+                    if w.nudges > 0 { format!(" · {} nudges", w.nudges) } else { String::new() };
+                println!(
+                    "{} [{}] {} tools · {} changed{} — {}",
+                    w.id,
+                    w.status.label(),
+                    w.tool_calls,
+                    w.changed.len(),
+                    nudges,
+                    w.task
+                );
+            }
+            if workers.queued_count() > 0 {
+                println!("({} queued)", workers.queued_count());
+            }
+        }
+        "show" | "result" => match parts.next().and_then(|id| workers.get(id)) {
+            Some(w) => {
+                println!("{} [{}]", w.id, w.status.label());
+                if let Some(reason) = &w.escalation {
+                    println!("stopped by supervisor: {reason}");
+                }
+                if !w.changed.is_empty() {
+                    println!("changed: {}", w.changed.join(", "));
+                }
+                println!("{}", if w.result.is_empty() { &w.last } else { &w.result });
+            }
+            None => println!("usage: /agents show <id>"),
+        },
+        "kill" | "stop" => match parts.next() {
+            Some(id) if workers.kill(id) => println!("killing {id}"),
+            Some(id) => println!("(no agent {id})"),
+            None => println!("usage: /agents kill <id>"),
+        },
+        "nudge" | "steer" => {
+            let id = parts.next().map(str::to_string);
+            let msg = parts.collect::<Vec<_>>().join(" ");
+            match id {
+                Some(id) if !msg.trim().is_empty() => {
+                    if workers.nudge(&id, &msg) {
+                        println!("nudged {id}");
+                    } else {
+                        println!("(no agent {id})");
+                    }
+                }
+                _ => println!("usage: /agents nudge <id> <message>"),
+            }
+        }
+        "drop-queued" | "clear-queue" => {
+            println!("dropped {} queued task(s)", workers.drop_queued())
+        }
+        other => eprintln!("unknown /agents subcommand: {other}"),
+    }
+}
+
+/// `/knowledge [index | search <query> | status]`
+fn handle_knowledge<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
+    let store = match worksmith::knowledge::KnowledgeStore::open(cwd) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("knowledge unavailable: {e}");
+            return;
+        }
+    };
+    match parts.next().unwrap_or("status") {
+        "index" | "reindex" => match store.index() {
+            Ok(stats) => {
+                let pruned = store.prune().unwrap_or(0);
+                println!(
+                    "indexed {} file(s) → {} chunk(s) · {} unchanged · {} stale removed",
+                    stats.files, stats.chunks, stats.skipped_unchanged, pruned
+                );
+            }
+            Err(e) => eprintln!("indexing failed: {e}"),
+        },
+        "search" | "find" => {
+            let query = parts.collect::<Vec<_>>().join(" ");
+            if query.trim().is_empty() {
+                println!("usage: /knowledge search <query>");
+                return;
+            }
+            match store.search(&query, 5) {
+                Ok(hits) if hits.is_empty() => println!("(no matches)"),
+                Ok(hits) => {
+                    for h in hits {
+                        println!("--- {} (chunk {})\n{}\n", h.source, h.ord, h.text);
+                    }
+                }
+                Err(e) => eprintln!("knowledge search failed: {e}"),
+            }
+        }
+        "status" | "" => match store.chunk_count() {
+            Ok(n) => println!("knowledge index: {n} chunk(s)"),
+            Err(e) => eprintln!("knowledge error: {e}"),
+        },
+        other => eprintln!("unknown /knowledge subcommand: {other}"),
+    }
+}
+
+async fn handle_memory<'a>(
+    mut parts: impl Iterator<Item = &'a str>,
+    mem: &MemoryStore,
+    agent: &Arc<Agent>,
+    session: &Session,
+) {
     let sub = parts.next().unwrap_or("list");
     match sub {
+        "search" | "find" => {
+            let query = parts.collect::<Vec<_>>().join(" ");
+            if query.trim().is_empty() {
+                println!("usage: /memory search <query>");
+                return;
+            }
+            match mem.search(&query, 10) {
+                Ok(hits) if hits.is_empty() => println!("(nothing remembered about \"{query}\")"),
+                Ok(hits) => {
+                    for h in hits {
+                        println!(
+                            "{:.2}  {}  [{}/{}] {}: {}",
+                            h.score, h.row.id, h.row.scope, h.row.kind, h.row.subject, h.row.content
+                        );
+                    }
+                }
+                Err(e) => eprintln!("memory error: {e}"),
+            }
+        }
+        "pending" | "proposed" => match mem.pending() {
+            Ok(rows) if rows.is_empty() => println!("(no proposals from workers)"),
+            Ok(rows) => {
+                for r in rows {
+                    println!(
+                        "{}  [{}/{}] {}: {}  (/memory approve {} | /memory forget {})",
+                        r.id, r.scope, r.kind, r.subject, r.content, r.id, r.id
+                    );
+                }
+            }
+            Err(e) => eprintln!("memory error: {e}"),
+        },
+        "approve" => match parts.next() {
+            Some(id) => match mem.approve(id) {
+                Ok(true) => println!("approved {id}"),
+                Ok(false) => println!("(no pending proposal {id})"),
+                Err(e) => eprintln!("memory error: {e}"),
+            },
+            None => println!("usage: /memory approve <id>"),
+        },
+        "extract" | "distill" => {
+            let transcript = render_recent(session, 40);
+            if transcript.trim().is_empty() {
+                println!("(nothing to distill yet)");
+                return;
+            }
+            println!("(distilling…)");
+            let text = match agent
+                .ask(worksmith::memory::EXTRACTION_PROMPT, &transcript, 512)
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("extraction failed: {e:#}");
+                    return;
+                }
+            };
+            let candidates = worksmith::memory::parse_candidates(&text);
+            if candidates.is_empty() {
+                println!("nothing worth remembering");
+            }
+            for c in candidates {
+                match mem.remember_deduped(c.scope, &c.kind, &c.subject, &c.content, c.importance) {
+                    Ok((row, true)) => println!(
+                        "remembered {} [{}/{}] {}: {}",
+                        row.id, row.scope, row.kind, row.subject, row.content
+                    ),
+                    Ok((row, false)) => {
+                        println!("already known: {}: {}", row.subject, row.content)
+                    }
+                    Err(e) => eprintln!("memory error: {e}"),
+                }
+            }
+        }
         "list" | "" => print_memories(mem, None),
         "global" => print_memories(mem, Some(Scope::Global)),
         "project" => print_memories(mem, Some(Scope::Project)),

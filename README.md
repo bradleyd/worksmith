@@ -5,14 +5,15 @@ A minimal terminal coding-agent harness in Rust, built on the bet that the
 models on task and driving to a *validation*. See [`PLAN.md`](PLAN.md) and
 [`worksmith-memory-v1.md`](worksmith-memory-v1.md).
 
-Status: **M1–M3 done, plus M6 sub-workers.** Usable single-agent coding harness
-with streaming, model-driven tools, JSONL sessions, and SQLite memory (M1); a
-validation-driven self-correcting loop, context compaction, and a four-channel
-ratatui TUI with a full input editor (M2); document tools for PDF/DOCX (M3); and
-spawned background workers (M6, `/spawn`). MCP/plugins (M4), scoped-memory
-retrieval + auto-memory (M5), and the supervisor (M7) are still ahead.
+Status: **M1–M3 and M5–M7 done.** Usable
+single-agent coding harness with streaming, model-driven tools, JSONL sessions,
+and SQLite memory (M1); a validation-driven self-correcting loop, context
+compaction, and a four-channel ratatui TUI with a full input editor (M2);
+document tools for PDF/DOCX (M3); spawned background workers with fan-out (M6, `/spawn`); and
+a rules-based supervisor watching those workers (M7); and memory retrieval +
+project knowledge (M5). MCP/plugins (M4) are still ahead.
 
-## What works in M1
+## What works today
 
 - **Streaming, tool-calling agent loop** against any OpenAI-compatible endpoint
   (vLLM/Qwen, OpenRouter, RunPod, local).
@@ -25,17 +26,54 @@ retrieval + auto-memory (M5), and the supervisor (M7) are still ahead.
   fork bombs, `dd`/`mkfs` to devices, `curl … | sh`, recursive `chmod` of `/`)
   are refused and hard-stop the turn. Best-effort, not a sandbox — run untrusted
   work in a container.
+- **Fan-out:** one `/spawn` can become several workers. `/spawn create 3
+  separate articles on sqlite` asks a cheap planner whether the request divides
+  (it answers "one worker" for most tasks); `-n 3` forces the count;
+  `--each-files <regex>` runs one worker per matching file with no model call at
+  all. There are no template placeholders — your prose is kept verbatim and the
+  assignment is appended. A fan-out larger than `agents.max` queues and drains as
+  slots free (`/agents drop-queued` calls it off). Set `agents.fanout = "off"` to
+  make a bare `/spawn` always one worker.
+- **Workers report back:** when a worker finishes, its result, changed files,
+  and (if the supervisor stopped it) the reason are injected into the *parent's*
+  history — into a running turn via the steering mailbox, or into the session for
+  the next one. A fan-out group is held until every member finishes and reported
+  as one block, then the parent runs a turn combining them into a single answer
+  (`agents.synthesize = false` to skip that turn).
 - **Sub-workers:** `/spawn <task>` runs a delegated task in a background worker
   (its own session, shared tools/model). When a worker finishes it's announced
   in the transcript with the **files it changed** and its result; `/agents`
   lists live status, `/agents show <id>` shows changed files, the session-file
   path, and the full result, `/agents kill <id>` cancels. Footer shows
   `↑N agents`. Concurrency capped by `agents.max`.
+- **Supervisor:** each worker's event stream is watched by deterministic rules —
+  silence for `agents.stuck-timeout`, the same tool call repeated
+  `agents.repeat-threshold` times, an explicit "I'm blocked", or spend past
+  `agents.token-budget`. It **nudges** (injects a steering message into the
+  running worker) up to `agents.max-nudges` times, then **escalates**: stops the
+  worker and reports the partial result with the reason. `/agents nudge <id>
+  <message>` steers one by hand. Turn it off with `agents.supervisor = "off"`.
+- **Web** (`web` tool): `search` via a configured provider (Brave, Tavily, or a
+  self-hosted SearXNG — set `[web]` in config) and `fetch`, which pulls a URL and
+  reduces it to readable text. Fetch needs no configuration.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /
   `CLAUDE.md` discovery.
-- **SQLite memory** (global + project) with supersede semantics and `/memory`.
+- **Memory** (global + project SQLite, supersede semantics): FTS5 search ranked
+  by text match, exact-subject hit, importance, recency, and a project boost.
+  The agent reaches it through the `memory` tool (`search` / `remember`), with
+  write-time dedup so restatements don't grow the store. Workers *propose*
+  rather than write — `/memory pending` and `/memory approve <id>` review them.
+  `/memory extract` distills the current session into at most a few candidates
+  using a classifier biased toward saving nothing.
+- **Knowledge** (`.worksmith/knowledge.db`): the project's own docs and source,
+  chunked on paragraph boundaries and FTS5-indexed, searched via the `knowledge`
+  tool or `/knowledge search`. The index maintains itself — a search indexes on
+  demand and re-checks the tree at most once a minute — so the first query works
+  with no setup; `/knowledge index` forces a rebuild. It's rebuildable by design and never injected
+  into the prompt wholesale — memory is what was *decided*, knowledge is what the
+  repo *says*.
 
 ## Quick start
 
@@ -98,15 +136,26 @@ file. (Model cycling, vim keybindings, and themes are planned follow-ups.)
 
 ### Plain REPL commands (`--plain`)
 
+The line REPL has the same commands as the TUI:
+
 ```
 /help                     show commands
 /quit                     exit
 /new                      start a new session
-/memory [list|global|project]
-/memory show <id> | /memory forget <id>
-/memory add <scope> <kind> <subject> <content...>
+/compact                  summarize the session now
+/memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
+/memory search <query> | /memory extract | /memory pending | /memory approve <id>
+/knowledge [index|search <query>|status]
+/spawn [-n N | --each-files <regex>] <task>
+/agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
+/validate <cmd|off>       success check for a turn
 @path                     include a file's contents in your message
 ```
+
+Two differences from the TUI, both from having no event loop at the prompt:
+a `/spawn` that needs the planner blocks until it returns, and worker results
+are reported (and added to the session) at the next prompt rather than the
+moment they finish — with no automatic synthesis turn.
 
 Ctrl+C aborts the current turn; Ctrl+D exits.
 

@@ -57,6 +57,7 @@ async fn bash_tool_refuses_without_executing() {
         cwd: dir.path().to_path_buf(),
         session_id: "t".into(),
         bash_timeout: Duration::from_secs(10),
+        is_worker: false,
     };
     let reg = ToolRegistry::with_builtins();
 

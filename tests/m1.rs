@@ -15,6 +15,7 @@ fn ctx(dir: &std::path::Path) -> ToolContext {
         cwd: dir.to_path_buf(),
         session_id: "test".to_string(),
         bash_timeout: Duration::from_secs(10),
+        is_worker: false,
     }
 }
 

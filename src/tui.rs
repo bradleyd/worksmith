@@ -66,8 +66,10 @@ struct Item {
 const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 
 /// Slash commands offered by Tab-completion.
-const COMMANDS: &[&str] =
-    &["/help", "/new", "/compact", "/memory", "/validate", "/quit"];
+const COMMANDS: &[&str] = &[
+    "/help", "/new", "/compact", "/memory", "/knowledge", "/spawn", "/agents", "/validate",
+    "/quit",
+];
 
 /// Active Tab-completion state (candidates for the current token).
 struct Completion {
@@ -602,6 +604,48 @@ async fn run_loop(
                             Flow::Continue => {}
                             Flow::ExternalEdit => pending_edit = true,
                         }
+                        // /memory extract: classify the transcript off the UI task.
+                        if app.pending_extract {
+                            app.pending_extract = false;
+                            if extract.is_some() || app.running {
+                                app.push(
+                                    Kind::Notice,
+                                    "busy — try /memory extract once the turn finishes"
+                                        .to_string(),
+                                );
+                            } else {
+                                let transcript = {
+                                    let s = session.lock().await;
+                                    render_recent(&s, 40)
+                                };
+                                if transcript.trim().is_empty() {
+                                    app.push(Kind::Notice, "(nothing to distill yet)".to_string());
+                                } else {
+                                    app.status = "distilling memories…".into();
+                                    let a = agent.clone();
+                                    extract = Some(tokio::spawn(async move {
+                                        a.ask(crate::memory::EXTRACTION_PROMPT, &transcript, 512)
+                                            .await
+                                            .unwrap_or_default()
+                                    }));
+                                }
+                            }
+                        }
+
+                        // /spawn asked for a planned fan-out: run the model call
+                        // off this task so the UI keeps drawing.
+                        if let Some(pf) = app.pending_fanout.take() {
+                            let a = agent.clone();
+                            let max = agents_max;
+                            let request = pf.task.clone();
+                            fanout = Some((
+                                tokio::spawn(async move {
+                                    plan_fanout(a, pf.task, pf.want, max).await
+                                }),
+                                pf.system,
+                                request,
+                            ));
+                        }
                     }
                     Some(Ok(CEvent::Mouse(m))) => match m.kind {
                         MouseEventKind::ScrollUp => app.scroll_up(3),
@@ -850,8 +894,10 @@ async fn handle_command(
                 Kind::Notice,
                 "keys: Enter=send  Alt+Enter=newline  Ctrl+G=$EDITOR  Esc=abort/clear  \
                  Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
-                 commands: /new /compact /memory /validate <cmd|off> /spawn <task> \
-                 /agents [kill|show <id>] /quit   @path includes a file"
+                 commands: /new /compact /memory [search|extract|pending|approve] \
+                 /knowledge [index|search] /validate <cmd|off> \
+                 /spawn [-n N | --each-files <regex>] <task> \
+                 /agents [kill|show|nudge <id> | drop-queued] /quit   @path includes a file"
                     .to_string(),
             );
         }
@@ -974,6 +1020,60 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
             },
             None => app.push(Kind::Notice, "usage: /memory forget <id>".to_string()),
         },
+        "search" | "find" => {
+            let query = parts.collect::<Vec<_>>().join(" ");
+            if query.trim().is_empty() {
+                app.push(Kind::Notice, "usage: /memory search <query>".to_string());
+            } else {
+                match mem.search(&query, 10) {
+                    Ok(hits) if hits.is_empty() => {
+                        app.push(Kind::Notice, format!("(nothing remembered about \"{query}\")"))
+                    }
+                    Ok(hits) => {
+                        for h in hits {
+                            app.push(
+                                Kind::Notice,
+                                format!(
+                                    "{:.2}  {}  [{}/{}] {}: {}",
+                                    h.score, h.row.id, h.row.scope, h.row.kind, h.row.subject,
+                                    h.row.content
+                                ),
+                            );
+                        }
+                    }
+                    Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                }
+            }
+        }
+        "extract" | "distill" => {
+            // Signals the caller to run the classifier off the UI task.
+            app.pending_extract = true;
+        }
+        "pending" | "proposed" => match mem.pending() {
+            Ok(rows) if rows.is_empty() => {
+                app.push(Kind::Notice, "(no proposals from workers)".to_string())
+            }
+            Ok(rows) => {
+                for r in rows {
+                    app.push(
+                        Kind::Notice,
+                        format!(
+                            "{}  [{}/{}] {}: {}  (/memory approve {} | /memory forget {})",
+                            r.id, r.scope, r.kind, r.subject, r.content, r.id, r.id
+                        ),
+                    );
+                }
+            }
+            Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+        },
+        "approve" => match parts.next() {
+            Some(id) => match mem.approve(id) {
+                Ok(true) => app.push(Kind::Notice, format!("approved {id}")),
+                Ok(false) => app.push(Kind::Notice, format!("(no pending proposal {id})")),
+                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+            },
+            None => app.push(Kind::Notice, "usage: /memory approve <id>".to_string()),
+        },
         "add" => {
             let scope = parts.next().and_then(Scope::parse);
             let kind = parts.next().map(str::to_string);
@@ -1012,9 +1112,143 @@ fn memory_list(app: &mut App, mem: &MemoryStore, scope: Option<Scope>) {
     }
 }
 
-const WORKER_PREAMBLE: &str = "You are a background worker executing a delegated \
-task autonomously. Do not ask the user questions; make reasonable assumptions, \
-complete the task, and finish with a concise summary of what you did.";
+/// Put a worker report where the parent model will actually read it: into a
+/// running turn via the steering mailbox, or into the session history for the
+/// next one. Without this the parent never learns what its workers did.
+async fn deliver_to_parent(
+    app: &App,
+    agent: &Arc<Agent>,
+    session: &Arc<AsyncMutex<Session>>,
+    report: String,
+) {
+    if !app.running
+        && let Ok(mut s) = session.try_lock()
+        && s.append_message(crate::llm::Message::user(report.clone())).is_ok()
+    {
+        return;
+    }
+    // A turn owns the session while it runs; steering lands at its next step.
+    agent.steering().push(report);
+}
+
+/// Kick off a user turn as a background task. Shared by typed input and by the
+/// synthesis turn that runs when a fan-out group reports back.
+#[allow(clippy::too_many_arguments)]
+fn start_turn(
+    message: String,
+    app: &mut App,
+    agent: &Arc<Agent>,
+    session: &Arc<AsyncMutex<Session>>,
+    mem: &MemoryStore,
+    cwd: &Path,
+    bash_timeout: Duration,
+    turn: &mut Option<JoinHandle<Result<TurnResult>>>,
+    cancel: &mut CancellationToken,
+) {
+    let sys = build_system_prompt(cwd, mem);
+    *cancel = CancellationToken::new();
+    let a = agent.clone();
+    let s = session.clone();
+    let tok = cancel.clone();
+    let cmd = app.validate_cmd.clone();
+    let cwd2 = cwd.to_path_buf();
+    app.running = true;
+    app.turn_start = Some(std::time::Instant::now());
+    app.status = "working (Esc aborts)".into();
+    app.follow = true;
+    app.scroll_up = 0;
+    *turn = Some(tokio::spawn(async move {
+        let validator = cmd.map(|c| CommandValidator::new(c, cwd2.clone(), bash_timeout));
+        let mut sess = s.lock().await;
+        a.run_turn(&mut sess, &message, &sys, validator.as_ref().map(|v| v as _), tok).await
+    }));
+}
+
+/// Render the tail of a session as plain text for the memory classifier. Tool
+/// *calls* are named but their output is dropped — tool results are exactly the
+/// bulk that must never become durable memory (`worksmith-memory-v1.md` §11).
+fn render_recent(session: &Session, max_messages: usize) -> String {
+    use crate::llm::Role;
+    let msgs = session.messages();
+    let start = msgs.len().saturating_sub(max_messages);
+    let mut out = String::new();
+    for m in &msgs[start..] {
+        let role = match m.role {
+            Role::System => continue,
+            Role::Tool => {
+                continue;
+            }
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        if let Some(c) = &m.content
+            && !c.trim().is_empty()
+        {
+            out.push_str(&format!("[{role}] {}\n", truncate_chars(c, 2_000)));
+        }
+        for tc in &m.tool_calls {
+            out.push_str(&format!("[{role} called {}]\n", tc.name));
+        }
+    }
+    out
+}
+
+/// `/knowledge [index | search <query> | status]` — the project's own text,
+/// chunked and searchable. Rebuildable, so `index` is always safe to re-run.
+fn knowledge_command<'a>(
+    app: &mut App,
+    cwd: &Path,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
+    let store = match crate::knowledge::KnowledgeStore::open(cwd) {
+        Ok(s) => s,
+        Err(e) => {
+            app.push(Kind::Error, format!("knowledge unavailable: {e}"));
+            return;
+        }
+    };
+    match parts.next().unwrap_or("status") {
+        "index" | "reindex" => match store.index() {
+            Ok(stats) => {
+                let pruned = store.prune().unwrap_or(0);
+                app.push(
+                    Kind::Notice,
+                    format!(
+                        "indexed {} file(s) → {} chunk(s) · {} unchanged · {} stale removed",
+                        stats.files, stats.chunks, stats.skipped_unchanged, pruned
+                    ),
+                );
+            }
+            Err(e) => app.push(Kind::Error, format!("indexing failed: {e}")),
+        },
+        "search" | "find" => {
+            let query = parts.collect::<Vec<_>>().join(" ");
+            if query.trim().is_empty() {
+                app.push(Kind::Notice, "usage: /knowledge search <query>".to_string());
+                return;
+            }
+            match store.search(&query, 5) {
+                Ok(hits) if hits.is_empty() => {
+                    app.push(Kind::Notice, "(no matches — try /knowledge index)".to_string())
+                }
+                Ok(hits) => {
+                    for h in hits {
+                        app.push(
+                            Kind::Notice,
+                            format!("{} (chunk {})\n{}", h.source, h.ord, truncate(&h.text, 300)),
+                        );
+                    }
+                }
+                Err(e) => app.push(Kind::Error, format!("knowledge search failed: {e}")),
+            }
+        }
+        "status" | "" => match store.chunk_count() {
+            Ok(n) => app.push(Kind::Notice, format!("knowledge index: {n} chunk(s)")),
+            Err(e) => app.push(Kind::Error, format!("knowledge error: {e}")),
+        },
+        other => app.push(Kind::Error, format!("unknown /knowledge subcommand: {other}")),
+    }
+}
 
 /// `/agents [list | kill <id> | show <id>]`
 fn agents_command<'a>(
@@ -1206,10 +1440,17 @@ fn compute_completions(input: &str, cwd: &Path) -> Option<(usize, Vec<String>)> 
 /// Complete a subcommand or argument for a `/command`.
 fn arg_completions(first: &str, prev: usize, token: &str, tokens: &[&str]) -> Option<Vec<String>> {
     let opts: &[&str] = match first.trim_start_matches('/') {
-        "agents" | "workers" if prev == 1 => &["list", "show", "kill"],
+        "agents" | "workers" if prev == 1 => {
+            &["list", "show", "kill", "nudge", "drop-queued"]
+        }
+        "spawn" if prev == 1 => &["-n", "--each-files"],
+        "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
-            1 => &["list", "global", "project", "show", "forget", "add"],
+            1 => &[
+                "list", "global", "project", "search", "show", "pending", "approve", "extract",
+                "forget", "add",
+            ],
             2 if tokens.get(1) == Some(&"add") => &["global", "project"],
             3 if tokens.get(1) == Some(&"add") => {
                 &["decision", "constraint", "preference", "fact", "lesson"]

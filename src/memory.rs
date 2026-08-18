@@ -2,9 +2,10 @@
 //! SQLite. Two databases, same schema: global (`~/.worksmith/memory.db`) and
 //! project (`<repo>/.worksmith/memory.db`). See `worksmith-memory-v1.md`.
 //!
-//! M1 scope: create/read/supersede/forget/list + exact-subject lookup, and a
-//! small `<MEMORY>` section for prompt injection. FTS5, extraction, dedup, and
-//! retrieval-ranking are deferred to M5.
+//! M5 scope: create/read/supersede/forget/list, exact-subject lookup, FTS5
+//! search with hybrid ranking (§14), write-time dedup, worker *proposals* that
+//! need approval (§8), and a compact `<MEMORY>` section for prompt injection.
+//! Semantic/vector retrieval is deliberately deferred (§30 stage 4).
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -95,7 +96,60 @@ fn open_db(path: &Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_memories_status  ON memories(status);",
     )
     .context("initializing memory schema")?;
+
+    // FTS5 index over the searchable text, kept in sync by triggers. The rows
+    // stay the source of truth; this index is rebuildable (§15).
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            subject, content, kind, id UNINDEXED, tokenize = 'porter unicode61'
+        );
+        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(subject, content, kind, id)
+            VALUES (new.subject, new.content, new.kind, new.id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+            DELETE FROM memories_fts WHERE id = old.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+            DELETE FROM memories_fts WHERE id = old.id;
+            INSERT INTO memories_fts(subject, content, kind, id)
+            VALUES (new.subject, new.content, new.kind, new.id);
+        END;",
+    )
+    .context("initializing memory search index")?;
+
+    // Backfill anything written before the index existed.
+    conn.execute_batch(
+        "INSERT INTO memories_fts(subject, content, kind, id)
+         SELECT subject, content, kind, id FROM memories
+         WHERE id NOT IN (SELECT id FROM memories_fts);",
+    )
+    .ok();
     Ok(conn)
+}
+
+/// A search hit: the memory plus why it ranked where it did.
+#[derive(Debug, Clone)]
+pub struct Hit {
+    pub row: MemoryRow,
+    pub score: f64,
+}
+
+/// Collapse whitespace/case so near-identical writes compare equal (§20).
+fn normalize(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// FTS5 treats bare punctuation as syntax; quote each term so arbitrary user
+/// text is a safe query.
+fn fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{w}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 impl MemoryStore {
@@ -237,6 +291,135 @@ impl MemoryStore {
         Ok(rows)
     }
 
+    /// Write a memory unless one just like it is already there (§20). Returns
+    /// the existing row when it's a duplicate, so callers can say so instead of
+    /// growing the store with restatements.
+    pub fn remember_deduped(
+        &self,
+        scope: Scope,
+        kind: &str,
+        subject: &str,
+        content: &str,
+        importance: i64,
+    ) -> Result<(MemoryRow, bool)> {
+        if let Some(existing) = self.find_duplicate(scope, kind, subject, content)? {
+            return Ok((existing, false));
+        }
+        Ok((self.remember(scope, kind, subject, content, importance)?, true))
+    }
+
+    /// An active memory in the same scope with the same subject+kind and the
+    /// same content modulo whitespace/case.
+    fn find_duplicate(
+        &self,
+        scope: Scope,
+        kind: &str,
+        subject: &str,
+        content: &str,
+    ) -> Result<Option<MemoryRow>> {
+        let conn = self.conn(scope)?;
+        let sql = format!(
+            "SELECT {COLS} FROM memories \
+             WHERE subject = ?1 AND kind = ?2 AND status IN ('active', 'proposed')"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![subject, kind], row_from)?;
+        let want = normalize(content);
+        for r in rows {
+            let r = r?;
+            if normalize(&r.content) == want {
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A worker's candidate memory: stored but *not* active until a human (or
+    /// the parent) approves it (§8 — workers propose, they don't persist).
+    pub fn propose(
+        &self,
+        scope: Scope,
+        kind: &str,
+        subject: &str,
+        content: &str,
+        importance: i64,
+    ) -> Result<(MemoryRow, bool)> {
+        if let Some(existing) = self.find_duplicate(scope, kind, subject, content)? {
+            return Ok((existing, false));
+        }
+        let row = self.remember(scope, kind, subject, content, importance)?;
+        let conn = self.conn(scope)?;
+        conn.execute(
+            "UPDATE memories SET status = 'proposed' WHERE id = ?1",
+            [&row.id],
+        )?;
+        Ok((MemoryRow { status: "proposed".into(), ..row }, true))
+    }
+
+    /// Proposals awaiting a decision, both scopes.
+    pub fn pending(&self) -> Result<Vec<MemoryRow>> {
+        let mut rows = query_status(&self.global, "proposed")?;
+        if let Some(p) = &self.project {
+            rows.extend(query_status(p, "proposed")?);
+        }
+        Ok(rows)
+    }
+
+    /// Approve (`active`) or reject (delete) a proposal. False if no such id.
+    pub fn approve(&self, id: &str) -> Result<bool> {
+        for conn in self.conns() {
+            let n = conn.execute(
+                "UPDATE memories SET status = 'active', updated_at = ?1 \
+                 WHERE id = ?2 AND status = 'proposed'",
+                rusqlite::params![now(), id],
+            )?;
+            if n > 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn conns(&self) -> Vec<&Connection> {
+        let mut v = vec![&self.global];
+        if let Some(p) = &self.project {
+            v.push(p);
+        }
+        v
+    }
+
+    /// Hybrid search over both scopes (§14): exact-subject matches first, then
+    /// FTS/BM25, weighted by importance and recency, with a boost for project
+    /// memories since they're the more specific context.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        let mut hits: Vec<Hit> = Vec::new();
+        let now_ts = now();
+
+        for (conn, is_project) in self
+            .conns()
+            .into_iter()
+            .zip([false, true])
+        {
+            for (row, text_score) in fts_rows(conn, query)? {
+                let exact = if normalize(&row.subject) == normalize(query) { 1.0 } else { 0.0 };
+                // Age in days, decayed so a year-old memory keeps ~half weight.
+                let age_days = ((now_ts - row.updated_at).max(0) as f64) / 86_400.0;
+                let recency = 1.0 / (1.0 + age_days / 180.0);
+                let importance = (row.importance.clamp(0, 100) as f64) / 100.0;
+                let score = 0.35 * text_score
+                    + 0.25 * exact
+                    + 0.20 * importance
+                    + 0.10 * recency
+                    + if is_project { 0.10 } else { 0.0 };
+                hits.push(Hit { row, score });
+            }
+        }
+
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     /// Build a compact `<MEMORY>` block for the system prompt: active memories,
     /// importance-first, capped. Empty string if there's nothing to inject.
     pub fn memory_section(&self, limit: usize) -> Result<String> {
@@ -266,6 +449,87 @@ impl MemoryStore {
         out.push_str("</MEMORY>\n");
         Ok(out)
     }
+}
+
+/// The classifier prompt for end-of-task extraction (§9). Deliberately biased
+/// toward saving nothing: a store where every row feels intentional is worth
+/// more than a complete one.
+pub const EXTRACTION_PROMPT: &str = "\
+You are evaluating whether anything in a completed coding task should be stored \
+as durable agent memory.
+
+Durable memory is information that will materially improve future work.
+
+SAVE when it records: a durable decision; a persistent user preference; a \
+requirement or constraint; a non-obvious lesson that prevents repeated work; or \
+a durable fact not obvious from the project's own source.
+
+DO NOT SAVE: intermediate reasoning, temporary hypotheses, tool output, file \
+contents, line numbers, routine implementation details, completed one-time \
+actions, generic programming knowledge, duplicates, or anything unlikely to \
+matter again.
+
+Prefer ZERO memories. A normal task produces 0-3. Each memory holds exactly one \
+durable idea, stated in one or two sentences.
+
+Output one line per memory, and nothing else:
+scope|kind|subject|content|importance
+
+scope: global (true everywhere) or project (this repo only)
+kind: decision, constraint, preference, fact, or lesson
+subject: a short topic key, 1-4 words
+importance: 0-100
+
+If nothing is worth keeping, output exactly: NONE";
+
+/// A memory the extractor proposed, before it's written anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub scope: Scope,
+    pub kind: String,
+    pub subject: String,
+    pub content: String,
+    pub importance: i64,
+}
+
+/// Parse the extractor's `scope|kind|subject|content|importance` lines. Junk
+/// lines are dropped rather than failing the batch — a malformed suggestion
+/// from a weak model shouldn't cost the well-formed ones.
+pub fn parse_candidates(text: &str) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.eq_ignore_ascii_case("none") {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(5, '|').map(str::trim).collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let Some(scope) = Scope::parse(&parts[0].to_lowercase()) else {
+            continue;
+        };
+        let kind = parts[1].to_lowercase();
+        if !KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        if parts[2].is_empty() || parts[3].is_empty() {
+            continue;
+        }
+        let importance = parts
+            .get(4)
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(60)
+            .clamp(0, 100);
+        out.push(Candidate {
+            scope,
+            kind,
+            subject: parts[2].to_string(),
+            content: parts[3].to_string(),
+            importance,
+        });
+    }
+    out
 }
 
 fn row_from(r: &rusqlite::Row) -> rusqlite::Result<MemoryRow> {
@@ -313,4 +577,46 @@ fn query_active(conn: &Connection) -> Result<Vec<MemoryRow>> {
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], row_from)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn query_status(conn: &Connection, status: &str) -> Result<Vec<MemoryRow>> {
+    let sql = format!(
+        "SELECT {COLS} FROM memories WHERE status = ?1 ORDER BY updated_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([status], row_from)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Active rows matching `query`, each with a 0..1 text score from BM25 (lower
+/// bm25 is better, so it's inverted).
+fn fts_rows(conn: &Connection, query: &str) -> Result<Vec<(MemoryRow, f64)>> {
+    let q = fts_query(query);
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {} , bm25(memories_fts) AS rank
+         FROM memories_fts
+         JOIN memories m ON m.id = memories_fts.id
+         WHERE memories_fts MATCH ?1 AND m.status = 'active'
+         ORDER BY rank LIMIT 50",
+        COLS.split(", ").map(|c| format!("m.{c}")).collect::<Vec<_>>().join(", ")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([q], |r| {
+        let row = row_from(r)?;
+        let rank: f64 = r.get(11)?;
+        Ok((row, rank))
+    })?;
+    let rows: Vec<(MemoryRow, f64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(row, rank)| {
+            // SQLite's bm25() is negative, more-negative = better. Typical hits
+            // land around -0.5..-5, so divide by 5 for a 0..1 text score.
+            let score = ((-rank) / 5.0).clamp(0.0, 1.0);
+            (row, score)
+        })
+        .collect())
 }

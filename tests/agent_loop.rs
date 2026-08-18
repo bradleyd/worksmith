@@ -83,6 +83,7 @@ fn build_agent(client: MockClient, cwd: &std::path::Path, stuck_threshold: u32) 
             cwd: cwd.to_path_buf(),
             session_id: "test".into(),
             bash_timeout: Duration::from_secs(10),
+            is_worker: false,
         },
     )
 }
@@ -201,6 +202,7 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
             cwd: dir.path().to_path_buf(),
             session_id: "test".into(),
             bash_timeout: Duration::from_secs(10),
+            is_worker: false,
         },
     );
 

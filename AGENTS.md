@@ -27,7 +27,11 @@ roadmap and `worksmith-memory-v1.md` for the memory design.
 (streaming OpenAI-compat client), `event.rs` (typed event bus — the keystone),
 `session.rs` (JSONL sessions), `config.rs`, `prompt.rs`, `tools/`
 (read/write/edit/bash/grep/find/ls + `doc` + safety guard), `memory.rs`
-(SQLite), `validation.rs`. Tests live in `tests/` plus in-module `#[cfg(test)]`.
+(SQLite + FTS5), `knowledge.rs` (project text, chunked + indexed),
+`validation.rs`, `worker.rs` (spawned sub-agents), `supervisor.rs` (rules-based
+worker watchdog), `fanout.rs` (one `/spawn` → N workers), `report.rs` (worker
+results formatted for the parent). Front-end-agnostic logic lives outside
+`tui.rs` so the plain REPL (`main.rs`) shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
 
 ## Conventions
 
@@ -41,7 +45,8 @@ roadmap and `worksmith-memory-v1.md` for the memory design.
   gemini-cli) for reference only.
 - Sessions are JSONL by design; memory/knowledge are SQLite. Durable *memory* is
   distilled decisions/constraints/preferences/facts/lessons — NOT things
-  derivable from the code (those are knowledge, currently unbuilt).
+  derivable from the code. Those are *knowledge* (`knowledge.rs`): the repo's own
+  text, chunked and FTS5-indexed, rebuildable and never prompt-injected wholesale.
 
 ## Runtime notes
 
