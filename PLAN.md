@@ -599,11 +599,41 @@ covers both general and Rust-specific work.
   retry & nudge counts, per-tool usage, validation pass-rate, and session
   totals. A `/stats` command dumps the same for `--plain`/non-tab contexts.
 - **Cost** needs a per-model price table in config (`[models.<id>] input/output
-  price`); local vLLM = free.
+  price`); local vLLM = free. Cost per *completed* task — not per turn — is the
+  number that decides whether frugal mode (M10) is working.
 Prompt caching itself: automatic server-side today (vLLM `--enable-prefix-
 caching`, OpenAI/OpenRouter auto-cache) because we keep a stable message prefix;
 explicit Anthropic `cache_control` breakpoints land with the Anthropic client
 (§3). Keeping the system-prompt/`<MEMORY>` prefix stable maximizes cache hits.
+
+**M10 — Frugal mode (low-token operation)**: a mode that does the same work for
+materially fewer tokens, selected by `--frugal` / `mode = "frugal"`. This is
+positioning, not just thrift: the competing harnesses spend freely (DeepSeek's
+`dsh` reportedly burned ~20M tokens on a single task), and "cheap models, small
+context, real work" is the opposite bet — the one that makes local/vLLM
+deployment and long unattended runs viable. Cost per *completed* task is the
+number to publish, so this depends on M9's accounting to prove anything.
+
+Known spend, roughly in order of waste:
+- **The `<MEMORY>` block is injected every turn** regardless of relevance —
+  currently the top 20 rows by importance. Now that `memory.search()` does
+  hybrid retrieval, frugal mode should inject only what matches the turn (or
+  nothing, and let the model call the `memory` tool). Note the tension with
+  prompt caching below.
+- **Tool results dominate.** `MAX_TOOL_RESULT_BYTES` is 24k; frugal should cut
+  it hard, prefer `grep` hits over whole-file `read`s, and return smaller
+  knowledge chunks.
+- **Reasoning tokens** — disable/limit thinking where the provider allows it.
+- **Multipliers**: fan-out is N× the work, each supervisor nudge is a re-send of
+  the whole history, validation retries re-run the loop, and a finished fan-out
+  group triggers an extra synthesis turn. Frugal should cap `max-steps` and
+  `max-retries`, and default `agents.synthesize = false`.
+- **The system prompt** itself (base + AGENTS.md + memory) is re-sent every
+  step; a terser base prompt is free savings.
+
+Caching cuts the other way: a per-turn memory block breaks the stable prefix
+that makes server-side prefix caching work, so measure both — a cache hit is
+cheaper than a token not sent. Get the numbers before choosing.
 
 ## 11. Open decisions
 
