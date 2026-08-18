@@ -77,6 +77,13 @@ project knowledge (M5). MCP/plugins (M4) are still ahead.
   providers disagree on the field (`reasoning` vs `chat_template_kwargs`) and an
   unrecognized one is a 400, so the dialect is guessed from the endpoint and
   overridable with `thinking-param`.
+- **Skills** — the [Agent Skills](https://agentskills.io) format as published, so
+  a `SKILL.md` you wrote for Claude Code, Codex, or Cursor works here unchanged
+  (and vice versa). Found in `<project>/skills/`, `~/.claude/skills/`,
+  `~/.worksmith/skills/`, and the project-local versions of both, nearest
+  winning. Only each skill's one-line description sits in the prompt; the model
+  calls the `skill` tool to load the rest, and reads `references/` itself.
+  `/skill` lists them, `/skill <name>` loads one.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
   `WORKSMITH_HOME` relocates the whole global directory (config, sessions,

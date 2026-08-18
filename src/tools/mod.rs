@@ -7,6 +7,7 @@ mod edit;
 mod read;
 mod recall;
 mod search;
+mod skill;
 mod web;
 pub(crate) use search::{display_rel, walk};
 mod write;
@@ -97,6 +98,7 @@ impl ToolRegistry {
         r.register(Box::new(recall::MemoryTool));
         r.register(Box::new(recall::KnowledgeTool));
         r.register(Box::new(web::WebTool));
+        r.register(Box::new(skill::SkillTool));
         r
     }
 

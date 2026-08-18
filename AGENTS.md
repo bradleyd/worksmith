@@ -30,7 +30,8 @@ roadmap and `worksmith-memory-v1.md` for the memory design.
 (SQLite + FTS5), `knowledge.rs` (project text, chunked + indexed),
 `validation.rs`, `worker.rs` (spawned sub-agents), `supervisor.rs` (rules-based
 worker watchdog), `fanout.rs` (one `/spawn` → N workers), `report.rs` (worker
-results formatted for the parent). Front-end-agnostic logic lives outside
+results formatted for the parent), `skill.rs` (Agent Skills discovery — the
+published format, not ours). Front-end-agnostic logic lives outside
 `tui.rs` so the plain REPL (`main.rs`) shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
 
 ## Conventions

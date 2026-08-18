@@ -241,10 +241,18 @@ Since the model also has `bash`, the CLI tools are usable directly — the
 
 Four tiers, cheapest first:
 
-**Tier 1 — Skills & prompt templates (Markdown, free)**
-Copies pi exactly. `~/.worksmith/skills/*/SKILL.md`, `.worksmith/skills/`,
-`/skill:name`, prompt templates as `/name` markdown files with `{{var}}`.
-Zero code, works for the majority of "extension" needs.
+**Tier 1 — Skills (Markdown, free)** *(done)*
+We implement the **Agent Skills spec as published** rather than a private
+format: Anthropic released it Dec 2025 and ~32 tools read the same `SKILL.md`
+(VS Code, Codex, Cursor, Gemini CLI, Goose, Copilot). Required frontmatter is
+`name` + `description`; `scripts/`, `references/`, `assets/` are optional.
+Search order, nearest wins: `<project>/skills/`, `~/.claude/skills/`,
+`~/.worksmith/skills/`, `<project>/.claude/skills/`,
+`<project>/.worksmith/skills/`. `WORKSMITH_HOME` relocates both home paths so a
+run can be made reproducible. Progressive disclosure as the spec intends: only
+name+description reach the prompt; the `skill` tool fetches a body; the model
+reads `references/` itself. Shadowing and malformed skills are reported, not
+silent. Prompt templates (`/name` with `{{var}}`) are still unbuilt.
 
 **Tier 2 — External CLI tools (the pi-philosophy answer)**
 A tool that is just an executable with a good `--help`/README. The skill
@@ -590,7 +598,13 @@ agent-line-style workflow definitions, and porting rustopedia's Rust-development
 covers both general and Rust-specific work.
 
 On workflow definitions specifically: chaining workers (draft → review → revise)
-should be a **file, not TUI syntax**. A pipeline you'd reuse is one you'd rather
+should be a **file, not TUI syntax**, and a *separate artifact from skills* —
+the Agent Skills spec deliberately covers none of orchestration, determinism, or
+validation, and forking a format 30 tools agree on to smuggle in a state machine
+would cost the interop and gain nothing. Shape: `workflows/<name>.toml`, steps
+modeled on agent-line's `Outcome` (`Continue | Done | Next(id) | Retry | Fail`),
+each step optionally fanning out (`workers = N`), naming its own `model`, and
+gating on `validate` with `on-fail = { next, max-retries }`. A pipeline you'd reuse is one you'd rather
 store than retype, and a pipe-style `/spawn "a" | "b"` is shell idiom in a place
 where you write prose to a model. The reviewer stage in particular needs more
 structure than a freeform skill gives — it has to produce a *decision*, not

@@ -74,8 +74,8 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 
 /// Slash commands offered by Tab-completion.
 const COMMANDS: &[&str] = &[
-    "/help", "/new", "/compact", "/memory", "/knowledge", "/spawn", "/agents", "/validate",
-    "/fast", "/quit",
+    "/help", "/new", "/compact", "/memory", "/knowledge", "/skill", "/spawn", "/agents",
+    "/validate", "/fast", "/quit",
 ];
 
 /// Active Tab-completion state (candidates for the current token).
@@ -926,7 +926,8 @@ async fn handle_command(
                 "keys: Enter=send  Alt+Enter=newline  Ctrl+G=$EDITOR  Esc=abort/clear  \
                  Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
                  commands: /new /compact /memory [search|extract|pending|approve] \
-                 /knowledge [index|search] /validate <cmd|off> /fast [on|off|auto] \
+                 /knowledge [index|search] /skill [name] /validate <cmd|off> \
+                 /fast [on|off|auto] \
                  /spawn [-n N | --each-files <regex>] [--model <spec>] <task> \
                  /agents [kill|show|nudge <id> | drop-queued] /quit   @path includes a file"
                     .to_string(),
@@ -1009,6 +1010,7 @@ async fn handle_command(
         }
         "agents" | "workers" => agents_command(app, workers, parts),
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
+        "skill" | "skills" => skill_command(app, cwd, parts),
         "fast" | "lucky" => {
             let mode = agent.thinking_mode();
             let rest: Vec<&str> = parts.collect();
@@ -1259,6 +1261,40 @@ fn render_recent(session: &Session, max_messages: usize) -> String {
     out
 }
 
+/// `/skill [name]` — list installed skills, or load one into the transcript so
+/// it applies to the rest of the session without waiting for the model to ask.
+fn skill_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = &'a str>) {
+    let catalog = crate::skill::SkillCatalog::discover(cwd);
+    match parts.next() {
+        None => {
+            if catalog.is_empty() {
+                app.push(
+                    Kind::Notice,
+                    "(no skills — add one under .worksmith/skills/<name>/SKILL.md, or \
+                     ~/.claude/skills/ to share it with other tools)"
+                        .to_string(),
+                );
+            }
+            for s in catalog.skills() {
+                app.push(Kind::Notice, format!("{}: {}", s.name, s.description));
+            }
+            for note in catalog.notes() {
+                app.push(Kind::Notice, note.clone());
+            }
+        }
+        Some(name) => match catalog.get(name) {
+            Some(skill) => match skill.body() {
+                Ok(body) => app.push(
+                    Kind::Notice,
+                    format!("skill `{}` ({})\n\n{}", skill.name, skill.dir.display(), body.trim()),
+                ),
+                Err(e) => app.push(Kind::Error, format!("could not read `{name}`: {e}")),
+            },
+            None => app.push(Kind::Error, format!("no skill named `{name}`")),
+        },
+    }
+}
+
 /// `/knowledge [index | search <query> | status]` — the project's own text,
 /// chunked and searchable. Rebuildable, so `index` is always safe to re-run.
 fn knowledge_command<'a>(
@@ -1504,18 +1540,25 @@ fn compute_completions(input: &str, cwd: &Path) -> Option<(usize, Vec<String>)> 
         return None;
     }
     let prev = input[..token_start].split_whitespace().count();
-    let cands = arg_completions(first, prev, token, &tokens)?;
+    let cands = arg_completions(first, prev, token, &tokens, cwd)?;
     (!cands.is_empty()).then_some((token_start, cands))
 }
 
 /// Complete a subcommand or argument for a `/command`.
-fn arg_completions(first: &str, prev: usize, token: &str, tokens: &[&str]) -> Option<Vec<String>> {
+fn arg_completions(
+    first: &str,
+    prev: usize,
+    token: &str,
+    tokens: &[&str],
+    cwd: &Path,
+) -> Option<Vec<String>> {
     let opts: &[&str] = match first.trim_start_matches('/') {
         "agents" | "workers" if prev == 1 => {
             &["list", "show", "kill", "nudge", "drop-queued"]
         }
         "spawn" if prev == 1 => &["-n", "--each-files", "--model"],
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
+        "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
@@ -1532,6 +1575,17 @@ fn arg_completions(first: &str, prev: usize, token: &str, tokens: &[&str]) -> Op
         _ => return None,
     };
     Some(opts.iter().filter(|o| o.starts_with(token)).map(|o| format!("{o} ")).collect())
+}
+
+/// Installed skill names matching `token` — completion has to read the disk
+/// here, since skills are discovered rather than compiled in.
+fn skill_names(token: &str, cwd: &Path) -> Vec<String> {
+    crate::skill::SkillCatalog::discover(cwd)
+        .skills()
+        .iter()
+        .filter(|s| s.name.starts_with(token))
+        .map(|s| format!("{} ", s.name))
+        .collect()
 }
 
 /// Prefix-complete a relative file path against the filesystem. Directories get

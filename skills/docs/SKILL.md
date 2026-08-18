@@ -1,3 +1,8 @@
+---
+name: docs
+description: Reading and converting documents — PDF, DOCX, ODT, RTF, EPUB — with the built-in `doc` tool. Use when a task involves a binary document rather than source code: extracting text, converting between formats, authoring a .docx or .pdf, or pulling images out of a PDF.
+---
+
 # Skill: Documents (PDF, DOCX, …)
 
 Guidance for working with documents using the built-in `doc` tool. (Bundled for

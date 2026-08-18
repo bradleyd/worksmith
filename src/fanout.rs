@@ -107,6 +107,22 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
     Ok(SpawnRequest { fanout, task: rest.trim().to_string(), model })
 }
 
+/// `TASK: do the thing` → `do the thing`, case-insensitively. `None` when the
+/// line isn't marked as a task at all.
+fn strip_task_marker(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+    if lower.starts_with("task:") {
+        return Some(&line["task:".len()..]);
+    }
+    // Bold markdown is the most common way a model "follows" the format.
+    for prefix in ["**task:**", "**task**:", "`task:`"] {
+        if lower.starts_with(prefix) {
+            return Some(&line[prefix.len()..]);
+        }
+    }
+    None
+}
+
 /// A worker's task: your prose, plus what this particular worker is on.
 pub fn assign(task: &str, item: &str) -> String {
     format!("{task}\n\nYour assignment: {item}")
@@ -164,22 +180,28 @@ pub async fn plan_fanout(
     want: Option<usize>,
     max: usize,
 ) -> Vec<String> {
+    // Every line must carry a marker. "No preamble" is a request a weak model
+    // ignores — a local 27B once answered with its own deliberation and we
+    // spawned three workers whose tasks were fragments of its thinking. A
+    // required prefix makes the shape checkable instead of hoped for.
     let system = match want {
         Some(n) => format!(
             "You split a work request into exactly {n} tasks for {n} independent \
              background workers. If the request contains {n} distinct pieces of work, \
              write one per line. If it does not divide that way, write {n} variations \
-             on the same goal, each taking a different angle. Output exactly {n} lines, \
-             one self-contained instruction per line, no numbering, no preamble, no \
-             blank lines."
+             on the same goal, each taking a different angle.\n\n\
+             Output exactly {n} lines. Every line MUST begin with `TASK: ` followed by \
+             one self-contained instruction. Write nothing else — no reasoning, no \
+             numbering, no preamble, no blank lines."
         ),
         None => format!(
             "You decide whether a work request should be split across independent \
              background workers. Output ONE line — the request restated — unless it \
              obviously contains separate pieces of work that can run in parallel \
-             without editing the same files; only then output one self-contained \
-             instruction per piece, at most {max} lines. Prefer one line when unsure. \
-             No numbering, no preamble, no blank lines."
+             without editing the same files; only then output one line per piece, at \
+             most {max}. Prefer one line when unsure.\n\n\
+             Every line MUST begin with `TASK: ` followed by one self-contained \
+             instruction. Write nothing else — no reasoning, no numbering, no preamble."
         ),
     };
 
@@ -203,24 +225,32 @@ pub fn fallback_tasks(task: &str, n: usize, explicit: bool) -> Vec<String> {
     }
 }
 
-/// One instruction per line: strip list markers, drop blanks, take what we
-/// asked for (or clamp to the cap in auto mode).
+/// Take only the lines the planner marked as tasks.
+///
+/// Anything without the `TASK:` marker is discarded, which is the whole point:
+/// a model that prefaces its answer with reasoning would otherwise have that
+/// reasoning spawned as work. If nothing is marked, we say so and the caller
+/// falls back rather than inventing tasks out of prose.
 pub fn parse_subtasks(text: &str, want: Option<usize>, max: usize) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let cleaned = line
+        // Tolerate a leading list marker before TASK:, since models love them.
+        let line = line
             .trim_start_matches(|c: char| c.is_ascii_digit())
-            .trim_start_matches(['.', ')', '-', '*', ':'])
+            .trim_start_matches(['.', ')', '-', '*', ' '])
             .trim();
-        let cleaned = if cleaned.is_empty() { line } else { cleaned };
-        out.push(cleaned.to_string());
+        let Some(rest) = strip_task_marker(line) else {
+            continue;
+        };
+        // The pre-trim above can leave a stray `**` from bold markers.
+        let rest = rest.trim_start_matches(['*', '`', ':', ' ']).trim();
+        if !rest.is_empty() {
+            out.push(rest.to_string());
+        }
     }
     if out.is_empty() {
-        return Err("planner returned nothing usable".into());
+        return Err("planner returned no `TASK:` lines".into());
     }
     match want {
         // Too few lines for an explicit -n: not usable, let the caller fall back.
@@ -293,21 +323,54 @@ mod tests {
     }
 
     #[test]
+    fn planner_reasoning_is_never_spawned_as_work() {
+        // A local 27B answered the planner with its own deliberation, and every
+        // line of it became a worker's task. Unmarked prose must be discarded.
+        let text = "We need decide how to split. The request has: read the skill, write three \
+                    drafts, review and pick one.\n\
+                    Based on your description, here's the likely 3-task split:\n\
+                    TASK: Write a newsletter draft about logging\n\
+                    TASK: Write a newsletter draft about CI pipelines\n\
+                    TASK: Write a newsletter draft about caching\n\
+                    Let me know if you'd like me to adjust these.";
+        let got = parse_subtasks(text, Some(3), 4).unwrap();
+        assert_eq!(got.len(), 3, "only the marked lines: {got:?}");
+        assert!(got[0].starts_with("Write a newsletter draft about logging"));
+        assert!(
+            !got.iter().any(|t| t.contains("We need decide")),
+            "reasoning must not become a task: {got:?}"
+        );
+
+        // Nothing marked at all is a failure, not an excuse to invent tasks.
+        let err = parse_subtasks("Here are three ideas:\n1. logging\n2. CI\n3. caching", Some(3), 4);
+        assert!(err.is_err(), "unmarked prose is unusable, got {err:?}");
+    }
+
+    #[test]
+    fn task_markers_survive_the_formatting_models_add() {
+        for line in ["TASK: do it", "task: do it", "- TASK: do it", "2. TASK: do it",
+                     "**TASK:** do it"] {
+            let got = parse_subtasks(line, Some(1), 4).unwrap();
+            assert_eq!(got, vec!["do it".to_string()], "failed on {line:?}");
+        }
+    }
+
+    #[test]
     fn subtasks_parse_out_of_list_formatting() {
         
-        let text = "1. write about WAL\n2) write about FTS5\n- write about JSON1\n\n";
+        let text = "1. TASK: write about WAL\n2) TASK: write about FTS5\n- TASK: write about JSON1\n\n";
         let got = parse_subtasks(text, Some(3), 4).unwrap();
         assert_eq!(got, vec!["write about WAL", "write about FTS5", "write about JSON1"]);
 
         // Auto mode clamps to the worker cap.
-        let many = (1..=9).map(|i| format!("task {i}")).collect::<Vec<_>>().join("\n");
+        let many = (1..=9).map(|i| format!("TASK: task {i}")).collect::<Vec<_>>().join("\n");
         assert_eq!(parse_subtasks(&many, None, 4).unwrap().len(), 4);
 
         // One line back from auto mode is a normal single spawn.
-        assert_eq!(parse_subtasks("just do it", None, 4).unwrap().len(), 1);
+        assert_eq!(parse_subtasks("TASK: just do it", None, 4).unwrap().len(), 1);
 
         // Explicit -n that the planner under-delivered on is unusable.
-        assert!(parse_subtasks("only one", Some(3), 4).is_err());
+        assert!(parse_subtasks("TASK: only one", Some(3), 4).is_err());
         assert!(parse_subtasks("   \n\n", None, 4).is_err(), "nothing usable");
     }
 

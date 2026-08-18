@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::config;
 use crate::memory::MemoryStore;
+use crate::skill::{MAX_CATALOG_CHARS, SkillCatalog};
 
 pub const BASE_SYSTEM_PROMPT: &str = "\
 You are Worksmith, a terminal coding agent. You accomplish tasks by calling \
@@ -54,6 +55,15 @@ pub fn build_system_prompt(cwd: &Path, mem: &MemoryStore) -> String {
     if !memory.trim().is_empty() {
         s.push_str("\n\n");
         s.push_str(&memory);
+    }
+
+    // Only the catalog — name and description — rides in the prompt. The body
+    // arrives when the model calls `skill`, which is the spec's progressive
+    // disclosure and what keeps 20 installed skills from costing 20 skills.
+    let skills = SkillCatalog::discover(cwd).prompt_section(MAX_CATALOG_CHARS);
+    if !skills.trim().is_empty() {
+        s.push_str("\n\n");
+        s.push_str(&skills);
     }
     s
 }

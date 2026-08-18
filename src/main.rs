@@ -136,10 +136,6 @@ async fn run(args: Args) -> Result<()> {
 
     let mut session = open_session(&args, &cwd)?;
 
-    if let Some(Cmd::Spawn { .. }) = &args.cmd {
-        return run_spawn(&args, &config, &resolved, client, registry, bus, session, &cwd).await;
-    }
-
     let mode = if args.mode.as_deref() == Some("json") {
         OutputMode::Json
     } else if args.print {
@@ -150,6 +146,18 @@ async fn run(args: Args) -> Result<()> {
     } else {
         OutputMode::Tui
     };
+
+    if let Some(Cmd::Spawn { .. }) = &args.cmd {
+        // The renderer has to exist before the work starts, or `--mode json`
+        // reports a silent, tokenless run — which is exactly what it did.
+        let renderer = spawn_renderer(bus.subscribe(), mode);
+        let outcome =
+            run_spawn(&args, &config, &resolved, client, registry, bus.clone(), session, &cwd)
+                .await;
+        drop(bus);
+        let _ = renderer.await;
+        return outcome;
+    }
 
     let tool_ctx = ToolContext {
         cwd: cwd.clone(),
@@ -643,6 +651,7 @@ async fn handle_command(
                  /memory extract          distill this session into memories\n  \
                  /memory pending | /memory approve <id>   review worker proposals\n  \
                  /knowledge [index|search <query>|status]  the project's own text\n  \
+                 /skill [name]            list skills, or load one\n  \
                  /spawn [-n N | --each-files <regex>] <task>   background worker(s)\n  \
                  /agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]\n  \
                  /validate <cmd|off>      success check for a turn\n  \
@@ -667,6 +676,10 @@ async fn handle_command(
         }
         "knowledge" | "know" => {
             handle_knowledge(parts, cwd);
+            CommandResult::Handled
+        }
+        "skill" | "skills" => {
+            handle_skill(parts, cwd);
             CommandResult::Handled
         }
         "spawn" => {
@@ -821,6 +834,33 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
             println!("dropped {} queued task(s)", workers.drop_queued())
         }
         other => eprintln!("unknown /agents subcommand: {other}"),
+    }
+}
+
+/// `/skill [name]` — list installed skills, or print one's instructions.
+fn handle_skill<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
+    let catalog = worksmith::skill::SkillCatalog::discover(cwd);
+    match parts.next() {
+        None => {
+            if catalog.is_empty() {
+                println!("(no skills — add one under .worksmith/skills/<name>/SKILL.md)");
+            }
+            for s in catalog.skills() {
+                println!("{}: {}", s.name, s.description);
+            }
+            for note in catalog.notes() {
+                println!("({note})");
+            }
+        }
+        Some(name) => match catalog.get(name) {
+            Some(skill) => match skill.body() {
+                Ok(body) => {
+                    println!("skill `{}` ({})\n\n{}", skill.name, skill.dir.display(), body.trim())
+                }
+                Err(e) => eprintln!("could not read `{name}`: {e}"),
+            },
+            None => eprintln!("no skill named `{name}`"),
+        },
     }
 }
 
