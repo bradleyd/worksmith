@@ -65,6 +65,28 @@ pub struct TurnResult {
     pub outcome: TurnOutcome,
 }
 
+/// A mailbox for injecting messages into a *running* turn — supervisor nudges
+/// today, interactive steering later. Cheap to clone; the agent drains it at the
+/// top of every step, so a message lands before the next model call.
+#[derive(Clone, Default)]
+pub struct Steering {
+    inbox: Arc<Mutex<Vec<String>>>,
+}
+
+impl Steering {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&self, message: impl Into<String>) {
+        self.inbox.lock().unwrap().push(message.into());
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inbox.lock().unwrap())
+    }
+}
+
 /// Why the inner loop stopped.
 enum IdleReason {
     ModelDone,
@@ -88,6 +110,7 @@ pub struct Agent {
     context_limit: usize,
     keep_recent_turns: usize,
     tool_ctx: ToolContext,
+    steering: Steering,
 }
 
 impl Agent {
@@ -119,7 +142,20 @@ impl Agent {
             context_limit,
             keep_recent_turns,
             tool_ctx,
+            steering: Steering::new(),
         }
+    }
+
+    /// This agent's steering mailbox — push to it to inject a message into the
+    /// next step of a running turn (worker reports, supervisor nudges).
+    pub fn steering(&self) -> Steering {
+        self.steering.clone()
+    }
+
+    /// Attach a steering mailbox (the supervisor's channel into this agent).
+    pub fn with_steering(mut self, steering: Steering) -> Self {
+        self.steering = steering;
+        self
     }
 
     /// Create a sibling agent that shares this one's client, tools, and config
@@ -127,6 +163,7 @@ impl Agent {
     pub fn fork(&self, bus: EventBus, session_id: String) -> Agent {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.session_id = session_id;
+        tool_ctx.is_worker = true;
         Agent {
             client: self.client.clone(),
             registry: self.registry.clone(),
@@ -140,6 +177,8 @@ impl Agent {
             context_limit: self.context_limit,
             keep_recent_turns: self.keep_recent_turns,
             tool_ctx,
+            // A fork gets a fresh mailbox — its supervisor attaches its own.
+            steering: Steering::new(),
         }
     }
 
@@ -235,6 +274,15 @@ impl Agent {
         for _step in 0..self.max_steps {
             if cancel.is_cancelled() {
                 return Ok(IdleReason::Aborted);
+            }
+
+            // Steering: anything the supervisor (or the user) posted since the
+            // last step lands as a user message before the next model call.
+            for message in self.steering.take() {
+                self.bus.emit(Event::Nudge {
+                    reason: message.clone(),
+                });
+                session.append_message(Message::user(message))?;
             }
 
             // Compact if the working history is approaching the context limit.

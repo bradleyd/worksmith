@@ -5,9 +5,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+use crate::supervisor::{Mode, SupervisorConfig};
 
 /// Merged Worksmith configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -28,6 +31,20 @@ pub struct Config {
 pub struct AgentsConfig {
     /// Max concurrently-running spawned workers.
     pub max: Option<usize>,
+    /// `off` | `rules` | `model` — how closely workers are watched.
+    pub supervisor: Option<String>,
+    /// Seconds without a worker event before the supervisor nudges.
+    pub stuck_timeout: Option<u64>,
+    /// Nudges allowed before the supervisor stops the worker.
+    pub max_nudges: Option<usize>,
+    /// Identical tool calls (across the run) before the supervisor nudges.
+    pub repeat_threshold: Option<u32>,
+    /// Completion tokens a worker may spend before it's stopped.
+    pub token_budget: Option<u32>,
+    /// `auto` | `off` — may a bare `/spawn` fan out into several workers?
+    pub fanout: Option<String>,
+    /// After a fan-out group finishes, run a turn combining their results.
+    pub synthesize: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,15 +124,30 @@ impl Config {
         for (k, v) in other.providers {
             self.providers.insert(k, v);
         }
-        if other.agents.max.is_some() {
-            self.agents.max = other.agents.max;
+        // `take` keeps `other`'s value when set, otherwise leaves ours alone.
+        fn take<T>(mine: &mut Option<T>, theirs: Option<T>) {
+            if theirs.is_some() {
+                *mine = theirs;
+            }
         }
-        if other.agent.max_steps.is_some() {
-            self.agent.max_steps = other.agent.max_steps;
-        }
-        if other.tools.bash_timeout_secs.is_some() {
-            self.tools.bash_timeout_secs = other.tools.bash_timeout_secs;
-        }
+        take(&mut self.agents.max, other.agents.max);
+        take(&mut self.agents.supervisor, other.agents.supervisor);
+        take(&mut self.agents.stuck_timeout, other.agents.stuck_timeout);
+        take(&mut self.agents.max_nudges, other.agents.max_nudges);
+        take(&mut self.agents.repeat_threshold, other.agents.repeat_threshold);
+        take(&mut self.agents.token_budget, other.agents.token_budget);
+        take(&mut self.agents.fanout, other.agents.fanout);
+        take(&mut self.agents.synthesize, other.agents.synthesize);
+        take(&mut self.agent.max_steps, other.agent.max_steps);
+        take(&mut self.agent.max_retries, other.agent.max_retries);
+        take(&mut self.agent.stuck_threshold, other.agent.stuck_threshold);
+        take(&mut self.agent.validate, other.agent.validate);
+        take(&mut self.agent.context_limit, other.agent.context_limit);
+        take(&mut self.agent.keep_recent_turns, other.agent.keep_recent_turns);
+        take(&mut self.tools.bash_timeout_secs, other.tools.bash_timeout_secs);
+        take(&mut self.web.provider, other.web.provider);
+        take(&mut self.web.api_key_env, other.web.api_key_env);
+        take(&mut self.web.base_url, other.web.base_url);
     }
 
     pub fn max_steps(&self) -> usize {
@@ -144,6 +176,44 @@ impl Config {
 
     pub fn agents_max(&self) -> usize {
         self.agents.max.unwrap_or(4)
+    }
+
+    /// The worker-supervision policy (PLAN.md §7).
+    pub fn supervisor(&self) -> SupervisorConfig {
+        let d = SupervisorConfig::default();
+        SupervisorConfig {
+            mode: self.agents.supervisor.as_deref().map(Mode::parse).unwrap_or(d.mode),
+            idle_timeout: self
+                .agents
+                .stuck_timeout
+                .map(Duration::from_secs)
+                .unwrap_or(d.idle_timeout),
+            max_nudges: self.agents.max_nudges.unwrap_or(d.max_nudges),
+            repeat_threshold: self.agents.repeat_threshold.unwrap_or(d.repeat_threshold),
+            token_budget: self.agents.token_budget,
+        }
+    }
+
+    /// Whether a bare `/spawn` may be split across workers by the planner.
+    pub fn fanout_auto(&self) -> bool {
+        !matches!(
+            self.agents.fanout.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+            Some("off") | Some("none") | Some("false")
+        )
+    }
+
+    /// Whether a finished fan-out group triggers a combining turn.
+    pub fn synthesize(&self) -> bool {
+        self.agents.synthesize.unwrap_or(true)
+    }
+
+    /// The configured web-search provider, if any.
+    pub fn web(&self) -> ResolvedWeb {
+        ResolvedWeb {
+            provider: self.web.provider.as_deref().and_then(WebProvider::parse),
+            api_key_env: self.web.api_key_env.clone(),
+            base_url: self.web.base_url.clone(),
+        }
     }
 
     pub fn bash_timeout_secs(&self) -> u64 {

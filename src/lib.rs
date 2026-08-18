@@ -6,10 +6,14 @@
 pub mod agent;
 pub mod config;
 pub mod event;
+pub mod fanout;
+pub mod knowledge;
 pub mod llm;
 pub mod memory;
 pub mod prompt;
+pub mod report;
 pub mod session;
+pub mod supervisor;
 pub mod tools;
 pub mod tui;
 pub mod validation;

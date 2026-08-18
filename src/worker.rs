@@ -1,17 +1,22 @@
 //! Spawned workers (sub-agents). Each worker is a forked [`Agent`] running a
 //! delegated task on its own event bus + session, in-process. The manager
-//! tracks live status; the supervisor (M7) will watch the same event streams.
+//! tracks live status; each worker's watcher task also runs the
+//! [`Supervisor`](crate::supervisor) over that same event stream — nudging via
+//! steering, and cancelling the worker when it escalates.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, Steering};
 use crate::event::Event;
 use crate::event::EventBus;
 use crate::session::Session;
+use crate::supervisor::{Action, Supervisor, SupervisorConfig};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WorkerStatus {
@@ -42,6 +47,11 @@ struct Runtime {
     /// Files the worker created/edited (deterministic, from write/edit calls).
     changed: Vec<String>,
     result: String,
+    /// Supervisor interventions so far.
+    nudges: usize,
+    /// Set when the supervisor pulled this worker off the floor; it wins over
+    /// the (necessarily "aborted") turn outcome when reporting.
+    escalation: Option<String>,
 }
 
 /// A point-in-time view of a worker for display.
@@ -56,14 +66,23 @@ pub struct WorkerSummary {
     pub result: String,
     /// The worker's session id (its full transcript is at that session file).
     pub session_id: String,
+    /// How many times the supervisor nudged this worker.
+    pub nudges: usize,
+    /// Why the supervisor stopped it, if it did.
+    pub escalation: Option<String>,
+    /// The fan-out this worker belongs to, if it was one of several.
+    pub group: Option<u64>,
 }
 
 struct Worker {
     id: String,
     task: String,
     session_id: String,
+    group: Option<u64>,
     runtime: Arc<Mutex<Runtime>>,
     cancel: CancellationToken,
+    /// Channel for injecting messages into the running worker (nudges).
+    steering: Steering,
     /// Whether this worker's terminal status has been surfaced to the user.
     reported: bool,
     _handle: JoinHandle<()>,
@@ -125,27 +144,56 @@ impl WorkerManager {
             tool_calls: 0,
             changed: Vec::new(),
             result: String::new(),
+            nudges: 0,
+            escalation: None,
         }));
         let cancel = CancellationToken::new();
 
         let rt = runtime.clone();
         let cancel_task = cancel.clone();
+        let cancel_sup = cancel.clone();
         let task_run = task.clone();
+        let mut supervisor = Supervisor::new(self.supervisor.clone());
+        let steer_sup = steering.clone();
         let handle = tokio::spawn(async move {
             let mut session = session;
             let agent = agent;
             let turn = agent.run_turn(&mut session, &task_run, &system, None, cancel_task);
             tokio::pin!(turn);
+            // Absolute deadline for the idle rule, pushed out by every event.
+            let idle = supervisor.idle_timeout();
+            let mut deadline = Instant::now() + idle;
             loop {
                 tokio::select! {
                     ev = rx.recv() => {
                         if let Ok(e) = ev {
+                            deadline = Instant::now() + idle;
+                            let action = supervisor.observe(&e);
                             let mut g = rt.lock().unwrap();
                             update_last(&mut g, e);
+                            apply(&mut g, action, &steer_sup, &cancel_sup);
                         }
                     }
-                    res = &mut turn => {
+                    // Only armed when the supervisor is on; otherwise this branch
+                    // is disabled and the worker is never interrupted.
+                    _ = tokio::time::sleep_until(deadline.into()), if supervisor.is_on() => {
+                        deadline = Instant::now() + idle;
+                        let action = supervisor.on_idle();
                         let mut g = rt.lock().unwrap();
+                        apply(&mut g, action, &steer_sup, &cancel_sup);
+                    }
+                    res = &mut turn => {
+                        // The turn can finish with events still buffered on the
+                        // bus (select picks a ready branch at random) — drain
+                        // them so the final summary isn't missing tool calls.
+                        let mut pending = Vec::new();
+                        while let Ok(e) = rx.try_recv() {
+                            pending.push(e);
+                        }
+                        let mut g = rt.lock().unwrap();
+                        for e in pending {
+                            update_last(&mut g, e);
+                        }
                         match res {
                             Ok(r) => {
                                 g.result = r.text.clone();
@@ -164,6 +212,15 @@ impl WorkerManager {
                                 g.result = msg;
                             }
                         }
+                        // An escalation is why the turn ended; report that, not
+                        // the bare "aborted" the cancellation produced.
+                        if let Some(reason) = g.escalation.clone() {
+                            g.status = WorkerStatus::Stopped;
+                            g.last = format!("supervisor: {reason}");
+                            if g.result.trim().is_empty() {
+                                g.result = format!("stopped by supervisor — {reason}");
+                            }
+                        }
                         break;
                     }
                 }
@@ -174,12 +231,28 @@ impl WorkerManager {
             id: id.clone(),
             task,
             session_id,
+            group,
             runtime,
             cancel,
+            steering,
             reported: false,
             _handle: handle,
         });
         Ok(id)
+    }
+
+    /// Inject a steering message into a running worker (manual `/agents nudge`,
+    /// same mechanism the supervisor uses). False if there's no such worker.
+    pub fn nudge(&self, id: &str, message: &str) -> bool {
+        match self.workers.iter().find(|w| w.id == id) {
+            Some(w) => {
+                w.steering.push(message);
+                let mut g = w.runtime.lock().unwrap();
+                g.nudges += 1;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Workers that reached a terminal state since the last call (each returned
@@ -216,6 +289,28 @@ impl WorkerManager {
             }
             None => false,
         }
+    }
+}
+
+/// Carry out a supervisor decision: nudge = steer the worker's next step;
+/// escalate = pull it off the floor (cancel) and record why.
+fn apply(
+    g: &mut Runtime,
+    action: Option<Action>,
+    steering: &Steering,
+    cancel: &CancellationToken,
+) {
+    match action {
+        Some(Action::Nudge(directive)) => {
+            g.nudges += 1;
+            steering.push(directive);
+        }
+        Some(Action::Escalate(reason)) => {
+            g.last = format!("supervisor: {reason}");
+            g.escalation = Some(reason);
+            cancel.cancel();
+        }
+        None => {}
     }
 }
 

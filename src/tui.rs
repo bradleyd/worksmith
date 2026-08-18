@@ -395,6 +395,9 @@ pub async fn run_tui(
     bash_timeout: Duration,
     context_limit: usize,
     agents_max: usize,
+    supervisor: SupervisorConfig,
+    fanout_auto: bool,
+    synthesize: bool,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let res = run_loop(
@@ -470,6 +473,9 @@ async fn run_loop(
     }
     if let Some(c) = app.validate_cmd.clone() {
         app.push(Kind::Notice, format!("validation: {c}"));
+    }
+    if !workers.supervisor_config().is_on() {
+        app.push(Kind::Notice, "supervisor: off (workers run unwatched)".to_string());
     }
     app.push(
         Kind::Notice,
@@ -904,6 +910,12 @@ fn agents_command<'a>(
             Some(id) => match workers.get(id) {
                 Some(w) => {
                     let mut body = format!("[{}]", w.status.label());
+                    if w.nudges > 0 {
+                        body.push_str(&format!(" · {} supervisor nudges", w.nudges));
+                    }
+                    if let Some(reason) = &w.escalation {
+                        body.push_str(&format!("\nstopped by supervisor: {reason}"));
+                    }
                     if !w.changed.is_empty() {
                         body.push_str(&format!("\nchanged: {}", w.changed.join(", ")));
                     }

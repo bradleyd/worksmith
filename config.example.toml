@@ -40,6 +40,32 @@ keep-recent-turns = 6       # turns kept verbatim when compacting
 
 [agents]
 max = 4                     # max concurrently-running spawned workers (/spawn)
+# The supervisor watches each worker's event stream and nudges or stops it.
+#   off   — no watching
+#   rules — deterministic detection (default)
+#   model — cheap-model observer (not built yet; behaves as "rules")
+supervisor = "rules"
+stuck-timeout = 120         # seconds with no worker event before a nudge
+max-nudges = 3              # nudges before the supervisor stops the worker
+repeat-threshold = 4        # identical tool calls (whole run) before a nudge
+# token-budget = 200000     # completion tokens a worker may spend before it's stopped
+# May a bare `/spawn <task>` be split across several workers? "auto" asks a
+# cheap planner call (it answers "one worker" for most tasks); "off" always
+# spawns one and leaves fan-out to an explicit `-n N` / `--each-files`.
+fanout = "auto"
+# After a fan-out group all finishes, run one more turn that combines their
+# results into a single answer. Set false to just have the results reported.
+synthesize = true
 
 [tools]
 bash-timeout-secs = 120
+
+# --- Web search -------------------------------------------------------------
+# Needed only for `web` search; `web` fetch (read a URL) works without it.
+#   brave   — https://api.search.brave.com (needs a key)
+#   tavily  — https://api.tavily.com       (needs a key)
+#   searxng — your own instance            (needs base-url, no key)
+# [web]
+# provider = "brave"
+# api-key-env = "BRAVE_API_KEY"
+# base-url = "https://searx.example.com"   # searxng only

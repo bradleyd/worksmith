@@ -220,18 +220,21 @@ fn project_store(cwd: &Path) -> MemoryStore {
 
 #[allow(clippy::too_many_arguments)]
 async fn repl(
-    agent: &Agent,
+    agent: Arc<Agent>,
     session: &mut Session,
     cwd: &Path,
     first: Option<String>,
     model: &str,
     mut validate_cmd: Option<String>,
     bash_timeout: Duration,
+    config: &Config,
 ) -> Result<()> {
     use rustyline::DefaultEditor;
     use rustyline::error::ReadlineError;
 
     let mem = project_store(cwd);
+    let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
+        .with_supervisor(config.supervisor());
 
     println!("worksmith — model: {model}  (/help for commands, /quit to exit)");
     if let Some(c) = &validate_cmd {
