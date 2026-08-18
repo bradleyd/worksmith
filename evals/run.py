@@ -113,11 +113,14 @@ def validate(workdir: Path, cmd: str) -> bool:
 
 
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
-            keep: bool = False, worker_model: str | None = None) -> dict:
+            keep: bool = False, worker_model: str | None = None,
+            fast: bool = False) -> dict:
     workdir = setup_workdir(task)
     cmd = [binp, "--mode", "json"]
     if model:
         cmd += ["--model", model]
+    if fast:
+        cmd.append("--fast")
     if mode == "workers":
         # `spawn` is a subcommand, so its args come after it. The task declares
         # how many workers it decomposes into; a task that doesn't decompose
@@ -129,7 +132,7 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
         cmd += ["--until", task["validate"]]
     cmd.append(task["goal"])
 
-    row = {"task": task["name"], "mode": mode, "passed": False,
+    row = {"task": task["name"], "mode": mode, "fast": fast, "passed": False,
            "model_calls": 0, "tool_calls": 0, "gen_tokens": 0, "outcome": None,
            "elapsed": 0.0, "error": None}
     t0 = time.time()
@@ -163,6 +166,9 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=1,
                     help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
+    ap.add_argument("--fast", action="store_true",
+                    help="run with thinking off (--fast); pair with --modes to ask "
+                         "whether the loop can substitute for the model's deliberation")
     ap.add_argument("--worker-model",
                     help="model the spawned workers run on (workers mode); the "
                          "synthesis still uses --model")
@@ -196,6 +202,8 @@ def main() -> int:
                     cmd = [binp, "--mode", "json"]
                     if args.model:
                         cmd += ["--model", args.model]
+                    if args.fast:
+                        cmd.append("--fast")
                     if mode == "workers":
                         cmd += ["spawn", "-n", str(task["workers"])]
                         if args.worker_model:
@@ -208,7 +216,7 @@ def main() -> int:
                     continue
                 print(f"running {tag} …", file=sys.stderr)
                 row = run_one(binp, task, mode, args.model, args.timeout, args.keep,
-                              args.worker_model)
+                              args.worker_model, args.fast)
                 row["run"] = i
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"
