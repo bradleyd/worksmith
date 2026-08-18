@@ -332,7 +332,13 @@ async fn run_spawn(
             }
             files.iter().map(|f| assign(task, f)).collect()
         }
-        None => plan_fanout(agent.clone(), task.clone(), *count, config.agents_max()).await,
+        None => {
+            let plan = plan_fanout(agent.clone(), task.clone(), *count, config.agents_max()).await;
+            // Always visible, json mode or not: this is the step that decides
+            // what every worker does, and it used to be a black box.
+            eprintln!("{}", plan.note);
+            plan.tasks
+        }
     };
 
     if !json {
@@ -752,14 +758,16 @@ async fn handle_spawn(
         }
         FanOut::Count(n) => {
             println!("(planning fan-out…)");
-            let tasks =
+            let plan =
                 plan_fanout(agent.clone(), req.task.clone(), Some(n), config.agents_max()).await;
-            (tasks, req.task.clone())
+            println!("{}", plan.note);
+            (plan.tasks, req.task.clone())
         }
         FanOut::Auto => {
-            let tasks =
+            let plan =
                 plan_fanout(agent.clone(), req.task.clone(), None, config.agents_max()).await;
-            (tasks, req.task.clone())
+            println!("{}", plan.note);
+            (plan.tasks, req.task.clone())
         }
     };
 

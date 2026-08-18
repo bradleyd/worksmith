@@ -671,10 +671,23 @@ Caching cuts the other way: a per-turn memory block breaks the stable prefix
 that makes server-side prefix caching work, so measure both — a cache hit is
 cheaper than a token not sent. Get the numbers before choosing.
 
-**M11 — Scratch worktrees for code changes** *(future)*: right now every worker
+**M11 — Sandbox each worker** *(future; now evidence-backed)*: every worker
 edits the user's real working tree, and a fan-out of N workers edits it
-*concurrently* — the planner is biased toward one worker partly to avoid that
-collision. Borrow rustopedia's `scratch.rs` (`ScratchOverlay`): `git worktree
+*concurrently*. This is no longer hypothetical — a three-worker newsletter
+fan-out had all three workers write `bluecollar-newsletter/draft-1.md`, last
+writer wins, two drafts lost. The planner's bias toward a single worker is
+partly a workaround for a missing isolation boundary.
+
+Isolation solves three things at once, which is why it's worth more than the
+per-worker output paths that would patch the collision:
+- **Collision** — each worker gets its own tree, so N workers can touch the
+  same filenames without clobbering each other.
+- **Security** — a worker is the least trusted thing in the system: a model
+  running unattended, often a cheap one, on a task the parent wrote. Today it
+  has the same filesystem reach as the user. PLAN's safety guard is explicitly
+  "best-effort, not a sandbox"; this is where a real boundary belongs.
+- **Undo** — a bad worker edit is currently only recoverable by hand through
+  git. Borrow rustopedia's `scratch.rs` (`ScratchOverlay`): `git worktree
 add --detach <tmp> HEAD`, then mirror uncommitted tracked changes and
 untracked-but-not-ignored files so the copy matches what the user is actually
 editing, not just the last commit. Removed on drop.

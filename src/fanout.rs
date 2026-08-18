@@ -196,6 +196,18 @@ pub fn fanout_notice(report: &FanOutReport) -> String {
     }
 }
 
+/// What a planning attempt produced, and how.
+///
+/// The `note` exists because three fan-outs in a row went wrong and there was
+/// no way to tell whether the planner had failed or the guard had rejected good
+/// output — `Agent::ask` emits no events and writes to no session, so the raw
+/// response was invisible and every diagnosis was an inference from downstream
+/// symptoms. A surprising fan-out should be explainable without a rebuild.
+pub struct FanOutPlan {
+    pub tasks: Vec<String>,
+    pub note: String,
+}
+
 /// Ask the model to divide a request into independent worker tasks. Falls back
 /// to something sensible rather than failing the spawn: a fan-out that can't be
 /// planned is still work the user asked for.
@@ -204,7 +216,7 @@ pub async fn plan_fanout(
     task: String,
     want: Option<usize>,
     max: usize,
-) -> Vec<String> {
+) -> FanOutPlan {
     // Every line must carry a marker. "No preamble" is a request a weak model
     // ignores — a local 27B once answered with its own deliberation and we
     // spawned three workers whose tasks were fragments of its thinking. A
@@ -233,11 +245,43 @@ pub async fn plan_fanout(
     let want_n = want.unwrap_or(max);
     match agent.ask(&system, &task, 1024).await {
         Ok(text) => match parse_subtasks(&text, want, max) {
-            Ok(tasks) => tasks,
-            Err(_) => fallback_tasks(&task, want_n, want.is_some()),
+            Ok(tasks) => {
+                let note = format!("planner split the work into {} task(s)", tasks.len());
+                FanOutPlan { tasks, note }
+            }
+            Err(why) => {
+                let tasks = fallback_tasks(&task, want_n, want.is_some());
+                FanOutPlan {
+                    note: format!(
+                        "planner output unusable ({why}); running {} variant(s) of the original \
+                         request instead. Planner said: {}",
+                        tasks.len(),
+                        first_chars(&text, 400)
+                    ),
+                    tasks,
+                }
+            }
         },
-        Err(_) => fallback_tasks(&task, want_n, want.is_some()),
+        Err(e) => {
+            let tasks = fallback_tasks(&task, want_n, want.is_some());
+            FanOutPlan {
+                note: format!(
+                    "planner call failed ({e}); running {} variant(s) of the original request",
+                    tasks.len()
+                ),
+                tasks,
+            }
+        }
     }
+}
+
+/// A one-line peek at model output for a diagnostic message.
+fn first_chars(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(max).collect::<String>())
 }
 
 /// No planner (call failed or unusable output): honour an explicit `-n N` with

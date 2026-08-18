@@ -49,7 +49,8 @@ use crate::worker::WorkerManager;
 /// A planner call in flight: the task producing subtasks, plus everything the
 /// resulting spawn needs — system prompt, the original request, and the model
 /// the workers will run on.
-type PlannedFanOut = (JoinHandle<Vec<String>>, String, String, Option<ModelOverride>);
+type PlannedFanOut =
+    (JoinHandle<crate::fanout::FanOutPlan>, String, String, Option<ModelOverride>);
 
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -739,16 +740,19 @@ async fn run_loop(
                 let (_, system, request, over) = fanout.take().unwrap();
                 app.status = "/help for keys and commands".into();
                 match res {
-                    Ok(tasks) if tasks.is_empty() => {
+                    Ok(plan) if plan.tasks.is_empty() => {
                         app.push(Kind::Error, "fan-out planning produced no tasks".to_string());
                     }
-                    Ok(tasks) => {
-                        if tasks.len() > 1 {
-                            for (i, t) in tasks.iter().enumerate() {
+                    Ok(plan) => {
+                        // Say how these tasks were arrived at, so a fan-out that
+                        // looks wrong can be diagnosed without a rebuild.
+                        app.push(Kind::Notice, plan.note.clone());
+                        if plan.tasks.len() > 1 {
+                            for (i, t) in plan.tasks.iter().enumerate() {
                                 app.push(Kind::Notice, format!("  {}. {}", i + 1, truncate(t, 100)));
                             }
                         }
-                        let report = workers.spawn_many_on(tasks, system, request, over);
+                        let report = workers.spawn_many_on(plan.tasks, system, request, over);
                         app.push(Kind::Notice, fanout_notice(&report));
                     }
                     Err(e) => app.push(Kind::Error, format!("fan-out planning failed: {e}")),
