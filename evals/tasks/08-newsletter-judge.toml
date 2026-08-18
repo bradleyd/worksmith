@@ -1,0 +1,105 @@
+name = "newsletter-judge"
+description = "Long-form generation + self-judgment against a real editorial rubric (the bluecollar-newsletter skill)"
+
+# The skill is copied into the workdir because worksmith has no skill loader yet
+# (PLAN tier-1). Once it does, this task becomes the skill-loading test too.
+fixtures = [
+  "bluecollar-newsletter/SKILL.md",
+  "bluecollar-newsletter/references/structure.md",
+  "bluecollar-newsletter/references/style-guide.md",
+  "bluecollar-newsletter/references/review-checklist.md",
+  "bluecollar-newsletter/references/published-topics.md",
+]
+
+goal = """Read bluecollar-newsletter/SKILL.md and everything in bluecollar-newsletter/references/ first; they define the voice, structure, and review rules for this publication.
+
+Write THREE candidate newsletter drafts, on three different topics chosen from the skill's "Future Topic Ideas" (do not reuse a topic listed in references/published-topics.md). Save them as draft-1.md, draft-2.md, and draft-3.md.
+
+Then review all three against references/review-checklist.md, pick the ONE you would publish, and write decision.md containing:
+- a first line of exactly `CHOSEN: draft-N.md` (N is 1, 2, or 3)
+- a short rationale that names at least three specific criteria from the review checklist and says how the winner did against the other two.
+
+Every draft must satisfy the checklist's pass criteria, since any of them could be the one you pick."""
+
+# Checks the hard, unambiguous rules from the skill: title format, no double
+# hyphens, no AI-speak/condescending words, required sections, length band,
+# signature, and a decision file that actually names one of the drafts. Voice
+# and technical accuracy are NOT checkable here — that's the part a reviewer
+# model would have to judge.
+validate = '''
+python3 - <<'PY'
+import os, re, sys
+
+drafts = ["draft-1.md", "draft-2.md", "draft-3.md"]
+for f in drafts + ["decision.md"]:
+    assert os.path.exists(f), f"missing {f}"
+
+BANNED = ["let's dive in", "it's important to note", "furthermore", "additionally",
+          "best practices", "scalable solution", "cutting-edge", "enterprise-grade",
+          "you should never", "obviously,", "in this section", "let me explain"]
+PUBLISHED = ["kubernetes", "microservice", "monitoring", "observability", "sqlite"]
+
+def check(path):
+    t = open(path).read()
+    low = t.lower()
+    errs = []
+
+    if not re.search(r'Blue-Collar Engineering Dispatch #\d+:\s*"[^"]+"', t):
+        errs.append("title must match: Blue-Collar Engineering Dispatch #N: <quoted title>")
+    if "--" in t.replace("---", ""):      # --- is a horizontal rule, -- is banned
+        errs.append("contains a double hyphen")
+    for b in BANNED:
+        if b in low:
+            errs.append(f"banned phrase: {b!r}")
+    if re.search(r"(?m)^Bradley\s*$", t) is None:
+        errs.append("missing the 'Bradley' sign-off line")
+
+    words = len(t.split())
+    if not 1200 <= words <= 3000:
+        errs.append(f"length {words} words, want roughly 1500-2500")
+
+    for needle, label in [(r"welcome", "welcome section"),
+                          (r"the tale of", "opening story"),
+                          (r"the concept", "concept section"),
+                          (r"hands-?on", "hands-on section"),
+                          (r"the takeaway", "takeaway"),
+                          (r"reader challenge", "reader challenge")]:
+        if not re.search(needle, low):
+            errs.append(f"missing {label}")
+
+    if not re.search(r"```[a-zA-Z]", t):
+        errs.append("no fenced code block with a language tag")
+    # "When X might be the right choice" — the fairness section
+    if not re.search(r"when .{0,40}(might be|is) (the )?right|when to use", low):
+        errs.append("missing the 'when it IS the right choice' fairness section")
+    if not re.search(r"\d+\s*%|\d+x\b|\$\d", t):
+        errs.append("no concrete statistic or metric")
+    return errs
+
+failures = {}
+topics = []
+for d in drafts:
+    e = check(d)
+    if e:
+        failures[d] = e
+    head = open(d).read()[:400].lower()
+    topics.append(head)
+    for p in PUBLISHED:
+        if p in head:
+            failures.setdefault(d, []).append(f"reuses a published topic: {p}")
+
+dec = open("decision.md").read()
+m = re.match(r"\s*CHOSEN:\s*(draft-[123]\.md)", dec)
+if not m:
+    failures["decision.md"] = ["first line must be exactly 'CHOSEN: draft-N.md'"]
+elif len(dec.split()) < 40:
+    failures["decision.md"] = ["rationale is too short to name three criteria"]
+
+if failures:
+    for f, errs in failures.items():
+        for e in errs:
+            print(f"{f}: {e}", file=sys.stderr)
+    sys.exit(1)
+print("ok")
+PY
+'''
