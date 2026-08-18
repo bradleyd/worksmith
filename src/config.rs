@@ -83,6 +83,9 @@ pub struct AgentsConfig {
     pub fanout: Option<String>,
     /// After a fan-out group finishes, run a turn combining their results.
     pub synthesize: Option<bool>,
+    /// Model spawned workers run on (`provider/model`). Unset = the session's
+    /// model. This is the cheap half of a cheap-workers/smart-parent split.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,6 +179,7 @@ impl Config {
         take(&mut self.agents.token_budget, other.agents.token_budget);
         take(&mut self.agents.fanout, other.agents.fanout);
         take(&mut self.agents.synthesize, other.agents.synthesize);
+        take(&mut self.agents.model, other.agents.model);
         take(&mut self.agent.max_steps, other.agent.max_steps);
         take(&mut self.agent.max_retries, other.agent.max_retries);
         take(&mut self.agent.stuck_threshold, other.agent.stuck_threshold);
@@ -238,6 +242,11 @@ impl Config {
             self.agents.fanout.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref(),
             Some("off") | Some("none") | Some("false")
         )
+    }
+
+    /// The model spawned workers run on, if it differs from the session's.
+    pub fn agents_model(&self) -> Option<&str> {
+        self.agents.model.as_deref()
     }
 
     /// Whether a finished fan-out group triggers a combining turn.

@@ -14,6 +14,8 @@ use crate::worker::{FanOutReport, SpawnOutcome};
 /// task, because the planner is a model call and must not block rendering.
 pub struct PendingFanOut {
     pub task: String,
+    /// Model the resulting workers run on, already resolved.
+    pub model: Option<crate::llm::ModelOverride>,
     /// `Some(n)` = exactly n workers; `None` = let the planner decide.
     pub want: Option<usize>,
     pub system: String,
@@ -32,16 +34,19 @@ pub enum FanOut {
 pub struct SpawnRequest {
     pub fanout: FanOut,
     pub task: String,
+    /// `--model provider/model` — run these workers on something else.
+    pub model: Option<String>,
 }
 
 pub const SPAWN_USAGE: &str =
-    "usage: /spawn [-n N | --each-files <regex>] <task>";
+    "usage: /spawn [-n N | --each-files <regex>] [--model <provider/model>] <task>";
 
 /// Parse leading flags off a `/spawn` line; everything after them is the task,
 /// verbatim. Flags take a single token, so no quoting rules are needed.
 pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, String> {
     let mut fanout = if default_auto { FanOut::Auto } else { FanOut::Count(1) };
     let mut explicit = false;
+    let mut model: Option<String> = None;
     let mut rest = args.trim();
 
     loop {
@@ -85,6 +90,12 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
                 fanout = FanOut::Files(value.to_string());
                 explicit = true;
             }
+            "--model" | "-m" => {
+                if value.is_empty() {
+                    return Err("/spawn: --model wants a `provider/model` spec".into());
+                }
+                model = Some(value.to_string());
+            }
             other => return Err(format!("/spawn: unknown flag `{other}`\n{SPAWN_USAGE}")),
         }
         rest = after;
@@ -93,7 +104,7 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
     if rest.trim().is_empty() {
         return Err(SPAWN_USAGE.to_string());
     }
-    Ok(SpawnRequest { fanout, task: rest.trim().to_string() })
+    Ok(SpawnRequest { fanout, task: rest.trim().to_string(), model })
 }
 
 /// A worker's task: your prose, plus what this particular worker is on.

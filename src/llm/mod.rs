@@ -131,3 +131,40 @@ pub trait LlmClient: Send + Sync {
         cancel: CancellationToken,
     ) -> anyhow::Result<Completion>;
 }
+
+/// Build a streaming client for a resolved provider+model. Shared by the main
+/// session and by workers running on a different (usually cheaper) model, so
+/// there's one place that knows how a provider becomes a client.
+pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std::sync::Arc<dyn LlmClient>> {
+    use anyhow::{Context, bail};
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building HTTP client")?;
+    match resolved.provider.kind.as_str() {
+        "openai-compat" => Ok(std::sync::Arc::new(openai::OpenAiCompatClient::new(
+            http,
+            resolved.provider.base_url.clone(),
+            resolved.api_key.clone(),
+        ))),
+        other => bail!("provider type `{other}` is not supported (use `openai-compat`)"),
+    }
+}
+
+/// A worker's model, resolved and ready: the client that speaks to it and the
+/// model name to ask for. Kept together because a cheaper model often lives
+/// behind a different provider, not just a different name.
+#[derive(Clone)]
+pub struct ModelOverride {
+    pub client: std::sync::Arc<dyn LlmClient>,
+    pub model: String,
+}
+
+impl ModelOverride {
+    /// Resolve `spec` (`provider/model`, or a bare model when one provider is
+    /// configured) against the config.
+    pub fn resolve(config: &crate::config::Config, spec: &str) -> anyhow::Result<ModelOverride> {
+        let resolved = config.resolve_model(Some(spec))?;
+        Ok(ModelOverride { client: client_for(&resolved)?, model: resolved.model })
+    }
+}

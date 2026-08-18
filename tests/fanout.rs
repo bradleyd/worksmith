@@ -192,3 +192,109 @@ async fn a_worker_report_reaches_a_running_parent_turn() {
     let result = turn.await.unwrap().unwrap();
     assert_eq!(result.text, "got the report", "the parent turn consumed the worker report");
 }
+
+/// Records which model name each request asked for, so a test can prove a
+/// worker ran on the override rather than the parent's model.
+struct ModelRecordingClient {
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl LlmClient for ModelRecordingClient {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+        _sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        self.seen.lock().unwrap().push(req.model.clone());
+        Ok(Completion { content: Some("done".into()), ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn workers_run_on_the_overridden_model() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+
+    // The parent is on "smart"; workers are pointed at "cheap" with its own client.
+    let parent = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let cheap = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let agent = Arc::new(agent_with(parent.clone(), dir.path()));
+
+    let over = worksmith::llm::ModelOverride {
+        client: cheap.clone(),
+        model: "cheap-model".into(),
+    };
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_default_model(Some(over.clone()));
+
+    let id = mgr
+        .spawn("draft something".into(), "system".into())
+        .unwrap()
+        .started()
+        .unwrap()
+        .to_string();
+    for _ in 0..200 {
+        if !mgr.get(&id).unwrap().status.is_running() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(mgr.get(&id).unwrap().status, WorkerStatus::Done);
+    assert_eq!(
+        cheap.seen.lock().unwrap().as_slice(),
+        ["cheap-model"],
+        "the worker must call the override's client with the override's model"
+    );
+    assert!(
+        parent.seen.lock().unwrap().is_empty(),
+        "the parent's client must not have been used for worker work"
+    );
+    // And it's visible, so you can tell which model produced which result.
+    assert_eq!(mgr.get(&id).unwrap().model.as_deref(), Some("cheap-model"));
+}
+
+#[tokio::test]
+async fn a_per_spawn_model_beats_the_default_and_queued_work_keeps_it() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let parent = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let default_m = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let chosen = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let agent = Arc::new(agent_with(parent, dir.path()));
+
+    // Cap of 1 so the second and third tasks queue and must carry the override.
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1)
+        .with_default_model(Some(worksmith::llm::ModelOverride {
+            client: default_m.clone(),
+            model: "default-model".into(),
+        }));
+
+    let report = mgr.spawn_many_on(
+        vec!["a".into(), "b".into(), "c".into()],
+        "system".into(),
+        "three drafts".into(),
+        Some(worksmith::llm::ModelOverride {
+            client: chosen.clone(),
+            model: "chosen-model".into(),
+        }),
+    );
+    assert_eq!(report.started.len(), 1, "cap of 1");
+    assert_eq!(report.queued, 2);
+
+    for _ in 0..400 {
+        mgr.pump();
+        if mgr.queued_count() == 0 && mgr.running_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(chosen.seen.lock().unwrap().len(), 3, "all three, including queued ones");
+    assert!(
+        default_m.seen.lock().unwrap().is_empty(),
+        "an explicit --model must beat agents.model for every worker in the fan-out"
+    );
+}

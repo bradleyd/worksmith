@@ -46,6 +46,12 @@ project knowledge (M5). MCP/plugins (M4) are still ahead.
   lists live status, `/agents show <id>` shows changed files, the session-file
   path, and the full result, `/agents kill <id>` cancels. Footer shows
   `↑N agents`. Concurrency capped by `agents.max`.
+- **Cheap workers, smart parent:** `agents.model` (or `/spawn --model
+  <provider/model>`) runs workers on a different model than the session — the
+  override carries its own client, so the worker model can live behind another
+  provider entirely. Several small models draft in parallel; the session's
+  stronger model judges what comes back. `/agents` shows which model each worker
+  is on.
 - **Supervisor:** each worker's event stream is watched by deterministic rules —
   silence for `agents.stuck-timeout`, the same tool call repeated
   `agents.repeat-threshold` times, an explicit "I'm blocked", or spend past

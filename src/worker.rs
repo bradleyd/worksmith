@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, Steering};
 use crate::event::Event;
 use crate::event::EventBus;
+use crate::llm::ModelOverride;
 use crate::session::Session;
 use crate::supervisor::{Action, Supervisor, SupervisorConfig};
 
@@ -72,6 +73,8 @@ pub struct WorkerSummary {
     pub escalation: Option<String>,
     /// The fan-out this worker belongs to, if it was one of several.
     pub group: Option<u64>,
+    /// Set when this worker runs on a model other than the parent's.
+    pub model: Option<String>,
 }
 
 struct Worker {
@@ -79,6 +82,7 @@ struct Worker {
     task: String,
     session_id: String,
     group: Option<u64>,
+    model: Option<String>,
     runtime: Arc<Mutex<Runtime>>,
     cancel: CancellationToken,
     /// Channel for injecting messages into the running worker (nudges).
@@ -103,6 +107,7 @@ impl Worker {
             nudges: r.nudges,
             escalation: r.escalation.clone(),
             group: self.group,
+            model: self.model.clone(),
         }
     }
 }
@@ -112,6 +117,7 @@ struct PendingTask {
     task: String,
     system: String,
     group: Option<u64>,
+    model: Option<ModelOverride>,
 }
 
 /// A fan-out: several workers answering one request together.
@@ -153,6 +159,8 @@ pub struct WorkerManager {
     cwd: PathBuf,
     max: usize,
     supervisor: SupervisorConfig,
+    /// Model every worker runs on unless a spawn overrides it (`agents.model`).
+    default_model: Option<ModelOverride>,
     workers: Vec<Worker>,
     queued: VecDeque<PendingTask>,
     groups: HashMap<u64, GroupInfo>,
@@ -167,6 +175,7 @@ impl WorkerManager {
             cwd,
             max,
             supervisor: SupervisorConfig::default(),
+            default_model: None,
             workers: Vec::new(),
             queued: VecDeque::new(),
             groups: HashMap::new(),
@@ -178,6 +187,13 @@ impl WorkerManager {
     /// Watch spawned workers with this policy (`agents.supervisor` et al).
     pub fn with_supervisor(mut self, cfg: SupervisorConfig) -> Self {
         self.supervisor = cfg;
+        self
+    }
+
+    /// Run workers on this model by default — the cheap half of a
+    /// cheap-workers/smart-parent split. `/spawn --model` overrides per spawn.
+    pub fn with_default_model(mut self, model: Option<ModelOverride>) -> Self {
+        self.default_model = model;
         self
     }
 
@@ -193,7 +209,17 @@ impl WorkerManager {
     /// concurrency cap the task is queued instead and started by [`Self::pump`]
     /// when a slot frees.
     pub fn spawn(&mut self, task: String, system: String) -> Result<SpawnOutcome, String> {
-        self.spawn_in(task, system, None)
+        self.spawn_in(task, system, None, None)
+    }
+
+    /// Spawn on a specific model instead of the manager's default.
+    pub fn spawn_on(
+        &mut self,
+        task: String,
+        system: String,
+        model: Option<ModelOverride>,
+    ) -> Result<SpawnOutcome, String> {
+        self.spawn_in(task, system, None, model)
     }
 
     fn spawn_in(
@@ -201,12 +227,14 @@ impl WorkerManager {
         task: String,
         system: String,
         group: Option<u64>,
+        model: Option<ModelOverride>,
     ) -> Result<SpawnOutcome, String> {
+        let model = model.or_else(|| self.default_model.clone());
         if self.running_count() >= self.max {
-            self.queued.push_back(PendingTask { task, system, group });
+            self.queued.push_back(PendingTask { task, system, group, model });
             return Ok(SpawnOutcome::Queued(self.queued.len()));
         }
-        self.start(task, system, group).map(SpawnOutcome::Started)
+        self.start(task, system, group, model).map(SpawnOutcome::Started)
     }
 
     /// Spawn one worker per task. More than one becomes a *group*: they're
@@ -217,6 +245,17 @@ impl WorkerManager {
         tasks: Vec<String>,
         system: String,
         request: String,
+    ) -> FanOutReport {
+        self.spawn_many_on(tasks, system, request, None)
+    }
+
+    /// Fan out onto a specific model — three cheap drafters, one smart judge.
+    pub fn spawn_many_on(
+        &mut self,
+        tasks: Vec<String>,
+        system: String,
+        request: String,
+        model: Option<ModelOverride>,
     ) -> FanOutReport {
         let group = if tasks.len() > 1 {
             self.next_group += 1;
@@ -231,7 +270,7 @@ impl WorkerManager {
 
         let mut report = FanOutReport { group, ..Default::default() };
         for task in tasks {
-            match self.spawn_in(task, system.clone(), group) {
+            match self.spawn_in(task, system.clone(), group, model.clone()) {
                 Ok(SpawnOutcome::Started(id)) => report.started.push(id),
                 Ok(SpawnOutcome::Queued(_)) => report.queued += 1,
                 Err(_) => {
@@ -258,7 +297,7 @@ impl WorkerManager {
             let Some(p) = self.queued.pop_front() else {
                 break;
             };
-            match self.start(p.task, p.system, p.group) {
+            match self.start(p.task, p.system, p.group, p.model) {
                 Ok(id) => started.push(id),
                 Err(_) => continue, // couldn't create a session; skip this one
             }
@@ -289,6 +328,7 @@ impl WorkerManager {
         task: String,
         system: String,
         group: Option<u64>,
+        model: Option<ModelOverride>,
     ) -> Result<String, String> {
         self.counter += 1;
         let id = format!("w{}", self.counter);
@@ -297,9 +337,10 @@ impl WorkerManager {
         let session_id = session.id.clone();
         let bus = EventBus::new();
         let steering = Steering::new();
+        let model_label = model.as_ref().map(|m| m.model.clone());
         let agent = self
             .template
-            .fork(bus.clone(), session_id.clone())
+            .fork_with(bus.clone(), session_id.clone(), model)
             .with_steering(steering.clone());
         let mut rx = bus.subscribe();
         drop(bus); // the forked agent keeps a sender clone
@@ -398,6 +439,7 @@ impl WorkerManager {
             task,
             session_id,
             group,
+            model: model_label,
             runtime,
             cancel,
             steering,

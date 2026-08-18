@@ -40,6 +40,11 @@ keep-recent-turns = 6       # turns kept verbatim when compacting
 
 [agents]
 max = 4                     # max concurrently-running spawned workers (/spawn)
+# Model spawned workers run on. Unset = the session's model. This is the cheap
+# half of a cheap-workers/smart-parent split: several small models draft in
+# parallel, the session's stronger model judges the results.
+#   model = "openrouter/qwen/qwen3.5-9b"
+# Override per spawn with `/spawn --model <provider/model> <task>`.
 # The supervisor watches each worker's event stream and nudges or stops it.
 #   off   — no watching
 #   rules — deterministic detection (default)

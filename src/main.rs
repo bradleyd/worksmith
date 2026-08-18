@@ -14,8 +14,6 @@ use tokio_util::sync::CancellationToken;
 use worksmith::agent::Agent;
 use worksmith::config::Config;
 use worksmith::event::{Event, EventBus};
-use worksmith::llm::LlmClient;
-use worksmith::llm::openai::OpenAiCompatClient;
 use worksmith::memory::{MemoryStore, Scope};
 use worksmith::prompt::{build_system_prompt, build_worker_prompt};
 use worksmith::session::Session;
@@ -85,19 +83,7 @@ async fn run(args: Args) -> Result<()> {
     let config = Config::load(&cwd)?;
     let resolved = config.resolve_model(args.model.as_deref())?;
 
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .build()
-        .context("building HTTP client")?;
-
-    let client: Arc<dyn LlmClient> = match resolved.provider.kind.as_str() {
-        "openai-compat" => Arc::new(OpenAiCompatClient::new(
-            http,
-            resolved.provider.base_url.clone(),
-            resolved.api_key.clone(),
-        )),
-        other => bail!("provider type `{other}` is not supported in M1 (use `openai-compat`)"),
-    };
+    let client = worksmith::llm::client_for(&resolved)?;
 
     let registry = Arc::new(ToolRegistry::with_builtins());
     let bus = EventBus::new();
@@ -157,6 +143,7 @@ async fn run(args: Args) -> Result<()> {
             config.supervisor(),
             config.fanout_auto(),
             config.synthesize(),
+            config.clone(),
         )
         .await;
     }
@@ -249,8 +236,19 @@ async fn repl(
     use rustyline::error::ReadlineError;
 
     let mem = project_store(cwd);
+    let worker_model = match config.agents_model() {
+        Some(spec) => match worksmith::llm::ModelOverride::resolve(config, spec) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("agents.model `{spec}` is unusable: {e:#}");
+                None
+            }
+        },
+        None => None,
+    };
     let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
-        .with_supervisor(config.supervisor());
+        .with_supervisor(config.supervisor())
+        .with_default_model(worker_model);
 
     println!("worksmith — model: {model}  (/help for commands, /quit to exit)");
     if let Some(c) = &validate_cmd {
@@ -495,6 +493,16 @@ async fn handle_spawn(
         }
     };
     let system = build_worker_prompt(cwd, mem);
+    let over = match req.model.as_deref() {
+        Some(spec) => match worksmith::llm::ModelOverride::resolve(config, spec) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("--model `{spec}`: {e:#}");
+                return;
+            }
+        },
+        None => None,
+    };
 
     let (tasks, request) = match req.fanout {
         FanOut::Files(pattern) => match matching_files(cwd, &pattern) {
@@ -512,7 +520,7 @@ async fn handle_spawn(
             }
         },
         FanOut::Count(1) => {
-            match workers.spawn(req.task.clone(), system) {
+            match workers.spawn_on(req.task.clone(), system, over) {
                 Ok(outcome) => println!("{}", spawn_notice(&outcome, &req.task)),
                 Err(e) => eprintln!("spawn failed: {e}"),
             }
@@ -536,7 +544,7 @@ async fn handle_spawn(
             println!("  {}. {t}", i + 1);
         }
     }
-    let report = workers.spawn_many(tasks, build_worker_prompt(cwd, mem), request);
+    let report = workers.spawn_many_on(tasks, build_worker_prompt(cwd, mem), request, over);
     println!("{}", fanout_notice(&report));
 }
 
@@ -550,13 +558,15 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
             for w in list {
                 let nudges =
                     if w.nudges > 0 { format!(" · {} nudges", w.nudges) } else { String::new() };
+                let on = w.model.as_deref().map(|m| format!(" · on {m}")).unwrap_or_default();
                 println!(
-                    "{} [{}] {} tools · {} changed{} — {}",
+                    "{} [{}] {} tools · {} changed{}{} — {}",
                     w.id,
                     w.status.label(),
                     w.tool_calls,
                     w.changed.len(),
                     nudges,
+                    on,
                     w.task
                 );
             }

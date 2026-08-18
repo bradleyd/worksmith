@@ -113,6 +113,7 @@ mod tests {
             nudges: 0,
             escalation: None,
             group: Some(1),
+            model: None,
         }
     }
 

@@ -41,8 +41,15 @@ use crate::fanout::{
 use crate::report::{
     GroupAcc, group_report, single_report, truncate, truncate_chars, worker_headline,
 };
+use crate::config::Config;
+use crate::llm::ModelOverride;
 use crate::supervisor::SupervisorConfig;
 use crate::worker::WorkerManager;
+
+/// A planner call in flight: the task producing subtasks, plus everything the
+/// resulting spawn needs — system prompt, the original request, and the model
+/// the workers will run on.
+type PlannedFanOut = (JoinHandle<Vec<String>>, String, String, Option<ModelOverride>);
 
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -424,6 +431,7 @@ pub async fn run_tui(
     supervisor: SupervisorConfig,
     fanout_auto: bool,
     synthesize: bool,
+    config: Config,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let res = run_loop(
@@ -440,6 +448,7 @@ pub async fn run_tui(
         supervisor,
         fanout_auto,
         synthesize,
+        config,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -484,12 +493,25 @@ async fn run_loop(
     supervisor: SupervisorConfig,
     fanout_auto: bool,
     synthesize: bool,
+    config: Config,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let session = Arc::new(AsyncMutex::new(session));
     let mem = MemoryStore::open(Some(&cwd)).or_else(|_| MemoryStore::open(None))?;
+    // Workers may run on a cheaper model than the session (`agents.model`).
+    let worker_model = match config.agents_model() {
+        Some(spec) => match ModelOverride::resolve(&config, spec) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("agents.model `{spec}` is unusable: {e:#}");
+                None
+            }
+        },
+        None => None,
+    };
     let mut workers = WorkerManager::new(agent.clone(), cwd.clone(), agents_max)
-        .with_supervisor(supervisor);
+        .with_supervisor(supervisor)
+        .with_default_model(worker_model);
 
     let mut app = App::new(model, context_limit, validate_cmd);
     app.fanout_auto = fanout_auto;
@@ -520,7 +542,7 @@ async fn run_loop(
     let mut turn: Option<JoinHandle<Result<TurnResult>>> = None;
     let mut cancel = CancellationToken::new();
     // A planner call in flight, with the system prompt its workers will use.
-    let mut fanout: Option<(JoinHandle<Vec<String>>, String, String)> = None;
+    let mut fanout: Option<PlannedFanOut> = None;
     // Fan-out groups still collecting their members' results.
     let mut groups: Vec<GroupAcc> = Vec::new();
     // A memory-extraction classifier call in flight.
@@ -599,7 +621,8 @@ async fn run_loop(
                 match maybe_ev {
                     Some(Ok(CEvent::Key(key))) => {
                         match handle_key(key, &mut app, &agent, &session, &mem, &cwd,
-                                         bash_timeout, &mut turn, &mut cancel, &mut workers).await? {
+                                         bash_timeout, &mut turn, &mut cancel, &mut workers,
+                                         &config).await? {
                             Flow::Quit => break,
                             Flow::Continue => {}
                             Flow::ExternalEdit => pending_edit = true,
@@ -644,6 +667,7 @@ async fn run_loop(
                                 }),
                                 pf.system,
                                 request,
+                                pf.model,
                             ));
                         }
                     }
@@ -708,7 +732,7 @@ async fn run_loop(
 
             // Fan-out planning finished.
             res = async { (&mut fanout.as_mut().unwrap().0).await }, if fanout.is_some() => {
-                let (_, system, request) = fanout.take().unwrap();
+                let (_, system, request, over) = fanout.take().unwrap();
                 app.status = "/help for keys and commands".into();
                 match res {
                     Ok(tasks) if tasks.is_empty() => {
@@ -720,7 +744,7 @@ async fn run_loop(
                                 app.push(Kind::Notice, format!("  {}. {}", i + 1, truncate(t, 100)));
                             }
                         }
-                        let report = workers.spawn_many(tasks, system, request);
+                        let report = workers.spawn_many_on(tasks, system, request, over);
                         app.push(Kind::Notice, fanout_notice(&report));
                     }
                     Err(e) => app.push(Kind::Error, format!("fan-out planning failed: {e}")),
@@ -792,6 +816,7 @@ async fn handle_key(
     turn: &mut Option<JoinHandle<Result<TurnResult>>>,
     cancel: &mut CancellationToken,
     workers: &mut WorkerManager,
+    config: &Config,
 ) -> Result<Flow> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -855,7 +880,7 @@ async fn handle_key(
                 return Ok(Flow::Quit);
             }
             if input.starts_with('/')
-                && handle_command(&input, app, agent, session, mem, cwd, workers).await?
+                && handle_command(&input, app, agent, session, mem, cwd, workers, config).await?
             {
                 return Ok(Flow::Continue);
             }
@@ -877,6 +902,7 @@ async fn handle_key(
 }
 
 /// Returns true if the input was a recognized command (already handled).
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     input: &str,
     app: &mut App,
@@ -885,6 +911,7 @@ async fn handle_command(
     mem: &MemoryStore,
     cwd: &Path,
     workers: &mut WorkerManager,
+    config: &Config,
 ) -> Result<bool> {
     let mut parts = input.trim_start_matches('/').split_whitespace();
     let head = parts.next().unwrap_or("");
@@ -896,7 +923,7 @@ async fn handle_command(
                  Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
                  commands: /new /compact /memory [search|extract|pending|approve] \
                  /knowledge [index|search] /validate <cmd|off> \
-                 /spawn [-n N | --each-files <regex>] <task> \
+                 /spawn [-n N | --each-files <regex>] [--model <spec>] <task> \
                  /agents [kill|show|nudge <id> | drop-queued] /quit   @path includes a file"
                     .to_string(),
             );
@@ -928,6 +955,17 @@ async fn handle_command(
                 Err(msg) => app.push(Kind::Notice, msg),
                 Ok(req) => {
                     let system = build_worker_prompt(cwd, mem);
+                    // `--model` overrides `agents.model` for this spawn only.
+                    let over = match req.model.as_deref() {
+                        Some(spec) => match ModelOverride::resolve(config, spec) {
+                            Ok(m) => Some(m),
+                            Err(e) => {
+                                app.push(Kind::Error, format!("--model `{spec}`: {e:#}"));
+                                return Ok(true);
+                            }
+                        },
+                        None => None,
+                    };
                     match req.fanout {
                         // Planner-driven: hand off to the caller, which runs it
                         // off the UI thread (a model call would freeze the TUI).
@@ -938,7 +976,7 @@ async fn handle_command(
                             };
                             app.status = "planning fan-out…".into();
                             app.pending_fanout =
-                                Some(PendingFanOut { task: req.task, want, system });
+                                Some(PendingFanOut { task: req.task, want, system, model: over });
                         }
                         FanOut::Files(pattern) => {
                             match matching_files(cwd, &pattern) {
@@ -949,14 +987,15 @@ async fn handle_command(
                                 Ok(files) => {
                                     let tasks: Vec<String> =
                                         files.iter().map(|f| assign(&req.task, f)).collect();
-                                    let report =
-                                        workers.spawn_many(tasks, system, req.task.clone());
+                                    let report = workers.spawn_many_on(
+                                        tasks, system, req.task.clone(), over,
+                                    );
                                     app.push(Kind::Notice, fanout_notice(&report));
                                 }
                             }
                         }
                         // -n 1 (or an explicit single): today's path, no planner.
-                        _ => match workers.spawn(req.task.clone(), system) {
+                        _ => match workers.spawn_on(req.task.clone(), system, over) {
                             Ok(outcome) => app.push(Kind::Notice, spawn_notice(&outcome, &req.task)),
                             Err(e) => app.push(Kind::Error, format!("spawn failed: {e}")),
                         },
@@ -1265,15 +1304,20 @@ fn agents_command<'a>(
                 for w in list {
                     let nudges =
                         if w.nudges > 0 { format!(" · {} nudges", w.nudges) } else { String::new() };
+                    let on = match &w.model {
+                        Some(m) => format!(" · on {m}"),
+                        None => String::new(),
+                    };
                     app.push(
                         Kind::Notice,
                         format!(
-                            "{} [{}] {} tools · {} changed{} · {} — {}",
+                            "{} [{}] {} tools · {} changed{}{} · {} — {}",
                             w.id,
                             w.status.label(),
                             w.tool_calls,
                             w.changed.len(),
                             nudges,
+                            on,
                             truncate(&w.last, 40),
                             truncate(&w.task, 40)
                         ),
@@ -1443,7 +1487,7 @@ fn arg_completions(first: &str, prev: usize, token: &str, tokens: &[&str]) -> Op
         "agents" | "workers" if prev == 1 => {
             &["list", "show", "kill", "nudge", "drop-queued"]
         }
-        "spawn" if prev == 1 => &["-n", "--each-files"],
+        "spawn" if prev == 1 => &["-n", "--each-files", "--model"],
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {

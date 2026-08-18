@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, EventBus};
-use crate::llm::{ChatRequest, LlmClient, Message, StreamEvent};
+use crate::llm::{ChatRequest, LlmClient, Message, ModelOverride, StreamEvent};
 use crate::session::Session;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::validation::Validator;
@@ -161,14 +161,30 @@ impl Agent {
     /// Create a sibling agent that shares this one's client, tools, and config
     /// but runs on its own event bus and session. Used to spawn workers.
     pub fn fork(&self, bus: EventBus, session_id: String) -> Agent {
+        self.fork_with(bus, session_id, None)
+    }
+
+    /// Fork onto a different model — the cheap-workers/smart-parent split. The
+    /// override carries its own client, since a cheaper model often lives
+    /// behind a different provider rather than just a different name.
+    pub fn fork_with(
+        &self,
+        bus: EventBus,
+        session_id: String,
+        model: Option<ModelOverride>,
+    ) -> Agent {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.session_id = session_id;
         tool_ctx.is_worker = true;
+        let (client, model) = match model {
+            Some(o) => (o.client, o.model),
+            None => (self.client.clone(), self.model.clone()),
+        };
         Agent {
-            client: self.client.clone(),
+            client,
             registry: self.registry.clone(),
             bus,
-            model: self.model.clone(),
+            model,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             max_steps: self.max_steps,

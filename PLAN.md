@@ -565,9 +565,9 @@ tool and `/knowledge`. Not done: `worksmith memory export/import/sync` via git,
 auto-extraction at compaction (today `/memory extract` is explicit), and
 semantic/vector retrieval (`worksmith-memory-v1.md` §30 stage 4).
 
-**M6 — Spawned agents** *(done, minus `worksmith spawn` + per-agent model
-override)*: `/spawn`, `/agents` panel, fan-out (`-n`, `--each-files`, planner
-`auto`) with a queue past `agents.max`. Worker results now feed back into the
+**M6 — Spawned agents** *(done, minus `worksmith spawn`)*: `/spawn`, `/agents` panel, fan-out (`-n`, `--each-files`, planner
+`auto`) with a queue past `agents.max`, and per-worker model override
+(`agents.model` / `/spawn --model`) for the cheap-workers/smart-parent split. Worker results now feed back into the
 parent's history (via the steering mailbox mid-turn, or the session between
 turns), with fan-out groups reported as one block and synthesized into a single
 answer. Not done: `propose_memory` from workers, `worksmith spawn`, per-agent
