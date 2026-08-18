@@ -75,7 +75,7 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 /// Slash commands offered by Tab-completion.
 const COMMANDS: &[&str] = &[
     "/help", "/new", "/compact", "/memory", "/knowledge", "/spawn", "/agents", "/validate",
-    "/quit",
+    "/fast", "/quit",
 ];
 
 /// Active Tab-completion state (candidates for the current token).
@@ -124,6 +124,8 @@ struct App {
     turn_start: Option<std::time::Instant>,
     agents_running: usize,
     agents_queued: usize,
+    /// Fast mode: the model answers without a reasoning pass.
+    fast: bool,
     /// `agents.fanout = "auto"` — bare `/spawn` may fan out on its own.
     fanout_auto: bool,
     /// `agents.synthesize` — after a fan-out group reports back, run a turn
@@ -166,6 +168,7 @@ impl App {
             turn_start: None,
             agents_running: 0,
             agents_queued: 0,
+            fast: false,
             fanout_auto: true,
             synthesize: true,
             pending_fanout: None,
@@ -515,6 +518,7 @@ async fn run_loop(
 
     let mut app = App::new(model, context_limit, validate_cmd);
     app.fanout_auto = fanout_auto;
+    app.fast = agent.thinking_mode().get() == Some(false);
     app.synthesize = synthesize;
     let mut bus_rx = bus.subscribe();
     // Option so we can drop the input reader while an external editor owns the tty.
@@ -922,7 +926,7 @@ async fn handle_command(
                 "keys: Enter=send  Alt+Enter=newline  Ctrl+G=$EDITOR  Esc=abort/clear  \
                  Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
                  commands: /new /compact /memory [search|extract|pending|approve] \
-                 /knowledge [index|search] /validate <cmd|off> \
+                 /knowledge [index|search] /validate <cmd|off> /fast [on|off|auto] \
                  /spawn [-n N | --each-files <regex>] [--model <spec>] <task> \
                  /agents [kill|show|nudge <id> | drop-queued] /quit   @path includes a file"
                     .to_string(),
@@ -1005,6 +1009,29 @@ async fn handle_command(
         }
         "agents" | "workers" => agents_command(app, workers, parts),
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
+        "fast" | "lucky" => {
+            let mode = agent.thinking_mode();
+            let rest: Vec<&str> = parts.collect();
+            match rest.first().copied() {
+                Some("on") => mode.set(Some(false)),
+                Some("off") => mode.set(Some(true)),
+                Some("auto") => mode.set(None),
+                Some(other) => {
+                    app.push(Kind::Error, format!("usage: /fast [on|off|auto] (got {other})"));
+                    return Ok(true);
+                }
+                None => {
+                    mode.toggle_fast();
+                }
+            }
+            app.fast = mode.get() == Some(false);
+            let msg = match mode.get() {
+                Some(false) => "fast mode on — answering without thinking first",
+                Some(true) => "fast mode off — thinking before answering",
+                None => "thinking left to the provider's default",
+            };
+            app.push(Kind::Notice, msg.to_string());
+        }
         "validate" => {
             let rest: Vec<&str> = parts.collect();
             let rest = rest.join(" ");
@@ -1489,6 +1516,7 @@ fn arg_completions(first: &str, prev: usize, token: &str, tokens: &[&str]) -> Op
         }
         "spawn" if prev == 1 => &["-n", "--each-files", "--model"],
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
+        "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
             1 => &[
@@ -1791,6 +1819,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         .checked_div(app.context_limit)
         .unwrap_or(0)
         .min(999);
+    let fast = if app.fast { "  ⚡fast" } else { "" };
     let agents = if app.agents_running > 0 || app.agents_queued > 0 {
         let queued =
             if app.agents_queued > 0 { format!(" · {} queued", app.agents_queued) } else { String::new() };
@@ -1798,9 +1827,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
+    let tail = format!("{fast}{agents}");
     let left = format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
-        app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, agents
+        app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail
     );
 
     // While a turn runs, show an animated spinner + elapsed seconds.

@@ -15,6 +15,7 @@ pub struct OpenAiCompatClient {
     http: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    thinking_dialect: crate::llm::ThinkingDialect,
 }
 
 impl OpenAiCompatClient {
@@ -22,7 +23,14 @@ impl OpenAiCompatClient {
     pub fn new(http: reqwest::Client, base_url: impl Into<String>, api_key: Option<String>) -> Self {
         let base_url = base_url.into();
         let base_url = base_url.trim_end_matches('/').to_string();
-        Self { http, base_url, api_key }
+        let thinking_dialect = crate::llm::ThinkingDialect::guess_from_url(&base_url);
+        Self { http, base_url, api_key, thinking_dialect }
+    }
+
+    /// Override the guessed dialect (config `thinking-param`).
+    pub fn with_thinking_dialect(mut self, d: crate::llm::ThinkingDialect) -> Self {
+        self.thinking_dialect = d;
+        self
     }
 
     fn endpoint(&self) -> String {
@@ -38,7 +46,7 @@ impl LlmClient for OpenAiCompatClient {
         sink: mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        let body = build_request_body(&req);
+        let body = build_request_body(&req, self.thinking_dialect);
 
         let mut builder = self.http.post(self.endpoint()).json(&body);
         if let Some(key) = &self.api_key {
@@ -94,7 +102,7 @@ impl LlmClient for OpenAiCompatClient {
 /// Build the JSON request body by hand — this gives us exact control over the
 /// assistant `tool_calls` / tool-result shapes that OpenAI-compat servers are
 /// picky about.
-fn build_request_body(req: &ChatRequest) -> serde_json::Value {
+fn build_request_body(req: &ChatRequest, dialect: crate::llm::ThinkingDialect) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages.iter().map(message_to_json).collect();
 
     let mut body = serde_json::json!({
@@ -126,6 +134,18 @@ fn build_request_body(req: &ChatRequest) -> serde_json::Value {
     }
     if let Some(m) = req.max_tokens {
         body["max_tokens"] = serde_json::json!(m);
+    }
+    // Only speak up when the caller asked. Reasoning is on by default at every
+    // provider, and an unrecognized field is a 400, not a shrug.
+    if let Some(think) = req.thinking {
+        match dialect {
+            crate::llm::ThinkingDialect::Reasoning => {
+                body["reasoning"] = serde_json::json!({ "enabled": think });
+            }
+            crate::llm::ThinkingDialect::ChatTemplate => {
+                body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": think });
+            }
+        }
     }
     body
 }
@@ -344,5 +364,50 @@ impl Accumulator {
             usage: self.usage,
             finish_reason: self.finish_reason,
         }
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+    use crate::llm::ThinkingDialect;
+
+    fn req(thinking: Option<bool>) -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            thinking,
+        }
+    }
+
+    #[test]
+    fn silence_by_default() {
+        // Sending nothing is what keeps every provider working; only opt-in.
+        let b = build_request_body(&req(None), ThinkingDialect::Reasoning);
+        assert!(b.get("reasoning").is_none());
+        assert!(b.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn each_provider_gets_its_own_spelling() {
+        let b = build_request_body(&req(Some(false)), ThinkingDialect::Reasoning);
+        assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}));
+        assert!(b.get("chat_template_kwargs").is_none(), "OpenRouter rejects this field");
+
+        let b = build_request_body(&req(Some(false)), ThinkingDialect::ChatTemplate);
+        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": false}));
+        assert!(b.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn dialect_is_guessed_from_the_endpoint() {
+        use ThinkingDialect::*;
+        assert_eq!(ThinkingDialect::guess_from_url("https://openrouter.ai/api/v1"), Reasoning);
+        assert_eq!(ThinkingDialect::guess_from_url("http://127.0.0.1:8000/v1"), ChatTemplate);
+        assert_eq!(ThinkingDialect::parse("chat-template"), Some(ChatTemplate));
+        assert_eq!(ThinkingDialect::parse("nonsense"), None);
     }
 }

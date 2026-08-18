@@ -9,6 +9,7 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -87,6 +88,45 @@ impl Steering {
     }
 }
 
+/// Whether the model thinks before answering, toggleable while a session is
+/// running — the "feeling lucky" switch. Shared by handle so the TUI can flip
+/// it between turns without rebuilding the agent.
+#[derive(Clone, Default)]
+pub struct ThinkingMode(Arc<AtomicI8>);
+
+impl ThinkingMode {
+    pub fn new(value: Option<bool>) -> Self {
+        let m = ThinkingMode::default();
+        m.set(value);
+        m
+    }
+
+    /// `None` = leave the provider's default alone (send nothing).
+    pub fn get(&self) -> Option<bool> {
+        match self.0.load(Ordering::Relaxed) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn set(&self, value: Option<bool>) {
+        let v = match value {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        };
+        self.0.store(v, Ordering::Relaxed);
+    }
+
+    /// Flip between fast and thinking; an unset mode turns fast first.
+    pub fn toggle_fast(&self) -> bool {
+        let fast = self.get() != Some(false);
+        self.set(Some(!fast));
+        fast
+    }
+}
+
 /// Why the inner loop stopped.
 enum IdleReason {
     ModelDone,
@@ -111,6 +151,7 @@ pub struct Agent {
     keep_recent_turns: usize,
     tool_ctx: ToolContext,
     steering: Steering,
+    thinking: ThinkingMode,
 }
 
 impl Agent {
@@ -143,7 +184,21 @@ impl Agent {
             keep_recent_turns,
             tool_ctx,
             steering: Steering::new(),
+            thinking: ThinkingMode::default(),
         }
+    }
+
+    /// Ask the model to skip its reasoning pass. On a small Qwen this is the
+    /// difference between 500 completion tokens and 31 for the same question —
+    /// the loop is expected to catch what the model no longer deliberates over.
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = ThinkingMode::new(thinking);
+        self
+    }
+
+    /// Handle to this agent's thinking switch, so a front-end can flip it.
+    pub fn thinking_mode(&self) -> ThinkingMode {
+        self.thinking.clone()
     }
 
     /// This agent's steering mailbox — push to it to inject a message into the
@@ -195,6 +250,9 @@ impl Agent {
             tool_ctx,
             // A fork gets a fresh mailbox — its supervisor attaches its own.
             steering: Steering::new(),
+            // A worker takes the parent's setting as it stands now; flipping
+            // the parent later shouldn't retroactively change a running worker.
+            thinking: ThinkingMode::new(self.thinking.get()),
         }
     }
 
@@ -321,6 +379,7 @@ impl Agent {
                 tools: self.registry.defs(),
                 temperature: self.temperature,
                 max_tokens: self.max_tokens,
+                thinking: self.thinking.get(),
             };
 
             // Forward streamed text + reasoning deltas to the bus.
@@ -489,6 +548,7 @@ impl Agent {
             tools: vec![],
             temperature: Some(0.2),
             max_tokens: Some(max_tokens),
+            thinking: self.thinking.get(),
         };
         // Drain the stream sink; we only want the assembled text.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);

@@ -90,6 +90,43 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// `Some(false)` asks the model not to think before answering. `None` sends
+    /// nothing at all, which is the default: providers disagree about these
+    /// fields and a strict one rejects the request outright.
+    pub thinking: Option<bool>,
+}
+
+/// How a provider spells "don't think". There is no common field, and sending
+/// the wrong one is worse than sending nothing — OpenRouter rejects
+/// `chat_template_kwargs` outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingDialect {
+    /// OpenRouter: `reasoning: {"enabled": false}`.
+    #[default]
+    Reasoning,
+    /// vLLM / oMLX / llama.cpp: `chat_template_kwargs: {"enable_thinking": false}`.
+    ChatTemplate,
+}
+
+impl ThinkingDialect {
+    pub fn parse(s: &str) -> Option<ThinkingDialect> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "reasoning" => Some(ThinkingDialect::Reasoning),
+            "chat-template" | "chat_template" => Some(ThinkingDialect::ChatTemplate),
+            _ => None,
+        }
+    }
+
+    /// Guess from the endpoint when the config doesn't say. Hosted gateways
+    /// take `reasoning`; self-hosted serving stacks take the template kwarg.
+    pub fn guess_from_url(base_url: &str) -> ThinkingDialect {
+        let u = base_url.to_ascii_lowercase();
+        if u.contains("openrouter.ai") || u.contains("api.openai.com") {
+            ThinkingDialect::Reasoning
+        } else {
+            ThinkingDialect::ChatTemplate
+        }
+    }
 }
 
 /// Incremental events emitted during streaming. The client forwards these to
@@ -142,11 +179,18 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
         .build()
         .context("building HTTP client")?;
     match resolved.provider.kind.as_str() {
-        "openai-compat" => Ok(std::sync::Arc::new(openai::OpenAiCompatClient::new(
-            http,
-            resolved.provider.base_url.clone(),
-            resolved.api_key.clone(),
-        ))),
+        "openai-compat" => {
+            let mut c = openai::OpenAiCompatClient::new(
+                http,
+                resolved.provider.base_url.clone(),
+                resolved.api_key.clone(),
+            );
+            if let Some(d) = resolved.provider.thinking_param.as_deref().and_then(ThinkingDialect::parse)
+            {
+                c = c.with_thinking_dialect(d);
+            }
+            Ok(std::sync::Arc::new(c))
+        }
         other => bail!("provider type `{other}` is not supported (use `openai-compat`)"),
     }
 }

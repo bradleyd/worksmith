@@ -28,6 +28,11 @@ base-url = "http://localhost:8000/v1"
 type = "openai-compat"
 base-url = "https://openrouter.ai/api/v1"
 api-key-env = "OPENROUTER_API_KEY"
+# How this provider spells "don't think". Guessed from the URL when unset:
+# hosted gateways get `reasoning`, self-hosted stacks get `chat-template`.
+# Sending the wrong one is worse than sending nothing — OpenRouter rejects
+# chat_template_kwargs outright.
+# thinking-param = "reasoning"
 
 # --- Agent -----------------------------------------------------------------
 [agent]
@@ -37,6 +42,12 @@ stuck-threshold = 3         # identical repeated tool calls before a nudge
 # validate = "cargo test"   # default success check (--until overrides per-run)
 context-limit = 128000      # approx model context (tokens); compact at 75%
 keep-recent-turns = 6       # turns kept verbatim when compacting
+# Does the model reason before answering? Unset leaves the provider's default.
+# "off" is fast mode ("feeling lucky"): much cheaper and quicker — on a small
+# Qwen the same question cost 101 completion tokens thinking vs 13 without —
+# with the validation loop expected to catch what deliberation would have.
+# Override per run with --fast / --think, or toggle live with /fast.
+# thinking = "off"
 
 [agents]
 max = 4                     # max concurrently-running spawned workers (/spawn)

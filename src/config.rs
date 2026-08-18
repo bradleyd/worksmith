@@ -98,6 +98,10 @@ pub struct ProviderConfig {
     /// Env var holding the API key. Optional (vLLM needs none).
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// How this provider spells "don't think": `reasoning` (OpenRouter/OpenAI)
+    /// or `chat-template` (vLLM/oMLX/llama.cpp). Guessed from the URL if unset.
+    #[serde(default)]
+    pub thinking_param: Option<String>,
 }
 
 fn default_provider_kind() -> String {
@@ -118,6 +122,10 @@ pub struct AgentConfig {
     pub context_limit: Option<usize>,
     /// How many recent user turns to keep verbatim when compacting.
     pub keep_recent_turns: Option<usize>,
+    /// `on` | `off` — whether the model reasons before answering. Unset leaves
+    /// the provider's default. `off` is fast mode: cheaper and quicker, with
+    /// the validation loop expected to catch what deliberation would have.
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -186,6 +194,7 @@ impl Config {
         take(&mut self.agent.validate, other.agent.validate);
         take(&mut self.agent.context_limit, other.agent.context_limit);
         take(&mut self.agent.keep_recent_turns, other.agent.keep_recent_turns);
+        take(&mut self.agent.thinking, other.agent.thinking);
         take(&mut self.tools.bash_timeout_secs, other.tools.bash_timeout_secs);
         take(&mut self.web.provider, other.web.provider);
         take(&mut self.web.api_key_env, other.web.api_key_env);
@@ -214,6 +223,17 @@ impl Config {
 
     pub fn keep_recent_turns(&self) -> usize {
         self.agent.keep_recent_turns.unwrap_or(6)
+    }
+
+    /// `Some(false)` = don't think. `None` = leave the provider alone.
+    pub fn thinking(&self) -> Option<bool> {
+        match self.agent.thinking.as_deref().map(str::trim) {
+            Some(v) if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("false") => {
+                Some(false)
+            }
+            Some(v) if v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true") => Some(true),
+            _ => None,
+        }
     }
 
     pub fn agents_max(&self) -> usize {

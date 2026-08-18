@@ -59,6 +59,7 @@ data: [DONE]\n\n";
         tools: vec![],
         temperature: None,
         max_tokens: None,
+        thinking: None,
     };
 
     let completion = client.stream(req, tx, CancellationToken::new()).await.unwrap();

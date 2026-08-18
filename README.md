@@ -69,6 +69,14 @@ project knowledge (M5). MCP/plugins (M4) are still ahead.
 - **Web** (`web` tool): `search` via a configured provider (Brave, Tavily, or a
   self-hosted SearXNG — set `[web]` in config) and `fetch`, which pulls a URL and
   reduces it to readable text. Fetch needs no configuration.
+- **Fast mode** (`--fast`, `/fast`, `agent.thinking = "off"`): answer without a
+  reasoning pass — the feeling-lucky button. Measured on qwen3.5-9b, same
+  question: 101 completion tokens thinking vs 13 without. The bet is that the
+  validation loop catches what deliberation would have, which makes it the
+  biggest single cost lever in the harness. Nothing is sent unless you ask:
+  providers disagree on the field (`reasoning` vs `chat_template_kwargs`) and an
+  unrecognized one is a 400, so the dialect is guessed from the endpoint and
+  overridable with `thinking-param`.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
   `WORKSMITH_HOME` relocates the whole global directory (config, sessions,

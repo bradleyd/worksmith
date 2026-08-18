@@ -61,6 +61,16 @@ struct Args {
     /// Use the plain line-based REPL instead of the full-screen TUI.
     #[arg(long)]
     plain: bool,
+
+    /// Feeling lucky: answer without thinking first. Much cheaper and quicker
+    /// (500 completion tokens vs 31 on a small Qwen for the same question);
+    /// the validation loop is what catches the difference.
+    #[arg(long, global = true)]
+    fast: bool,
+
+    /// Force thinking on, overriding `agent.thinking = "off"` in config.
+    #[arg(long, global = true, conflicts_with = "fast")]
+    think: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -148,6 +158,14 @@ async fn run(args: Args) -> Result<()> {
         is_worker: false,
     };
 
+    // --fast / --think beat the configured default.
+    let thinking = if args.fast {
+        Some(false)
+    } else if args.think {
+        Some(true)
+    } else {
+        config.thinking()
+    };
     let agent = Agent::new(
         client,
         registry,
@@ -161,7 +179,8 @@ async fn run(args: Args) -> Result<()> {
         config.context_limit(),
         config.keep_recent_turns(),
         tool_ctx,
-    );
+    )
+    .with_thinking(thinking);
 
     // Validation command: --until overrides the configured default.
     let validate_cmd = args.until.clone().or_else(|| config.validate_command().map(String::from));
@@ -279,7 +298,14 @@ async fn run_spawn(
         config.context_limit(),
         config.keep_recent_turns(),
         tool_ctx,
-    ));
+    )
+    .with_thinking(if args.fast {
+        Some(false)
+    } else if args.think {
+        Some(true)
+    } else {
+        config.thinking()
+    }));
 
     let mem = project_store(cwd);
     let system = build_worker_prompt(cwd, &mem);
