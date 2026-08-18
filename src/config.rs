@@ -24,6 +24,44 @@ pub struct Config {
     pub agent: AgentConfig,
     pub tools: ToolsConfig,
     pub agents: AgentsConfig,
+    pub web: WebConfig,
+}
+
+/// Web search provider. Fetching a URL needs none of this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebProvider {
+    Brave,
+    Tavily,
+    Searxng,
+}
+
+impl WebProvider {
+    pub fn parse(s: &str) -> Option<WebProvider> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "brave" => Some(WebProvider::Brave),
+            "tavily" => Some(WebProvider::Tavily),
+            "searxng" | "searx" => Some(WebProvider::Searxng),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct WebConfig {
+    /// `brave` | `tavily` | `searxng`. Unset = web search is unavailable.
+    pub provider: Option<String>,
+    /// Env var holding the provider's API key (searxng needs none).
+    pub api_key_env: Option<String>,
+    /// Override the endpoint; required for a self-hosted searxng.
+    pub base_url: Option<String>,
+}
+
+/// A resolved web-search setup.
+pub struct ResolvedWeb {
+    pub provider: Option<WebProvider>,
+    pub api_key_env: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
