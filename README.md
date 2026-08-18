@@ -40,6 +40,13 @@ project knowledge (M5). MCP/plugins (M4) are still ahead.
   the next one. A fan-out group is held until every member finishes and reported
   as one block, then the parent runs a turn combining them into a single answer
   (`agents.synthesize = false` to skip that turn).
+- **Headless workers:** `worksmith spawn [-n N | --each-files <regex>]
+  [--worker-model <spec>] "<task>"` fans out, waits, reports each worker, then
+  has the session's model combine the results — the non-interactive form of
+  `/spawn`, so scripts and evals can exercise the worker layer.
+  `--no-synthesis` stops after the drafts, for when the judge needs a model
+  that can't be resident at the same time as the workers' (swap between the
+  two commands).
 - **Sub-workers:** `/spawn <task>` runs a delegated task in a background worker
   (its own session, shared tools/model). When a worker finishes it's announced
   in the transcript with the **files it changed** and its result; `/agents`

@@ -565,8 +565,9 @@ tool and `/knowledge`. Not done: `worksmith memory export/import/sync` via git,
 auto-extraction at compaction (today `/memory extract` is explicit), and
 semantic/vector retrieval (`worksmith-memory-v1.md` §30 stage 4).
 
-**M6 — Spawned agents** *(done, minus `worksmith spawn`)*: `/spawn`, `/agents` panel, fan-out (`-n`, `--each-files`, planner
-`auto`) with a queue past `agents.max`, and per-worker model override
+**M6 — Spawned agents** *(done)*: `/spawn`, `/agents` panel, fan-out (`-n`, `--each-files`, planner
+`auto`) with a queue past `agents.max`, `worksmith spawn` for headless runs,
+and per-worker model override
 (`agents.model` / `/spawn --model`) for the cheap-workers/smart-parent split. Worker results now feed back into the
 parent's history (via the steering mailbox mid-turn, or the session between
 turns), with fan-out groups reported as one block and synthesized into a single
@@ -634,6 +635,31 @@ Known spend, roughly in order of waste:
 Caching cuts the other way: a per-turn memory block breaks the stable prefix
 that makes server-side prefix caching work, so measure both — a cache hit is
 cheaper than a token not sent. Get the numbers before choosing.
+
+**M11 — Scratch worktrees for code changes** *(future)*: right now every worker
+edits the user's real working tree, and a fan-out of N workers edits it
+*concurrently* — the planner is biased toward one worker partly to avoid that
+collision. Borrow rustopedia's `scratch.rs` (`ScratchOverlay`): `git worktree
+add --detach <tmp> HEAD`, then mirror uncommitted tracked changes and
+untracked-but-not-ignored files so the copy matches what the user is actually
+editing, not just the last commit. Removed on drop.
+
+What it buys, in order of value:
+- **Safe fan-out.** Each worker gets its own overlay, so three workers can edit
+  the same files without clobbering each other; the parent reviews the diffs and
+  applies the ones it accepts. Today "workers share one cwd with no isolation"
+  is a hard constraint on how fan-out can be used.
+- **Validation without side effects.** `--until "cargo test"` currently runs
+  against the live tree; in an overlay a failed attempt leaves nothing behind.
+- **An honest undo.** Right now a bad worker edit is only recoverable through
+  git by hand.
+
+Costs to weigh: a worktree per worker is disk and setup time (rustopedia's
+mirroring step is the expensive part), it needs a git repo (so degrade
+gracefully to today's behavior when there isn't one), and the parent needs a
+merge/apply step that doesn't exist yet. Non-code work (the newsletter fan-out)
+doesn't need any of this, so it should be opt-in per spawn or inferred from
+whether the task touches tracked files.
 
 ## 11. Open decisions
 

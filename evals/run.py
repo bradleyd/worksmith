@@ -108,7 +108,8 @@ def validate(workdir: Path, cmd: str) -> bool:
     return r.returncode == 0
 
 
-def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int) -> dict:
+def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
+            keep: bool = False) -> dict:
     workdir = setup_workdir(task)
     cmd = [binp, "--mode", "json"]
     if mode == "guided":
@@ -132,7 +133,13 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int) -
         row["error"] = f"timeout after {timeout}s"
     finally:
         row["elapsed"] = round(time.time() - t0, 1)
-        shutil.rmtree(workdir, ignore_errors=True)
+        # Keeping the workdir is the difference between diagnosing a failure and
+        # guessing at it from token counts.
+        if keep and not row["passed"]:
+            row["workdir"] = str(workdir)
+            print(f"  kept {workdir}", file=sys.stderr)
+        else:
+            shutil.rmtree(workdir, ignore_errors=True)
     return row
 
 
@@ -145,6 +152,8 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=1,
                     help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep the scratch dir of any run that fails, for inspection")
     args = ap.parse_args()
 
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
@@ -163,7 +172,7 @@ def main() -> int:
             for i in range(args.repeat):
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
                 print(f"running {tag} …", file=sys.stderr)
-                row = run_one(binp, task, mode, args.model, args.timeout)
+                row = run_one(binp, task, mode, args.model, args.timeout, args.keep)
                 row["run"] = i
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"

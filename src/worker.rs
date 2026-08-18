@@ -48,6 +48,8 @@ struct Runtime {
     /// Files the worker created/edited (deterministic, from write/edit calls).
     changed: Vec<String>,
     result: String,
+    /// Completion tokens this worker has spent.
+    tokens: u32,
     /// Supervisor interventions so far.
     nudges: usize,
     /// Set when the supervisor pulled this worker off the floor; it wins over
@@ -67,6 +69,8 @@ pub struct WorkerSummary {
     pub result: String,
     /// The worker's session id (its full transcript is at that session file).
     pub session_id: String,
+    /// Completion tokens this worker spent.
+    pub tokens: u32,
     /// How many times the supervisor nudged this worker.
     pub nudges: usize,
     /// Why the supervisor stopped it, if it did.
@@ -104,6 +108,7 @@ impl Worker {
             changed: r.changed.clone(),
             result: r.result.clone(),
             session_id: self.session_id.clone(),
+            tokens: r.tokens,
             nudges: r.nudges,
             escalation: r.escalation.clone(),
             group: self.group,
@@ -351,6 +356,7 @@ impl WorkerManager {
             tool_calls: 0,
             changed: Vec::new(),
             result: String::new(),
+            tokens: 0,
             nudges: 0,
             escalation: None,
         }));
@@ -542,6 +548,7 @@ fn update_last(g: &mut Runtime, e: Event) {
                 g.last = l.to_string();
             }
         }
+        Event::Usage { completion_tokens, .. } => g.tokens += completion_tokens,
         Event::Nudge { reason } => g.last = format!("↻ {reason}"),
         Event::Validation { ok, .. } => {
             g.last = if ok { "✓ validated".into() } else { "✗ validation failed".into() }

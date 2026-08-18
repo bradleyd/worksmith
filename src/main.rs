@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +25,9 @@ use worksmith::worker::WorkerManager;
 #[derive(Parser, Debug)]
 #[command(name = "worksmith", version, about = "A minimal terminal coding-agent harness")]
 struct Args {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+
     /// Prompt to run. With --print/--mode json, runs one-shot; otherwise it's
     /// the first REPL turn.
     prompt: Option<String>,
@@ -34,11 +37,11 @@ struct Args {
     print: bool,
 
     /// Output mode. `json` emits the typed event stream on stdout.
-    #[arg(long = "mode")]
+    #[arg(long = "mode", global = true)]
     mode: Option<String>,
 
-    /// Override the model as `provider/model`.
-    #[arg(long)]
+    /// Override the session's model as `provider/model`.
+    #[arg(long, global = true)]
     model: Option<String>,
 
     /// Resume a session by id.
@@ -58,6 +61,39 @@ struct Args {
     /// Use the plain line-based REPL instead of the full-screen TUI.
     #[arg(long)]
     plain: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Run a task in background workers and print what they produced.
+    ///
+    /// The non-interactive form of `/spawn`: fans out, waits, reports each
+    /// worker, then (unless --no-synthesis) has the session's model combine
+    /// the results into one answer.
+    Spawn {
+        /// Exactly N workers. Omit to let a planner decide how many.
+        #[arg(short = 'n', long = "count")]
+        count: Option<usize>,
+
+        /// One worker per file whose *name* matches this regex.
+        #[arg(long)]
+        each_files: Option<String>,
+
+        /// Model the workers run on, as `provider/model`. Overrides
+        /// `agents.model`. The synthesis still runs on the session's model,
+        /// so `--model` and `--worker-model` are deliberately separate.
+        #[arg(long = "worker-model")]
+        worker_model: Option<String>,
+
+        /// Print each worker's result and stop; don't run the combining turn.
+        /// Use this when the judge needs a model that can't be resident at the
+        /// same time as the workers' (swap models between the two commands).
+        #[arg(long)]
+        no_synthesis: bool,
+
+        /// The task to delegate.
+        task: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +125,10 @@ async fn run(args: Args) -> Result<()> {
     let bus = EventBus::new();
 
     let mut session = open_session(&args, &cwd)?;
+
+    if let Some(Cmd::Spawn { .. }) = &args.cmd {
+        return run_spawn(&args, &config, &resolved, client, registry, bus, session, &cwd).await;
+    }
 
     let mode = if args.mode.as_deref() == Some("json") {
         OutputMode::Json
@@ -192,6 +232,151 @@ async fn run(args: Args) -> Result<()> {
     drop(bus);
     let _ = renderer.await;
     outcome
+}
+
+/// `worksmith spawn` — fan out to background workers, wait, report.
+///
+/// This is what makes the worker layer measurable from a script: the TUI's
+/// `/spawn` needs a terminal, so nothing could exercise workers headlessly.
+#[allow(clippy::too_many_arguments)]
+async fn run_spawn(
+    args: &Args,
+    config: &Config,
+    resolved: &worksmith::config::ResolvedModel,
+    client: Arc<dyn worksmith::llm::LlmClient>,
+    registry: Arc<ToolRegistry>,
+    bus: EventBus,
+    mut session: Session,
+    cwd: &Path,
+) -> Result<()> {
+    use worksmith::fanout::{assign, matching_files, plan_fanout};
+    use worksmith::llm::ModelOverride;
+    use worksmith::worker::WorkerManager;
+
+    let Some(Cmd::Spawn { count, each_files, worker_model: model, no_synthesis, task }) =
+        &args.cmd
+    else {
+        unreachable!("run_spawn is only called for the spawn subcommand");
+    };
+    let json = args.mode.as_deref() == Some("json");
+
+    let tool_ctx = ToolContext {
+        cwd: cwd.to_path_buf(),
+        session_id: session.id.clone(),
+        bash_timeout: Duration::from_secs(config.bash_timeout_secs()),
+        is_worker: false,
+    };
+    let agent = Arc::new(Agent::new(
+        client,
+        registry,
+        bus.clone(),
+        resolved.model.clone(),
+        config.temperature,
+        config.max_tokens,
+        config.max_steps(),
+        config.max_retries(),
+        config.stuck_threshold(),
+        config.context_limit(),
+        config.keep_recent_turns(),
+        tool_ctx,
+    ));
+
+    let mem = project_store(cwd);
+    let system = build_worker_prompt(cwd, &mem);
+    let over = match model.as_deref().or_else(|| config.agents_model()) {
+        Some(spec) => Some(ModelOverride::resolve(config, spec)?),
+        None => None,
+    };
+    let worker_model = over.as_ref().map(|o| o.model.clone());
+
+    // Decide the work: one worker per matching file, or a planner split.
+    let tasks: Vec<String> = match each_files {
+        Some(pattern) => {
+            let files = matching_files(cwd, pattern).map_err(anyhow::Error::msg)?;
+            if files.is_empty() {
+                bail!("no files match `{pattern}`");
+            }
+            files.iter().map(|f| assign(task, f)).collect()
+        }
+        None => plan_fanout(agent.clone(), task.clone(), *count, config.agents_max()).await,
+    };
+
+    if !json {
+        if let Some(m) = &worker_model {
+            eprintln!("workers on {m}");
+        }
+        if tasks.len() > 1 {
+            for (i, t) in tasks.iter().enumerate() {
+                eprintln!("  {}. {}", i + 1, t.lines().next().unwrap_or(t));
+            }
+        }
+    }
+
+    let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
+        .with_supervisor(config.supervisor());
+    let report = workers.spawn_many_on(tasks, system, task.clone(), over);
+    let expected = report.started.len() + report.queued;
+    if expected == 0 {
+        bail!("no workers started");
+    }
+
+    // Wait them out, reporting each as it lands.
+    let mut done: Vec<worksmith::worker::WorkerSummary> = Vec::new();
+    while done.len() < expected {
+        for id in workers.pump() {
+            if !json {
+                eprintln!("(started {id} from the queue)");
+            }
+        }
+        for w in workers.take_newly_finished() {
+            if !json {
+                eprintln!("{}", worksmith::report::worker_headline(&w));
+            }
+            done.push(w);
+        }
+        if done.len() < expected {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    // Workers run on their own buses, so their spend never reaches this
+    // process's event stream. Re-emit the total so `--mode json` consumers
+    // (the eval harness) can account for it.
+    let worker_tokens: u32 = done.iter().map(|w| w.tokens).sum();
+    bus.emit(Event::Usage {
+        prompt_tokens: 0,
+        completion_tokens: worker_tokens,
+        total_tokens: worker_tokens,
+    });
+
+    let group = worksmith::report::GroupAcc {
+        group: report.group.unwrap_or(0),
+        request: task.clone(),
+        total: done.len(),
+        done,
+    };
+    let body = worksmith::report::group_report(&group);
+
+    if *no_synthesis || !config.synthesize() || group.done.len() < 2 {
+        let _ = writeln!(stdout(), "{body}");
+        return Ok(());
+    }
+
+    // The parent decides. This is the whole point of the split: cheap doers,
+    // one smarter judgment at the end.
+    session.append_message(worksmith::llm::Message::user(body))?;
+    let ask = format!(
+        "Your {} background workers just reported back (above). Combine their results into \
+         one answer to the original request: {}",
+        group.done.len(),
+        group.request
+    );
+    let sys = build_system_prompt(cwd, &mem);
+    let result = agent
+        .run_turn(&mut session, &ask, &sys, None, CancellationToken::new())
+        .await?;
+    let _ = writeln!(stdout(), "{}", result.text);
+    Ok(())
 }
 
 fn open_session(args: &Args, cwd: &Path) -> Result<Session> {

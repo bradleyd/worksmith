@@ -110,6 +110,7 @@ mod tests {
             changed: vec!["notes.md".into()],
             result: result.into(),
             session_id: "s".into(),
+            tokens: 0,
             nudges: 0,
             escalation: None,
             group: Some(1),
