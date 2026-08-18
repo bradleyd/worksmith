@@ -141,8 +141,14 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
                            timeout=timeout)
         row.update(parse_events(r.stdout))
         row["passed"] = validate(workdir, task["validate"])
+        # Keep stderr even on success: it carries the planner's account of how
+        # it split the work, which is the only explanation of a surprising
+        # fan-out. Discarding it on exit 0 hid that for four runs.
+        stderr = (r.stderr or "").strip()
+        if stderr:
+            row["stderr"] = stderr[-1500:]
         if r.returncode != 0 and not row["passed"]:
-            row["error"] = (r.stderr or "").strip()[:200]
+            row["error"] = stderr[:200]
     except subprocess.TimeoutExpired:
         row["error"] = f"timeout after {timeout}s"
     finally:

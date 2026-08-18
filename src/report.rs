@@ -61,9 +61,8 @@ pub fn worker_block(w: &WorkerSummary) -> String {
     // file list. It judges what came back; this is part of what came back.
     if w.did_nothing() {
         out.push_str(
-            "\nWARNING: reported done but changed no files, made at most one tool call, and \
-             returned almost no text. Treat this result as unverified — the work may not have \
-             happened.",
+            "\nWARNING: reported done but changed no files and returned almost no text. \
+             Treat this result as unverified — the work may not have happened.",
         );
     }
     let body = if w.result.trim().is_empty() { &w.last } else { &w.result };
@@ -173,7 +172,14 @@ mod tests {
         let mut w = summary("w1", "write draft-1.md", "");
         w.changed.clear();
         w.tool_calls = 1;
-        assert!(w.did_nothing(), "no files, one tool call, no text");
+        assert!(w.did_nothing(), "no files, no text");
+
+        // The case the first version missed: plenty of reading, nothing to
+        // show for it. Effort is not output.
+        let mut busy = summary("w5", "write draft-2.md", "");
+        busy.changed.clear();
+        busy.tool_calls = 6;
+        assert!(busy.did_nothing(), "read six files, wrote nothing, said nothing");
         assert!(single_report(&w).contains("WARNING"), "the parent must be told");
         assert!(worker_headline(&w).contains("produced nothing"));
 
@@ -184,8 +190,10 @@ mod tests {
         assert!(!research.did_nothing(), "investigation is work");
         assert!(!single_report(&research).contains("WARNING"));
 
-        // A short answer after real searching is still work.
-        let mut terse = summary("w3", "does the parser handle CRLF?", "Yes — parser.rs:88.");
+        // A one-line answer after real searching is still work. Only
+        // near-silence counts as nothing.
+        let mut terse =
+        summary("w3", "does the parser handle CRLF?", "Yes — parser.rs:88 handles CRLF explicitly.");
         terse.changed.clear();
         terse.tool_calls = 5;
         assert!(!terse.did_nothing(), "few words, but it looked");

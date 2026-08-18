@@ -57,6 +57,9 @@ struct Runtime {
     escalation: Option<String>,
 }
 
+/// Below this, a worker's final message is an assertion rather than an answer.
+const EMPTY_RESULT_CHARS: usize = 40;
+
 /// A point-in-time view of a worker for display.
 #[derive(Clone)]
 pub struct WorkerSummary {
@@ -104,14 +107,22 @@ impl WorkerSummary {
     /// is claiming credit for an empty turn. One did exactly that: a single
     /// `ls`, no output, status Done.
     ///
-    /// All three conditions are required on purpose. Plenty of honest work
-    /// changes no files — answering a question, reading around a codebase — so
-    /// no single signal means failure. It's the combination that's empty.
+    /// Both conditions are required on purpose. Plenty of honest work changes
+    /// no files — answering a question, reading around a codebase — so the
+    /// answer itself has to be empty too before this means anything.
+    ///
+    /// An earlier version also required at most one tool call, and missed the
+    /// case it most needed to catch: three workers that read six files each,
+    /// wrote nothing, said nothing, and reported success. Effort is not output.
+    ///
+    /// The bar for "said nothing" is deliberately low. A worker answering a
+    /// question in one line has done its job; only near-silence — "Done.",
+    /// "I've written the draft" with no draft — is a claim with nothing behind
+    /// it.
     pub fn did_nothing(&self) -> bool {
         self.status == WorkerStatus::Done
             && self.changed.is_empty()
-            && self.tool_calls <= 1
-            && self.result.trim().chars().count() < 200
+            && self.result.trim().chars().count() < EMPTY_RESULT_CHARS
     }
 }
 
