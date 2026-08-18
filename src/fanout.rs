@@ -221,12 +221,21 @@ pub async fn plan_fanout(
     // ignores — a local 27B once answered with its own deliberation and we
     // spawned three workers whose tasks were fragments of its thinking. A
     // required prefix makes the shape checkable instead of hoped for.
+    // The concurrency constraint has to be stated. Left implicit, a *better*
+    // model gives a worse fan-out: Kimi K3 split a request into read → write →
+    // review, which is a correct decomposition and useless here, because all
+    // three would run at once and the reviewer would find nothing to review.
+    let rules = "The tasks all run AT THE SAME TIME, in the same directory, and cannot talk \
+                 to each other. So: no task may depend on another task's output, no task may \
+                 be a step that only makes sense after another finishes, and no two tasks may \
+                 write the same file. If the work is a sequence of phases rather than parallel \
+                 pieces, do not describe the phases — split the largest parallel part instead.";
     let system = match want {
         Some(n) => format!(
             "You split a work request into exactly {n} tasks for {n} independent \
              background workers. If the request contains {n} distinct pieces of work, \
              write one per line. If it does not divide that way, write {n} variations \
-             on the same goal, each taking a different angle.\n\n\
+             on the same goal, each taking a different angle.\n\n{rules}\n\n\
              Output exactly {n} lines. Every line MUST begin with `TASK: ` followed by \
              one self-contained instruction. Write nothing else — no reasoning, no \
              numbering, no preamble, no blank lines."
