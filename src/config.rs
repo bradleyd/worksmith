@@ -305,15 +305,23 @@ fn read_toml(path: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
-/// `~/.worksmith/config.toml`.
+/// `<global dir>/config.toml`.
 pub fn global_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".worksmith").join("config.toml"))
+    global_dir().map(|d| d.join("config.toml"))
 }
 
-/// `~/.worksmith` — the global state directory.
+/// `~/.worksmith` — the global state directory holding config, sessions, and
+/// global memory. `WORKSMITH_HOME` overrides it, which is how the test suite
+/// keeps its scratch sessions out of your real one.
 pub fn global_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(GLOBAL_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
     dirs::home_dir().map(|h| h.join(".worksmith"))
 }
+
+/// Env var that relocates the whole global state directory.
+pub const GLOBAL_DIR_ENV: &str = "WORKSMITH_HOME";
 
 /// Collect `AGENTS.md` / `CLAUDE.md` from `start` up to the filesystem root,
 /// nearest-last so more-specific instructions land later in the prompt.

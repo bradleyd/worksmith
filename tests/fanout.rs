@@ -1,6 +1,8 @@
 //! Fan-out: one `/spawn` becoming several workers, and the queue that lets a
 //! fan-out exceed `agents.max` without dropping work. Mock LLM, no network.
 
+mod common;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -71,6 +73,7 @@ fn agent_with(client: Arc<dyn LlmClient>, cwd: &std::path::Path) -> Agent {
 
 #[tokio::test]
 async fn fanout_beyond_the_cap_queues_and_drains() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(agent_with(Arc::new(DoneClient), dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 2);
@@ -104,6 +107,7 @@ async fn fanout_beyond_the_cap_queues_and_drains() {
 
 #[tokio::test]
 async fn planner_splits_a_request_into_workers() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let client = Arc::new(ScriptedClient {
         responses: Mutex::new(VecDeque::from(vec![
@@ -168,6 +172,7 @@ impl LlmClient for LoopUntilSeen {
 
 #[tokio::test]
 async fn a_worker_report_reaches_a_running_parent_turn() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(agent_with(
         Arc::new(LoopUntilSeen { needle: "[w1] done" }),

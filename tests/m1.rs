@@ -1,6 +1,8 @@
 //! M1 integration tests for the non-LLM logic: edit unique-match semantics,
 //! memory CRUD/supersede, config merge, and session round-trip.
 
+mod common;
+
 use std::time::Duration;
 
 use serde_json::json;
@@ -21,6 +23,7 @@ fn ctx(dir: &std::path::Path) -> ToolContext {
 
 #[tokio::test]
 async fn edit_unique_match_replaces() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "hello world\n").unwrap();
@@ -44,6 +47,7 @@ async fn edit_unique_match_replaces() {
 
 #[tokio::test]
 async fn edit_ambiguous_match_is_error() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "x\nx\n").unwrap();
@@ -60,6 +64,7 @@ async fn edit_ambiguous_match_is_error() {
 
 #[tokio::test]
 async fn edit_not_found_is_error() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "abc\n").unwrap();
@@ -74,6 +79,7 @@ async fn edit_not_found_is_error() {
 
 #[tokio::test]
 async fn edit_replace_all() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "x x x\n").unwrap();
@@ -93,6 +99,7 @@ async fn edit_replace_all() {
 
 #[tokio::test]
 async fn edit_multiple_atomic() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "one two three\n").unwrap();
@@ -116,6 +123,7 @@ async fn edit_multiple_atomic() {
 
 #[test]
 fn memory_crud_and_supersede() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let global = dir.path().join("global.db");
     let project = dir.path().join("project.db");
@@ -156,6 +164,7 @@ fn memory_crud_and_supersede() {
 
 #[test]
 fn memory_rejects_bad_kind() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let store =
         MemoryStore::open_paths(&dir.path().join("g.db"), Some(&dir.path().join("p.db"))).unwrap();
@@ -164,6 +173,7 @@ fn memory_rejects_bad_kind() {
 
 #[test]
 fn config_project_overrides_global() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     // A project config that sets a model + provider.
     let wsdir = dir.path().join(".worksmith");
@@ -194,6 +204,7 @@ base-url = "http://localhost:8000/v1"
 
 #[test]
 fn session_round_trip() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
 

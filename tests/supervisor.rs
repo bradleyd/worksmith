@@ -2,6 +2,8 @@
 //! nudged mid-run, and one that keeps it up gets pulled off the floor.
 //! Driven by a mock LLM client (no network).
 
+mod common;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -126,6 +128,7 @@ fn started(mgr: &mut WorkerManager, task: &str) -> String {
 
 #[tokio::test]
 async fn repeated_calls_are_nudged_into_the_worker() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(Agent::new(
         Arc::new(RepeatUntilNudged { needle: "identical arguments" }),
@@ -162,6 +165,7 @@ async fn repeated_calls_are_nudged_into_the_worker() {
 
 #[tokio::test]
 async fn worker_is_escalated_after_its_nudges_run_out() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     // Never finishes on its own, and burns 100 completion tokens per step —
     // the supervisor has to stop it.
@@ -221,6 +225,7 @@ impl LlmClient for SlowClient {
 
 #[tokio::test]
 async fn silence_trips_the_idle_rule() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(Agent::new(
         Arc::new(SlowClient),
@@ -259,6 +264,7 @@ async fn silence_trips_the_idle_rule() {
 
 #[tokio::test]
 async fn supervisor_off_leaves_the_worker_alone() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut responses: VecDeque<Completion> = (0..6).map(|_| ls_call()).collect();
     responses.push_back(Completion { content: Some("done".into()), ..Default::default() });
@@ -286,6 +292,7 @@ async fn supervisor_off_leaves_the_worker_alone() {
 
 #[tokio::test]
 async fn manual_nudge_reaches_a_running_worker() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let responses: VecDeque<Completion> = (0..200).map(|_| ls_call()).collect();
     let client = Arc::new(MockClient {

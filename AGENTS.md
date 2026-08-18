@@ -39,6 +39,10 @@ results formatted for the parent). Front-end-agnostic logic lives outside
   terse and explain *why*, not *what*.
 - Every change: add/extend tests, then `cargo test` + `cargo clippy` clean.
 - Tests use a scripted mock `LlmClient` (see `tests/agent_loop.rs`) — no network.
+  Any test that creates a session or opens global memory must call
+  `common::isolate_home()` first (`tests/common/mod.rs`), which points
+  `WORKSMITH_HOME` at a per-process scratch dir. Without it the test writes into
+  the developer's real `~/.worksmith/sessions/`.
   The TUI is smoke-tested under a PTY (`script -q /dev/null …`), since it needs a
   real terminal.
 - Don't edit `reference/` — those are gitignored TypeScript design clones (pi,

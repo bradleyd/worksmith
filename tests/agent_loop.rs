@@ -2,6 +2,8 @@
 //! and stuck-detection escalation, driven by a scripted mock LLM client (no
 //! network). This is the machinery M6 workers and the M7 supervisor extend.
 
+mod common;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -90,6 +92,7 @@ fn build_agent(client: MockClient, cwd: &std::path::Path, stuck_threshold: u32) 
 
 #[tokio::test]
 async fn validation_drives_replan_until_pass() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let session_path = dir.path().join("s.jsonl");
     let mut session = Session::create_at(&session_path, dir.path()).unwrap();
@@ -127,6 +130,7 @@ async fn validation_drives_replan_until_pass() {
 
 #[tokio::test]
 async fn validation_fails_after_retries_exhausted() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
 
@@ -158,6 +162,7 @@ async fn validation_fails_after_retries_exhausted() {
 
 #[tokio::test]
 async fn repeated_identical_calls_escalate_to_stuck() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
 
@@ -175,6 +180,7 @@ async fn repeated_identical_calls_escalate_to_stuck() {
 
 #[tokio::test]
 async fn compaction_summarizes_old_turns_when_over_limit() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
 
@@ -222,6 +228,7 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
 
 #[tokio::test]
 async fn truncated_tool_call_recovers_without_poisoning_history() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
 
@@ -256,6 +263,7 @@ async fn truncated_tool_call_recovers_without_poisoning_history() {
 
 #[tokio::test]
 async fn destructive_command_blocks_the_turn() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let canary = dir.path().join("canary.txt");
     std::fs::write(&canary, "alive").unwrap();
@@ -279,6 +287,7 @@ async fn destructive_command_blocks_the_turn() {
 
 #[tokio::test]
 async fn no_validator_completes_when_model_stops() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
 

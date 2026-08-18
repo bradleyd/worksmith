@@ -58,6 +58,8 @@ project knowledge (M5). MCP/plugins (M4) are still ahead.
   reduces it to readable text. Fetch needs no configuration.
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
+  `WORKSMITH_HOME` relocates the whole global directory (config, sessions,
+  global memory) — useful for throwaway runs and used by the test suite.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /
   `CLAUDE.md` discovery.
 - **Memory** (global + project SQLite, supersede semantics): FTS5 search ranked
@@ -165,3 +167,6 @@ Ctrl+C aborts the current turn; Ctrl+D exits.
 cargo test        # unit + streaming/tool-call integration tests
 cargo clippy
 ```
+
+Tests point `WORKSMITH_HOME` at a per-process scratch directory
+(`tests/common/mod.rs`), so a run never touches your real sessions or memory.

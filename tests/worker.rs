@@ -1,6 +1,8 @@
 //! Sub-worker manager: a spawned worker runs its task to completion and its
 //! status/result are observable. Driven by a mock LLM client (no network).
 
+mod common;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -88,6 +90,7 @@ fn started(mgr: &mut WorkerManager, task: &str) -> String {
 
 #[tokio::test]
 async fn worker_runs_task_to_completion() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     // Workers create their own session files under the global sessions dir, but
     // that's fine — we only assert on manager state here.
@@ -108,6 +111,7 @@ async fn worker_runs_task_to_completion() {
 
 #[tokio::test]
 async fn newly_finished_reports_once() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(template_agent(vec![done("all done")], dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
@@ -125,6 +129,7 @@ async fn newly_finished_reports_once() {
 
 #[tokio::test]
 async fn worker_records_changed_files() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(template_agent(
         vec![
@@ -146,6 +151,7 @@ async fn worker_records_changed_files() {
 
 #[tokio::test]
 async fn worker_respects_concurrency_cap() {
+    common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     // A worker whose mock never returns "done" (always a tool call) stays busy.
     let busy: Vec<Completion> = (0..50)
