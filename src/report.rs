@@ -35,7 +35,16 @@ pub fn worker_headline(w: &WorkerSummary) -> String {
         Some(reason) => format!(" · supervisor stopped it ({reason})"),
         None => String::new(),
     };
-    format!("{glyph} agent {} [{}]{}{}: {}", w.id, w.status.label(), changed, stopped, summary)
+    let empty = if w.did_nothing() { " · produced nothing" } else { "" };
+    format!(
+        "{glyph} agent {} [{}]{}{}{}: {}",
+        w.id,
+        w.status.label(),
+        changed,
+        stopped,
+        empty,
+        summary
+    )
 }
 
 /// What a worker actually produced, as the parent model should see it. Results
@@ -47,6 +56,15 @@ pub fn worker_block(w: &WorkerSummary) -> String {
     }
     if let Some(reason) = &w.escalation {
         out.push_str(&format!("\nstopped by supervisor: {reason}"));
+    }
+    // Say it plainly rather than leaving the parent to infer it from an absent
+    // file list. It judges what came back; this is part of what came back.
+    if w.did_nothing() {
+        out.push_str(
+            "\nWARNING: reported done but changed no files, made at most one tool call, and \
+             returned almost no text. Treat this result as unverified — the work may not have \
+             happened.",
+        );
     }
     let body = if w.result.trim().is_empty() { &w.last } else { &w.result };
     out.push_str(&format!("\n{}", truncate_chars(body, WORKER_REPORT_LIMIT)));
@@ -146,6 +164,36 @@ mod tests {
         let block = worker_block(&summary("w1", "dump everything", &huge));
         assert!(block.chars().count() < WORKER_REPORT_LIMIT + 200, "result must be capped");
         assert!(block.contains("truncated"));
+    }
+
+    #[test]
+    fn an_empty_result_is_flagged_but_honest_work_is_not() {
+        // Only the combination counts. Nothing here may assume what the work
+        // was — a research worker that changes no files is doing its job.
+        let mut w = summary("w1", "write draft-1.md", "");
+        w.changed.clear();
+        w.tool_calls = 1;
+        assert!(w.did_nothing(), "no files, one tool call, no text");
+        assert!(single_report(&w).contains("WARNING"), "the parent must be told");
+        assert!(worker_headline(&w).contains("produced nothing"));
+
+        // Answering a question changes no files and is perfectly good work.
+        let mut research = summary("w2", "where is retry configured?", &"x".repeat(400));
+        research.changed.clear();
+        research.tool_calls = 6;
+        assert!(!research.did_nothing(), "investigation is work");
+        assert!(!single_report(&research).contains("WARNING"));
+
+        // A short answer after real searching is still work.
+        let mut terse = summary("w3", "does the parser handle CRLF?", "Yes — parser.rs:88.");
+        terse.changed.clear();
+        terse.tool_calls = 5;
+        assert!(!terse.did_nothing(), "few words, but it looked");
+
+        // And a worker that wrote a file is never flagged, however quiet.
+        let mut wrote = summary("w4", "create the changelog", "");
+        wrote.tool_calls = 1;
+        assert!(!wrote.did_nothing(), "it changed a file");
     }
 
     #[test]

@@ -107,6 +107,31 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
     Ok(SpawnRequest { fanout, task: rest.trim().to_string(), model })
 }
 
+/// Is this a self-contained instruction, or the wreckage of a model that
+/// didn't write one?
+///
+/// The checks are deliberately about *form*, not subject matter — a worker's
+/// task can be about anything, so nothing here may assume what the work is.
+/// Two signals survive that constraint:
+///
+/// - **Elision.** A planner that writes `Read ... and write draft-1.md ...`
+///   has abbreviated instead of instructing. The worker that received exactly
+///   that ran one `ls` and reported success.
+/// - **Length.** Below a dozen characters there isn't an instruction there.
+///
+/// Duplicates are dropped by the caller for the same reason: N copies of one
+/// line is a planner that failed to divide anything.
+fn usable_subtask(task: &str) -> bool {
+    const MIN_CHARS: usize = 12;
+    if task.chars().count() < MIN_CHARS {
+        return false;
+    }
+    if task.contains("...") || task.contains('…') {
+        return false;
+    }
+    true
+}
+
 /// `TASK: do the thing` → `do the thing`, case-insensitively. `None` when the
 /// line isn't marked as a task at all.
 fn strip_task_marker(line: &str) -> Option<&str> {
@@ -245,7 +270,7 @@ pub fn parse_subtasks(text: &str, want: Option<usize>, max: usize) -> Result<Vec
         };
         // The pre-trim above can leave a stray `**` from bold markers.
         let rest = rest.trim_start_matches(['*', '`', ':', ' ']).trim();
-        if !rest.is_empty() {
+        if usable_subtask(rest) && !out.iter().any(|t| t == rest) {
             out.push(rest.to_string());
         }
     }
@@ -323,6 +348,41 @@ mod tests {
     }
 
     #[test]
+    fn elided_and_degenerate_subtasks_are_refused() {
+        // A planner answered with placeholders and three workers dutifully ran
+        // them. The checks are about form only — nothing here may assume the
+        // task is about newsletters, code, or anything else.
+        let elided = "TASK: Read ... and write draft-1.md ...\n\
+                      TASK: Read ... and write draft-2.md ...\n\
+                      TASK: Read ... and write draft-3.md ...";
+        assert!(
+            parse_subtasks(elided, Some(3), 4).is_err(),
+            "elided tasks must fall back, not spawn"
+        );
+
+        // Too short to be an instruction.
+        assert!(parse_subtasks("TASK: do it\nTASK: go\nTASK: x", Some(3), 4).is_err());
+
+        // N copies of one line is a planner that divided nothing.
+        let dupes = "TASK: Summarize the quarterly figures\n\
+                     TASK: Summarize the quarterly figures\n\
+                     TASK: Summarize the quarterly figures";
+        assert!(parse_subtasks(dupes, Some(3), 4).is_err(), "duplicates aren't a fan-out");
+
+        // A mix keeps the good ones but can't satisfy an explicit -n 3.
+        let mixed = "TASK: Audit the retry policy in the payments client\n\
+                     TASK: ...\n\
+                     TASK: Document the queue's backpressure behaviour";
+        assert!(parse_subtasks(mixed, Some(3), 4).is_err());
+        let kept = parse_subtasks(mixed, None, 4).unwrap();
+        assert_eq!(kept.len(), 2, "auto mode uses what survived: {kept:?}");
+
+        // And nothing above rejects an ordinary terse task.
+        let fine = "TASK: Fix the failing test in parser.rs";
+        assert_eq!(parse_subtasks(fine, Some(1), 4).unwrap().len(), 1);
+    }
+
+    #[test]
     fn planner_reasoning_is_never_spawned_as_work() {
         // A local 27B answered the planner with its own deliberation, and every
         // line of it became a worker's task. Unmarked prose must be discarded.
@@ -348,10 +408,16 @@ mod tests {
 
     #[test]
     fn task_markers_survive_the_formatting_models_add() {
-        for line in ["TASK: do it", "task: do it", "- TASK: do it", "2. TASK: do it",
-                     "**TASK:** do it"] {
+        let want = "run the whole test suite";
+        for line in [
+            "TASK: run the whole test suite",
+            "task: run the whole test suite",
+            "- TASK: run the whole test suite",
+            "2. TASK: run the whole test suite",
+            "**TASK:** run the whole test suite",
+        ] {
             let got = parse_subtasks(line, Some(1), 4).unwrap();
-            assert_eq!(got, vec!["do it".to_string()], "failed on {line:?}");
+            assert_eq!(got, vec![want.to_string()], "failed on {line:?}");
         }
     }
 
@@ -363,14 +429,15 @@ mod tests {
         assert_eq!(got, vec!["write about WAL", "write about FTS5", "write about JSON1"]);
 
         // Auto mode clamps to the worker cap.
-        let many = (1..=9).map(|i| format!("TASK: task {i}")).collect::<Vec<_>>().join("\n");
+        let many =
+            (1..=9).map(|i| format!("TASK: investigate subsystem {i}")).collect::<Vec<_>>().join("\n");
         assert_eq!(parse_subtasks(&many, None, 4).unwrap().len(), 4);
 
         // One line back from auto mode is a normal single spawn.
-        assert_eq!(parse_subtasks("TASK: just do it", None, 4).unwrap().len(), 1);
+        assert_eq!(parse_subtasks("TASK: just run the linter", None, 4).unwrap().len(), 1);
 
         // Explicit -n that the planner under-delivered on is unusable.
-        assert!(parse_subtasks("TASK: only one", Some(3), 4).is_err());
+        assert!(parse_subtasks("TASK: only one instruction here", Some(3), 4).is_err());
         assert!(parse_subtasks("   \n\n", None, 4).is_err(), "nothing usable");
     }
 

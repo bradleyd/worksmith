@@ -96,6 +96,25 @@ struct Worker {
     _handle: JoinHandle<()>,
 }
 
+impl WorkerSummary {
+    /// Did this worker finish without doing anything?
+    ///
+    /// "Done" is the model's claim, not a fact, and a worker that reports
+    /// success having changed nothing, investigated nothing, and said nothing
+    /// is claiming credit for an empty turn. One did exactly that: a single
+    /// `ls`, no output, status Done.
+    ///
+    /// All three conditions are required on purpose. Plenty of honest work
+    /// changes no files — answering a question, reading around a codebase — so
+    /// no single signal means failure. It's the combination that's empty.
+    pub fn did_nothing(&self) -> bool {
+        self.status == WorkerStatus::Done
+            && self.changed.is_empty()
+            && self.tool_calls <= 1
+            && self.result.trim().chars().count() < 200
+    }
+}
+
 impl Worker {
     fn summary(&self) -> WorkerSummary {
         let r = self.runtime.lock().unwrap();
