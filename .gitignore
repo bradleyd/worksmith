@@ -13,3 +13,6 @@ skills/book-writer/
 
 # env
 .env
+
+# local working copy of the bradleyd/homebrew-worksmith tap repo
+.tap/

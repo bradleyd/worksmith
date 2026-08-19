@@ -112,6 +112,28 @@ checks caught in milliseconds.
   into the prompt wholesale — memory is what was *decided*, knowledge is what the
   repo *says*.
 
+## Install
+
+**Homebrew** (macOS / Linux, no Rust toolchain needed):
+
+```sh
+brew tap bradleyd/worksmith
+brew install bradleyd/worksmith/worksmith
+```
+
+**Prebuilt binary:** grab the latest `worksmith-<version>-<target>.tar.gz`
+from the [releases](https://github.com/bradleyd/worksmith/releases), untar it,
+and put `worksmith` on your PATH.
+
+**From source** (needs a Rust toolchain):
+
+```sh
+git clone https://github.com/bradleyd/worksmith
+cd worksmith
+./install.sh          # release build → ~/.local/bin (on PATH)
+# ./install.sh --debug for a faster dev build
+```
+
 ## Quick start
 
 ```sh
@@ -120,10 +142,7 @@ mkdir -p ~/.worksmith
 cp config.example.toml ~/.worksmith/config.toml
 $EDITOR ~/.worksmith/config.toml     # pick a model; set your endpoint/keys
 
-# 2. Build + install to PATH (~/.local/bin)
-./install.sh          # or: ./install.sh --debug for a faster build
-
-# 3. Run — full-screen TUI (default in a real terminal)
+# 2. Run — full-screen TUI (default in a real terminal)
 worksmith
 
 # force the plain line REPL instead of the TUI
@@ -241,3 +260,12 @@ cargo clippy
 
 Tests point `WORKSMITH_HOME` at a per-process scratch directory
 (`tests/common/mod.rs`), so a run never touches your real sessions or memory.
+
+### Cutting a release
+
+1. Bump `version` in `Cargo.toml` (and `version` in the tap's formula,
+   `bradleyd/homebrew-worksmith` → `Formula/worksmith.rb`).
+2. Push; tag `v<version>` — the release workflow builds the macOS arm64 and
+   Linux x86_64 (musl static) binaries and attaches them to the GitHub release.
+3. Fill the formula's `sha256` values from the release artifacts and push the
+   tap. Users then get it with `brew upgrade`.
