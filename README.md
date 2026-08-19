@@ -114,7 +114,7 @@ checks caught in milliseconds.
 
 ## Install
 
-**Homebrew** (macOS / Linux, no Rust toolchain needed):
+**Homebrew** (macOS, no Rust toolchain needed):
 
 ```sh
 brew tap bradleyd/worksmith
