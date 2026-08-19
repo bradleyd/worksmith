@@ -80,6 +80,40 @@ Keep `validate` dependency-light (bash/grep/python3) so tasks run anywhere.
 
 ## Findings so far
 
+**2026-08, newsletter-judge in `workers` mode — a strong judge asserted
+compliance it had not checked.** Kimi K3 planning and judging, three
+deepseek-v4-flash workers drafting (~$0.05, ~16k generated tokens). The
+workers produced three complete 1500-2500 word newsletters and the judge
+produced a decision naming a winner with a reasoned rationale. It also wrote:
+
+> "All three drafts clear the checklist's pass/fail bar (all required sections,
+> concrete data, working hands-on code, a fair 'when to use it' section, no
+> topic repetition, and 1500-2500 words)."
+
+That was false. Two drafts contained a double hyphen — the skill's Critical
+Style Rule #1 — and one reused SQLite, already published as Dispatch #3. The
+task's own deterministic validator caught all three violations in
+milliseconds.
+
+A second lesson landed immediately after, at my own expense: the first version
+of this task's validator produced **six false failures out of seven**. It
+flagged `rsync --delete` and `-- SQL comment` inside fenced code blocks as
+prose-style violations, and called a logging issue a repeat of the
+observability issue because the word appeared in its opening paragraph. The
+drafts had done nothing wrong. A check that looks authoritative and measures
+the wrong thing is worse than no check, because it is believed. Prose rules now
+strip code blocks, and topic reuse is judged from the title.
+
+The model being over-trusted here was not a small one. It was a $3/$15-per-Mtok
+frontier model doing exactly the job it was asked to do, and it reported a
+verdict it had not verified. This is PLAN §0 in miniature: **the model's
+judgment is a proposal, the check is the gate** — and it argues that a reviewer
+stage should run deterministic rules *first* and use model judgment only for
+what rules cannot express (voice, argument quality, whether the alternative is
+genuinely simpler).
+
+
+
 **2026-08, qwen3.5-9b (OpenRouter), 7 tasks ×3, raw vs `--until` guided:**
 
 ```
