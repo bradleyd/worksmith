@@ -127,6 +127,11 @@ impl ThinkingMode {
     }
 }
 
+/// How many empty completions in a row to absorb with a nudge before calling
+/// the turn stuck. One is usually a thinking model overshooting its budget and
+/// it recovers when told to answer; a run of them is not going to.
+const MAX_EMPTY_COMPLETIONS: u32 = 2;
+
 /// Why the inner loop stopped.
 enum IdleReason {
     ModelDone,
@@ -344,6 +349,7 @@ impl Agent {
     ) -> Result<IdleReason> {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut nudged: HashSet<String> = HashSet::new();
+        let mut empty_completions = 0u32;
 
         for _step in 0..self.max_steps {
             if cancel.is_cancelled() {
@@ -426,7 +432,8 @@ impl Agent {
                     c.arguments = "{}".to_string();
                 }
             }
-            let assistant = Message::assistant(completion.content.clone(), stored_calls);
+            let assistant = Message::assistant(completion.content.clone(), stored_calls)
+                .with_trace(completion.reasoning.clone(), completion.finish_reason.clone());
             session.append_message(assistant)?;
 
             if let Some(text) = &completion.content
@@ -438,6 +445,37 @@ impl Agent {
             }
 
             if completion.tool_calls.is_empty() {
+                // Nothing at all came back: no text, no calls. A thinking model
+                // can spend its entire output budget deliberating and never
+                // reach an answer, which arrives here looking exactly like a
+                // finished turn. Scoring that as ModelDone ends the turn with an
+                // empty reply and no clue why — the failure that made a chapter
+                // review report "done" after 60 seconds of visible thinking.
+                let said_nothing = completion.content.as_deref().unwrap_or("").trim().is_empty();
+                if said_nothing {
+                    empty_completions += 1;
+                    if empty_completions > MAX_EMPTY_COMPLETIONS {
+                        return Ok(IdleReason::Stuck(if truncated {
+                            "the model spent its whole output budget reasoning and never \
+                             answered — raise max-tokens, or run with --fast / /fast"
+                                .to_string()
+                        } else {
+                            "the model returned an empty response".to_string()
+                        }));
+                    }
+                    let nudge = if truncated {
+                        "Your last response hit the output-token limit while still reasoning, \
+                         so nothing came back. Skip further deliberation: make the next tool \
+                         call, or give your answer directly, right now."
+                    } else {
+                        "Your last response was empty. Make a tool call or give your answer."
+                    };
+                    self.bus.emit(Event::Nudge {
+                        reason: nudge.to_string(),
+                    });
+                    session.append_message(Message::user(nudge))?;
+                    continue;
+                }
                 return Ok(IdleReason::ModelDone);
             }
 

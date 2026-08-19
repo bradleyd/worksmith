@@ -301,3 +301,77 @@ async fn no_validator_completes_when_model_stops() {
     assert!(matches!(result.outcome, TurnOutcome::Done));
     assert_eq!(result.text, "all done");
 }
+
+/// A completion that spent its whole output budget reasoning: thinking came
+/// back, an answer never did, and the provider says it was cut off.
+fn reasoning_only() -> Completion {
+    Completion {
+        content: None,
+        reasoning: Some("let me think about this at length...".into()),
+        tool_calls: vec![],
+        usage: Default::default(),
+        finish_reason: Some("length".into()),
+    }
+}
+
+#[tokio::test]
+async fn reasoning_only_completion_is_nudged_not_treated_as_done() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Budget exhausted mid-thought once, then a real answer after the nudge.
+    let client = MockClient::new(vec![reasoning_only(), done("here is the review")]);
+    let agent = build_agent(client, dir.path(), 3);
+
+    let result = agent
+        .run_turn(&mut session, "review it", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
+    assert_eq!(result.text, "here is the review", "the empty turn must not pass as the answer");
+}
+
+#[tokio::test]
+async fn a_model_that_never_answers_ends_stuck_not_done() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Nothing but reasoning, forever. Reporting "done" here is the bug: the
+    // turn ends with an empty answer and no sign that anything went wrong.
+    let client = MockClient::new(vec![reasoning_only(), reasoning_only(), reasoning_only()]);
+    let agent = build_agent(client, dir.path(), 3);
+
+    let result = agent
+        .run_turn(&mut session, "review it", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let TurnOutcome::Stuck(reason) = &result.outcome else {
+        panic!("outcome: {:?}", result.outcome);
+    };
+    assert!(reason.contains("max-tokens"), "the reason must name the fix: {reason}");
+}
+
+#[tokio::test]
+async fn the_reasoning_trace_and_finish_reason_are_persisted() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+
+    let client = MockClient::new(vec![reasoning_only(), done("here is the review")]);
+    let agent = build_agent(client, dir.path(), 3);
+    agent
+        .run_turn(&mut session, "review it", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // Diagnosing an empty turn from the transcript alone requires both: what
+    // the model was thinking, and whether it was cut off or chose to stop.
+    let log = std::fs::read_to_string(&path).unwrap();
+    assert!(log.contains("let me think about this at length"), "reasoning missing from {log}");
+    assert!(log.contains("\"finish_reason\":\"length\""), "finish_reason missing from {log}");
+}

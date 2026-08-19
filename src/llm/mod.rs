@@ -43,17 +43,29 @@ pub struct Message {
     /// Optional tool name (for `Role::Tool` messages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The reasoning the model emitted before this message, when the provider
+    /// exposed it. Recorded for the transcript only: `message_to_json` builds
+    /// the wire payload field by field, so this never goes back to the
+    /// provider. Without it, a turn that spends its whole budget thinking and
+    /// returns nothing leaves no trace of what it was thinking about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// The provider's `finish_reason` for the completion this message came
+    /// from. "length" on an empty message is the difference between "the model
+    /// was done" and "the model was cut off mid-thought".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None }
+        Self { role: Role::System, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None }
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None }
+        Self { role: Role::User, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None }
     }
     pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, content, tool_calls, tool_call_id: None, name: None }
+        Self { role: Role::Assistant, content, tool_calls, tool_call_id: None, name: None, reasoning: None, finish_reason: None }
     }
     pub fn tool_result(call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -62,7 +74,17 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: Some(call_id.into()),
             name: Some(name.into()),
+            reasoning: None,
+            finish_reason: None,
         }
+    }
+
+    /// Attach the provider's reasoning trace and finish reason. Transcript-only
+    /// metadata; it does not change what is sent back to the model.
+    pub fn with_trace(mut self, reasoning: Option<String>, finish_reason: Option<String>) -> Self {
+        self.reasoning = reasoning;
+        self.finish_reason = finish_reason;
+        self
     }
 }
 

@@ -44,7 +44,15 @@ impl LlmClient for ScriptedClient {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        let text = self.responses.lock().unwrap().pop_front().unwrap_or_default();
+        // An exhausted script means "past the scripted part" — the workers that
+        // run after the planner still need a real answer. Returning an empty
+        // string here makes the agent nudge for a non-empty reply and give up.
+        let text = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| "finished".to_string());
         Ok(Completion { content: Some(text), ..Default::default() })
     }
 }

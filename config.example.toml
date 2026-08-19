@@ -17,7 +17,7 @@ temperature = 0.7
 # the call's arguments, so a low cap truncates the call mid-JSON. It also has to
 # cover reasoning — a thinking model can spend the whole budget deliberating and
 # return nothing at all.
-max-tokens = 4096
+max-tokens = 8192
 
 # --- Providers -------------------------------------------------------------
 
