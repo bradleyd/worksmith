@@ -120,8 +120,8 @@ mkdir -p ~/.worksmith
 cp config.example.toml ~/.worksmith/config.toml
 $EDITOR ~/.worksmith/config.toml     # pick a model; set your endpoint/keys
 
-# 2. Build
-cargo build --release
+# 2. Build + install to PATH (~/.local/bin)
+./install.sh          # or: ./install.sh --debug for a faster build
 
 # 3. Run — full-screen TUI (default in a real terminal)
 worksmith

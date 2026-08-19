@@ -1,0 +1,40 @@
+# On a `v*` tag: build release binaries for macOS (arm64 + x86_64) and
+# attach them to the GitHub release. The homebrew-worksmith tap's formula
+# points at these artifacts.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tar -czf "worksmith-${version}-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" worksmith
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: worksmith-*.tar.gz
+          generate_release_notes: true
