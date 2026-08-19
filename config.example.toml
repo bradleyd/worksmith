@@ -1,29 +1,28 @@
 # Worksmith configuration — copy to ~/.worksmith/config.toml (global) and/or
 # <project>/.worksmith/config.toml (project overrides global, field by field).
+#
+# Unknown keys are a hard error, on purpose: `[agent]` (the loop) and `[agents]`
+# (the workers) are one character apart, and a silently ignored section once
+# cost an entire dogfooding session.
+#
+# WORKSMITH_HOME relocates everything global — config, sessions, memory, and the
+# skills directories — which is how you get a throwaway profile or a
+# reproducible run.
 
 # Default model as "provider/model" (or a bare model name if exactly one
 # provider is configured). Override per-run with --model.
-model = "vllm/Qwen/Qwen3-32B"
+model = "openrouter/qwen/qwen3.8-27b"
 temperature = 0.7
 # Keep this generous: tool calls that write whole files put the file content in
-# the call's arguments, so a low cap truncates the call mid-JSON.
+# the call's arguments, so a low cap truncates the call mid-JSON. It also has to
+# cover reasoning — a thinking model can spend the whole budget deliberating and
+# return nothing at all.
 max-tokens = 4096
 
 # --- Providers -------------------------------------------------------------
-# vLLM on RunPod (L40S). Start vLLM with tool-calling enabled, e.g.:
-#   vllm serve Qwen/Qwen3-32B \
-#     --enable-auto-tool-choice --tool-call-parser hermes
-[providers.vllm]
-type = "openai-compat"
-base-url = "https://<your-pod-id>-8000.proxy.runpod.net/v1"
-api-key-env = "VLLM_API_KEY"     # optional; omit if the endpoint needs no key
 
-# A local vLLM / llama.cpp / LM Studio server (no key needed):
-[providers.local]
-type = "openai-compat"
-base-url = "http://localhost:8000/v1"
-
-# OpenRouter (many hosted models behind one key):
+# OpenRouter — many hosted models behind one key. The most practical way to mix
+# a strong judge with cheap workers, since both live behind the same endpoint.
 [providers.openrouter]
 type = "openai-compat"
 base-url = "https://openrouter.ai/api/v1"
@@ -34,6 +33,28 @@ api-key-env = "OPENROUTER_API_KEY"
 # chat_template_kwargs outright.
 # thinking-param = "reasoning"
 
+# Self-hosted vLLM. Start it with tool-calling enabled or nothing works:
+#   vllm serve Qwen/Qwen3.5-9B \
+#     --enable-auto-tool-choice --tool-call-parser hermes \
+#     --enable-prefix-caching
+[providers.vllm]
+type = "openai-compat"
+base-url = "http://localhost:8000/v1"
+# api-key-env = "VLLM_API_KEY"   # omit entirely if the endpoint needs no key
+# thinking-param = "chat-template"
+
+# A remote vLLM (RunPod and friends) is the same thing with a different URL:
+# [providers.runpod]
+# type = "openai-compat"
+# base-url = "https://<your-pod-id>-8000.proxy.runpod.net/v1"
+# api-key-env = "RUNPOD_API_KEY"
+
+# Any other OpenAI-compatible server — llama.cpp, LM Studio, oMLX, Ollama:
+# [providers.local]
+# type = "openai-compat"
+# base-url = "http://127.0.0.1:8000/v1"
+# api-key-env = "LOCAL_API_KEY"
+
 # --- Agent -----------------------------------------------------------------
 [agent]
 max-steps = 50              # max model<->tool iterations per turn
@@ -43,19 +64,31 @@ stuck-threshold = 3         # identical repeated tool calls before a nudge
 context-limit = 128000      # approx model context (tokens); compact at 75%
 keep-recent-turns = 6       # turns kept verbatim when compacting
 # Does the model reason before answering? Unset leaves the provider's default.
-# "off" is fast mode ("feeling lucky"): much cheaper and quicker — on a small
-# Qwen the same question cost 101 completion tokens thinking vs 13 without —
-# with the validation loop expected to catch what deliberation would have.
+# "off" is fast mode ("feeling lucky"): measured at 101 completion tokens with
+# thinking vs 13 without for the same question. It's a reliability lever too —
+# a small model with thinking on can burn its whole max-tokens budget
+# deliberating and return an empty answer.
 # Override per run with --fast / --think, or toggle live with /fast.
 # thinking = "off"
 
+# --- Workers ----------------------------------------------------------------
 [agents]
-max = 4                     # max concurrently-running spawned workers (/spawn)
-# Model spawned workers run on. Unset = the session's model. This is the cheap
-# half of a cheap-workers/smart-parent split: several small models draft in
-# parallel, the session's stronger model judges the results.
-#   model = "openrouter/qwen/qwen3.5-9b"
-# Override per spawn with `/spawn --model <provider/model> <task>`.
+max = 4                     # max concurrently-running spawned workers
+# Model the workers run on. Unset = the session's model. This is the cheap half
+# of a cheap-workers/smart-parent split: small models draft in parallel, the
+# session's stronger model judges what comes back.
+#
+# Measured on real work (three newsletter drafts plus a reasoned decision, all
+# passing a written rubric): deepseek-v4-flash workers under a kimi-k3 session,
+# about $0.05 and ten minutes.
+#   model = "openrouter/deepseek/deepseek-v4-flash-0731"
+# Override per spawn with `/spawn --worker-model <provider/model> <task>`, or
+# `worksmith spawn --worker-model ...` headlessly.
+#
+# Careful running two models on ONE machine: a resident 27B plus anything else
+# will exhaust unified memory. Straddle instead (local workers, hosted judge),
+# or use `worksmith spawn --no-synthesis` and swap models between commands.
+
 # The supervisor watches each worker's event stream and nudges or stops it.
 #   off   — no watching
 #   rules — deterministic detection (default)
@@ -65,19 +98,21 @@ stuck-timeout = 120         # seconds with no worker event before a nudge
 max-nudges = 3              # nudges before the supervisor stops the worker
 repeat-threshold = 4        # identical tool calls (whole run) before a nudge
 # token-budget = 200000     # completion tokens a worker may spend before it's stopped
+
 # May a bare `/spawn <task>` be split across several workers? "auto" asks a
 # cheap planner call (it answers "one worker" for most tasks); "off" always
 # spawns one and leaves fan-out to an explicit `-n N` / `--each-files`.
 fanout = "auto"
-# After a fan-out group all finishes, run one more turn that combines their
-# results into a single answer. Set false to just have the results reported.
+# After a fan-out group finishes, run one more turn that combines their results
+# into a single answer. Set false to just have the results reported.
 synthesize = true
 
 [tools]
 bash-timeout-secs = 120
 
-# --- Web search -------------------------------------------------------------
-# Needed only for `web` search; `web` fetch (read a URL) works without it.
+# --- Web --------------------------------------------------------------------
+# Needed only for `web` search; `web` fetch (read a URL) works without any of
+# this.
 #   brave   — https://api.search.brave.com (needs a key)
 #   tavily  — https://api.tavily.com       (needs a key)
 #   searxng — your own instance            (needs base-url, no key)
