@@ -30,7 +30,9 @@ api-key-env = "OPENROUTER_API_KEY"
 # How this provider spells "don't think". Guessed from the URL when unset:
 # hosted gateways get `reasoning`, self-hosted stacks get `chat-template`.
 # Sending the wrong one is worse than sending nothing — OpenRouter rejects
-# chat_template_kwargs outright.
+# chat_template_kwargs outright. The guess only looks at the hostname, so set it
+# explicitly for anything behind a proxy or a vanity domain; an HTTP 400 on a
+# thinking request names the field that was sent and where that choice came from.
 # thinking-param = "reasoning"
 
 # Self-hosted vLLM. Start it with tool-calling enabled or nothing works:
@@ -63,12 +65,21 @@ stuck-threshold = 3         # identical repeated tool calls before a nudge
 # validate = "cargo test"   # default success check (--until overrides per-run)
 context-limit = 128000      # approx model context (tokens); compact at 75%
 keep-recent-turns = 6       # turns kept verbatim when compacting
-# Does the model reason before answering? Unset leaves the provider's default.
-# "off" is fast mode ("feeling lucky"): measured at 101 completion tokens with
-# thinking vs 13 without for the same question. It's a reliability lever too —
-# a small model with thinking on can burn its whole max-tokens budget
-# deliberating and return an empty answer.
-# Override per run with --fast / --think, or toggle live with /fast.
+# How much does the model reason before answering? Unset leaves the provider's
+# default. "off" is fast mode ("feeling lucky"): measured at 101 completion
+# tokens with thinking vs 13 without for the same question. It's a reliability
+# lever too — a small model with thinking on has no sense of a budget and will
+# fill whatever max-tokens allows, reaching the cap without ever answering
+# (observed: three turns of ~8k reasoning tokens each, zero output).
+#
+# A number is the setting in between: reasoning gets its OWN cap, so the rest of
+# max-tokens is still there for an answer. Only providers that speak the
+# `reasoning` dialect can express this (OpenRouter, OpenAI) — on a chat-template
+# provider (vLLM, llama.cpp) a budget degrades to plain "on" and says so.
+#   thinking = 2000
+#
+# Override per run with --fast / --think [budget], or live with /fast and
+# /think [on|off|auto|<tokens>].
 # thinking = "off"
 
 # --- Workers ----------------------------------------------------------------

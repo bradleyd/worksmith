@@ -8,7 +8,10 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{ChatRequest, Completion, LlmClient, Message, Role, StreamEvent, ToolCall, Usage};
+use super::{
+    ChatRequest, Completion, DialectSource, LlmClient, Message, Role, StreamEvent, Thinking,
+    ToolCall, Usage,
+};
 
 /// OpenAI-compatible chat client.
 pub struct OpenAiCompatClient {
@@ -16,6 +19,9 @@ pub struct OpenAiCompatClient {
     base_url: String,
     api_key: Option<String>,
     thinking_dialect: crate::llm::ThinkingDialect,
+    dialect_source: DialectSource,
+    /// A dropped reasoning budget is worth saying once, not once per step.
+    warned_no_budget: std::sync::atomic::AtomicBool,
 }
 
 impl OpenAiCompatClient {
@@ -24,13 +30,30 @@ impl OpenAiCompatClient {
         let base_url = base_url.into();
         let base_url = base_url.trim_end_matches('/').to_string();
         let thinking_dialect = crate::llm::ThinkingDialect::guess_from_url(&base_url);
-        Self { http, base_url, api_key, thinking_dialect }
+        Self {
+            http,
+            base_url,
+            api_key,
+            thinking_dialect,
+            dialect_source: DialectSource::Guessed,
+            warned_no_budget: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Override the guessed dialect (config `thinking-param`).
-    pub fn with_thinking_dialect(mut self, d: crate::llm::ThinkingDialect) -> Self {
+    pub fn with_thinking_dialect(
+        mut self,
+        d: crate::llm::ThinkingDialect,
+        source: DialectSource,
+    ) -> Self {
         self.thinking_dialect = d;
+        self.dialect_source = source;
         self
+    }
+
+    /// The resolved dialect and where it came from, for status display.
+    pub fn dialect(&self) -> (crate::llm::ThinkingDialect, DialectSource) {
+        (self.thinking_dialect, self.dialect_source)
     }
 
     fn endpoint(&self) -> String {
@@ -46,6 +69,23 @@ impl LlmClient for OpenAiCompatClient {
         sink: mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
+        // A reasoning budget this dialect cannot express is dropped, not
+        // silently downgraded to plain "think as long as you like" — say so once
+        // so the setting isn't trusted to be doing something it isn't.
+        if let Some(Thinking::Budget(n)) = req.thinking
+            && !self.thinking_dialect.supports_budget()
+            && !self.warned_no_budget.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = sink
+                .send(StreamEvent::Warning(format!(
+                    "this provider speaks `{}` ({}), which has no reasoning budget — \
+                     the {n}-token budget is ignored and thinking is simply on",
+                    self.thinking_dialect.field(),
+                    self.dialect_source.describe(),
+                )))
+                .await;
+        }
+
         let body = build_request_body(&req, self.thinking_dialect);
 
         let mut builder = self.http.post(self.endpoint()).json(&body);
@@ -57,6 +97,23 @@ impl LlmClient for OpenAiCompatClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
+            // A 400 right after we volunteered a thinking field is nearly always
+            // the wrong spelling for this provider — and if the spelling was a
+            // guess off the hostname, the fix is one config line the user has no
+            // reason to know about. Say which field we sent and where it came from.
+            if status == reqwest::StatusCode::BAD_REQUEST && req.thinking.is_some() {
+                bail!(
+                    "LLM HTTP {status}: {text}\n\nworksmith sent a `{}` field ({}). If this \
+                     provider wants the other spelling, set `thinking-param` to \"{}\" under \
+                     its [providers.*] section.",
+                    self.thinking_dialect.field(),
+                    self.dialect_source.describe(),
+                    match self.thinking_dialect {
+                        crate::llm::ThinkingDialect::Reasoning => "chat-template",
+                        crate::llm::ThinkingDialect::ChatTemplate => "reasoning",
+                    },
+                );
+            }
             bail!("LLM HTTP {status}: {text}");
         }
 
@@ -155,10 +212,19 @@ fn build_request_body(req: &ChatRequest, dialect: crate::llm::ThinkingDialect) -
     if let Some(think) = req.thinking {
         match dialect {
             crate::llm::ThinkingDialect::Reasoning => {
-                body["reasoning"] = serde_json::json!({ "enabled": think });
+                // A budget is the useful setting here: `max_tokens` caps the
+                // reasoning alone, leaving the rest of the request's budget for
+                // an actual answer. OpenRouter converts it to an effort level
+                // for models that only understand effort.
+                body["reasoning"] = match think.budget() {
+                    Some(n) => serde_json::json!({ "max_tokens": n }),
+                    None => serde_json::json!({ "enabled": think.enabled() }),
+                };
             }
             crate::llm::ThinkingDialect::ChatTemplate => {
-                body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": think });
+                // Bool only: a budget degrades to plain on (and `stream` warns).
+                body["chat_template_kwargs"] =
+                    serde_json::json!({ "enable_thinking": think.enabled() });
             }
         }
     }
@@ -259,6 +325,15 @@ struct UsageResp {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
+    /// OpenAI-style breakdown; absent on servers that don't report it.
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
 }
 
 #[derive(Default)]
@@ -298,6 +373,10 @@ impl Accumulator {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
+                reasoning_tokens: u
+                    .completion_tokens_details
+                    .map(|d| d.reasoning_tokens)
+                    .unwrap_or(0),
             };
             let _ = sink.send(StreamEvent::Usage(self.usage)).await;
         }
@@ -372,11 +451,22 @@ impl Accumulator {
         let content = if self.content.is_empty() { None } else { Some(self.content) };
         let reasoning = if self.reasoning.is_empty() { None } else { Some(self.reasoning) };
 
+        // Not every server breaks reasoning out of `completion_tokens` (vLLM
+        // generally doesn't). An estimate beats a zero here: this number is the
+        // whole point of the display, and "0" on a turn that visibly thought for
+        // a minute reads as "reasoning is off".
+        let mut usage = self.usage;
+        if usage.reasoning_tokens == 0
+            && let Some(r) = &reasoning
+        {
+            usage.reasoning_tokens = (r.len() / 4) as u32;
+        }
+
         Completion {
             content,
             reasoning,
             tool_calls,
-            usage: self.usage,
+            usage,
             finish_reason: self.finish_reason,
         }
     }
@@ -385,9 +475,9 @@ impl Accumulator {
 #[cfg(test)]
 mod thinking_tests {
     use super::*;
-    use crate::llm::ThinkingDialect;
+    use crate::llm::{Thinking, ThinkingDialect};
 
-    fn req(thinking: Option<bool>) -> ChatRequest {
+    fn req(thinking: Option<Thinking>) -> ChatRequest {
         ChatRequest {
             model: "m".into(),
             messages: vec![],
@@ -408,13 +498,31 @@ mod thinking_tests {
 
     #[test]
     fn each_provider_gets_its_own_spelling() {
-        let b = build_request_body(&req(Some(false)), ThinkingDialect::Reasoning);
+        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::Reasoning);
         assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}));
         assert!(b.get("chat_template_kwargs").is_none(), "OpenRouter rejects this field");
 
-        let b = build_request_body(&req(Some(false)), ThinkingDialect::ChatTemplate);
+        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::ChatTemplate);
         assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": false}));
         assert!(b.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn a_budget_caps_reasoning_where_the_dialect_supports_it() {
+        // The point of a budget: reasoning gets its own ceiling, so it cannot
+        // eat all of max_tokens and leave nothing for the answer.
+        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::Reasoning);
+        assert_eq!(b["reasoning"], serde_json::json!({"max_tokens": 2000}));
+    }
+
+    #[test]
+    fn a_budget_degrades_to_plain_on_where_it_cannot_be_expressed() {
+        // enable_thinking is a bool; there is nowhere to put a number. The
+        // client warns rather than letting the setting look effective.
+        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::ChatTemplate);
+        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
+        assert!(!ThinkingDialect::ChatTemplate.supports_budget());
+        assert!(ThinkingDialect::Reasoning.supports_budget());
     }
 
     #[test]

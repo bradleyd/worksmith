@@ -122,10 +122,23 @@ pub struct AgentConfig {
     pub context_limit: Option<usize>,
     /// How many recent user turns to keep verbatim when compacting.
     pub keep_recent_turns: Option<usize>,
-    /// `on` | `off` — whether the model reasons before answering. Unset leaves
-    /// the provider's default. `off` is fast mode: cheaper and quicker, with
-    /// the validation loop expected to catch what deliberation would have.
-    pub thinking: Option<String>,
+    /// `on` | `off` | a token budget — how much the model reasons before
+    /// answering. Unset leaves the provider's default. `off` is fast mode:
+    /// cheaper and quicker, with the validation loop expected to catch what
+    /// deliberation would have. A number is the middle setting: reasoning gets
+    /// its own cap so it cannot consume all of `max-tokens` and leave nothing
+    /// for the answer.
+    pub thinking: Option<ThinkingSetting>,
+}
+
+/// `thinking = "off"`, `thinking = "on"`, or `thinking = 2000`. TOML gives us
+/// either a string or an integer, so accept both rather than making the budget
+/// a quoted number.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ThinkingSetting {
+    Budget(u32),
+    Mode(String),
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -225,14 +238,23 @@ impl Config {
         self.agent.keep_recent_turns.unwrap_or(6)
     }
 
-    /// `Some(false)` = don't think. `None` = leave the provider alone.
-    pub fn thinking(&self) -> Option<bool> {
-        match self.agent.thinking.as_deref().map(str::trim) {
-            Some(v) if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("false") => {
-                Some(false)
+    /// `None` = leave the provider alone (send no thinking field at all).
+    pub fn thinking(&self) -> Option<crate::llm::Thinking> {
+        use crate::llm::Thinking;
+        match self.agent.thinking.as_ref()? {
+            ThinkingSetting::Budget(n) if *n > 0 => Some(Thinking::Budget(*n)),
+            ThinkingSetting::Budget(_) => Some(Thinking::Off),
+            ThinkingSetting::Mode(v) => {
+                let v = v.trim();
+                if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("false") {
+                    Some(Thinking::Off)
+                } else if v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true") {
+                    Some(Thinking::On)
+                } else {
+                    // A bare number in quotes is still a budget.
+                    v.parse::<u32>().ok().filter(|n| *n > 0).map(Thinking::Budget)
+                }
             }
-            Some(v) if v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true") => Some(true),
-            _ => None,
         }
     }
 

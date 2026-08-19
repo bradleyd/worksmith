@@ -68,9 +68,18 @@ struct Args {
     #[arg(long, global = true)]
     fast: bool,
 
-    /// Force thinking on, overriding `agent.thinking = "off"` in config.
-    #[arg(long, global = true, conflicts_with = "fast")]
-    think: bool,
+    /// Force thinking on, overriding `agent.thinking` in config. Takes an
+    /// optional token budget (`--think 2000`), which caps the reasoning alone so
+    /// it cannot consume all of `max-tokens` and leave nothing for the answer.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "fast",
+        num_args = 0..=1,
+        default_missing_value = "on",
+        value_name = "on|off|TOKENS"
+    )]
+    think: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -167,13 +176,7 @@ async fn run(args: Args) -> Result<()> {
     };
 
     // --fast / --think beat the configured default.
-    let thinking = if args.fast {
-        Some(false)
-    } else if args.think {
-        Some(true)
-    } else {
-        config.thinking()
-    };
+    let thinking = resolve_thinking(&args, &config)?;
     let agent = Agent::new(
         client,
         registry,
@@ -307,13 +310,7 @@ async fn run_spawn(
         config.keep_recent_turns(),
         tool_ctx,
     )
-    .with_thinking(if args.fast {
-        Some(false)
-    } else if args.think {
-        Some(true)
-    } else {
-        config.thinking()
-    }));
+    .with_thinking(resolve_thinking(args, config)?));
 
     let mem = project_store(cwd);
     let system = build_worker_prompt(cwd, &mem);
@@ -387,6 +384,8 @@ async fn run_spawn(
         prompt_tokens: 0,
         completion_tokens: worker_tokens,
         total_tokens: worker_tokens,
+        reasoning_tokens: 0,
+        finish_reason: None,
     });
 
     let group = worksmith::report::GroupAcc {
@@ -1198,4 +1197,33 @@ fn truncate(s: &str, max: usize) -> String {
         let cut: String = s.chars().take(max).collect();
         format!("{cut}…")
     }
+}
+
+/// `--fast` / `--think [budget]` beat the configured default. `--think` with no
+/// value means plain on; with a number it caps the reasoning alone, leaving the
+/// rest of `max-tokens` for an answer.
+fn resolve_thinking(
+    args: &Args,
+    config: &Config,
+) -> anyhow::Result<Option<worksmith::llm::Thinking>> {
+    use worksmith::llm::Thinking;
+    if args.fast {
+        return Ok(Some(Thinking::Off));
+    }
+    let Some(v) = args.think.as_deref().map(str::trim) else {
+        return Ok(config.thinking());
+    };
+    if v.eq_ignore_ascii_case("on") {
+        return Ok(Some(Thinking::On));
+    }
+    if v.eq_ignore_ascii_case("off") {
+        return Ok(Some(Thinking::Off));
+    }
+    let budget = v
+        .strip_suffix(['k', 'K'])
+        .map(|h| h.trim().parse::<f32>().ok().map(|f| (f * 1000.0) as u32))
+        .unwrap_or_else(|| v.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| anyhow::anyhow!("--think expects on, off, or a token budget (got `{v}`)"))?;
+    Ok(Some(Thinking::Budget(budget)))
 }

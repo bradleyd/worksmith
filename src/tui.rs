@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, TurnResult};
 use crate::event::{Event, EventBus};
+use crate::llm::Thinking;
 use crate::memory::{MemoryStore, Scope};
 use crate::prompt::{build_system_prompt, build_worker_prompt};
 use crate::session::Session;
@@ -76,7 +77,7 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 /// Slash commands offered by Tab-completion.
 const COMMANDS: &[&str] = &[
     "/help", "/new", "/compact", "/memory", "/knowledge", "/skill", "/spawn", "/agents",
-    "/validate", "/fast", "/quit",
+    "/validate", "/fast", "/think", "/quit",
 ];
 
 /// Active Tab-completion state (candidates for the current token).
@@ -107,6 +108,14 @@ struct App {
     model: String,
     context_limit: usize,
     last_prompt_tokens: u32,
+    /// Reasoning tokens the last completion spent. The number that explains a
+    /// long, silent step — without it, "thinking" is just an animation.
+    last_reasoning_tokens: u32,
+    /// Reasoning streamed so far in the current step, so the count climbs live
+    /// instead of only appearing once the step is over.
+    step_reasoning_chars: usize,
+    /// `Some("length")` means the last completion was cut off mid-output.
+    last_finish_reason: Option<String>,
     total_out_tokens: u64,
     validate_cmd: Option<String>,
     status: String,
@@ -126,7 +135,9 @@ struct App {
     agents_running: usize,
     agents_queued: usize,
     /// Fast mode: the model answers without a reasoning pass.
-    fast: bool,
+    /// Thinking mode as shown in the footer: `off`, `on`, or a budget like `2k`.
+    /// `None` means the provider's default, which we don't claim to know.
+    think_label: Option<String>,
     /// `agents.fanout = "auto"` — bare `/spawn` may fan out on its own.
     fanout_auto: bool,
     /// `agents.synthesize` — after a fan-out group reports back, run a turn
@@ -155,6 +166,9 @@ impl App {
             model,
             context_limit,
             last_prompt_tokens: 0,
+            last_reasoning_tokens: 0,
+            step_reasoning_chars: 0,
+            last_finish_reason: None,
             total_out_tokens: 0,
             validate_cmd,
             status: "/help for keys and commands".into(),
@@ -169,7 +183,7 @@ impl App {
             turn_start: None,
             agents_running: 0,
             agents_queued: 0,
-            fast: false,
+            think_label: None,
             fanout_auto: true,
             synthesize: true,
             pending_fanout: None,
@@ -362,6 +376,7 @@ impl App {
                 self.cur_thinking = None;
             }
             Event::Thinking { text } => {
+                self.step_reasoning_chars += text.len();
                 match self.cur_thinking {
                     Some(i) => self.items[i].text.push_str(&text),
                     None => {
@@ -410,10 +425,20 @@ impl App {
                     format!("⟲ compacted context: {messages_before} → {messages_after} messages"),
                 );
             }
-            Event::Usage { prompt_tokens, completion_tokens, .. } => {
+            Event::Usage {
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                finish_reason,
+                ..
+            } => {
                 self.last_prompt_tokens = prompt_tokens;
                 self.total_out_tokens += completion_tokens as u64;
+                self.last_reasoning_tokens = reasoning_tokens;
+                self.step_reasoning_chars = 0;
+                self.last_finish_reason = finish_reason;
             }
+            Event::Warning { message } => self.push(Kind::Notice, format!("⚠ {message}")),
             Event::Error { message } => self.push(Kind::Error, message),
             Event::SessionStarted { .. } | Event::TurnComplete { .. } => {}
         }
@@ -519,7 +544,7 @@ async fn run_loop(
 
     let mut app = App::new(model, context_limit, validate_cmd);
     app.fanout_auto = fanout_auto;
-    app.fast = agent.thinking_mode().get() == Some(false);
+    app.think_label = agent.thinking_mode().label();
     app.synthesize = synthesize;
     let mut bus_rx = bus.subscribe();
     // Option so we can drop the input reader while an external editor owns the tty.
@@ -932,6 +957,7 @@ async fn handle_command(
                  commands: /new /compact /memory [search|extract|pending|approve] \
                  /knowledge [index|search] /skill [name] /validate <cmd|off> \
                  /fast [on|off|auto] \
+                 /think [on|off|auto|<tokens>] \
                  /spawn [-n N | --each-files <regex>] [--model <spec>] <task> \
                  /agents [kill|show|nudge <id> | drop-queued] /quit   @path includes a file"
                     .to_string(),
@@ -1019,8 +1045,8 @@ async fn handle_command(
             let mode = agent.thinking_mode();
             let rest: Vec<&str> = parts.collect();
             match rest.first().copied() {
-                Some("on") => mode.set(Some(false)),
-                Some("off") => mode.set(Some(true)),
+                Some("on") => mode.set(Some(Thinking::Off)),
+                Some("off") => mode.set(Some(Thinking::On)),
                 Some("auto") => mode.set(None),
                 Some(other) => {
                     app.push(Kind::Error, format!("usage: /fast [on|off|auto] (got {other})"));
@@ -1030,13 +1056,47 @@ async fn handle_command(
                     mode.toggle_fast();
                 }
             }
-            app.fast = mode.get() == Some(false);
+            app.think_label = mode.label();
             let msg = match mode.get() {
-                Some(false) => "fast mode on — answering without thinking first",
-                Some(true) => "fast mode off — thinking before answering",
-                None => "thinking left to the provider's default",
+                Some(Thinking::Off) => "fast mode on — answering without thinking first".to_string(),
+                Some(Thinking::On) => "fast mode off — thinking before answering".to_string(),
+                Some(Thinking::Budget(n)) => format!("thinking capped at {n} tokens"),
+                None => "thinking left to the provider's default".to_string(),
             };
-            app.push(Kind::Notice, msg.to_string());
+            app.push(Kind::Notice, msg);
+        }
+        "think" => {
+            let mode = agent.thinking_mode();
+            let rest: Vec<&str> = parts.collect();
+            // A budget is the setting between "as long as it likes" and "not at
+            // all": the reasoning gets its own cap, so it can't eat the whole
+            // output budget and leave nothing for an answer.
+            let set = match rest.first().copied() {
+                None | Some("on") => Some(Thinking::On),
+                Some("off") => Some(Thinking::Off),
+                Some("auto") => None,
+                Some(n) => match parse_budget(n) {
+                    Some(n) => Some(Thinking::Budget(n)),
+                    None => {
+                        app.push(
+                            Kind::Error,
+                            format!("usage: /think [on|off|auto|<tokens>] (got {n})"),
+                        );
+                        return Ok(true);
+                    }
+                },
+            };
+            mode.set(set);
+            app.think_label = mode.label();
+            let msg = match set {
+                Some(Thinking::Off) => "thinking off — answering directly".to_string(),
+                Some(Thinking::On) => "thinking on, uncapped".to_string(),
+                Some(Thinking::Budget(n)) => format!(
+                    "thinking capped at {n} tokens — the rest of max-tokens is left for the answer"
+                ),
+                None => "thinking left to the provider's default".to_string(),
+            };
+            app.push(Kind::Notice, msg);
         }
         "validate" => {
             let rest: Vec<&str> = parts.collect();
@@ -1564,6 +1624,7 @@ fn arg_completions(
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
+        "think" if prev == 1 => &["on", "off", "auto", "2000"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
             1 => &[
@@ -1872,12 +1933,38 @@ fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width:
     }
 }
 
+/// `7900` -> `7.9k`. The footer has room for a number, not a paragraph.
+fn compact_tokens(n: u32) -> String {
+    if n >= 1000 { format!("{:.1}k", n as f32 / 1000.0) } else { n.to_string() }
+}
+
+/// Accept `2000` or `2k` for a reasoning budget.
+fn parse_budget(s: &str) -> Option<u32> {
+    let s = s.trim();
+    match s.strip_suffix(['k', 'K']) {
+        Some(head) => head.trim().parse::<f32>().ok().map(|v| (v * 1000.0) as u32),
+        None => s.parse::<u32>().ok(),
+    }
+    .filter(|n| *n > 0)
+}
+
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let pct = (app.last_prompt_tokens as usize * 100)
         .checked_div(app.context_limit)
         .unwrap_or(0)
         .min(999);
-    let fast = if app.fast { "  ⚡fast" } else { "" };
+    // Reasoning spend: the live estimate while a step streams, the provider's
+    // reported number once it lands. A step that thinks for a minute and says
+    // nothing is otherwise indistinguishable from one that is merely slow.
+    let live = (app.step_reasoning_chars / 4) as u32;
+    let reasoning = live.max(app.last_reasoning_tokens);
+    let reasoning = if reasoning > 0 { format!("  ↻{}", compact_tokens(reasoning)) } else { String::new() };
+    // "length" means the model was cut off rather than finished.
+    let cut = if app.last_finish_reason.as_deref() == Some("length") { "  ⚠cut" } else { "" };
+    let fast = match &app.think_label {
+        Some(l) => format!("  think:{l}"),
+        None => String::new(),
+    };
     let agents = if app.agents_running > 0 || app.agents_queued > 0 {
         let queued =
             if app.agents_queued > 0 { format!(" · {} queued", app.agents_queued) } else { String::new() };
@@ -1885,7 +1972,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
-    let tail = format!("{fast}{agents}");
+    let tail = format!("{reasoning}{cut}{fast}{agents}");
     let left = format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail
@@ -1950,10 +2037,61 @@ mod tests {
     #[test]
     fn usage_updates_footer_counters() {
         let mut a = app();
-        a.apply_event(Event::Usage { prompt_tokens: 500, completion_tokens: 20, total_tokens: 520 });
-        a.apply_event(Event::Usage { prompt_tokens: 600, completion_tokens: 30, total_tokens: 630 });
+        a.apply_event(Event::Usage {
+            prompt_tokens: 500,
+            completion_tokens: 20,
+            total_tokens: 520,
+            reasoning_tokens: 0,
+            finish_reason: None,
+        });
+        a.apply_event(Event::Usage {
+            prompt_tokens: 600,
+            completion_tokens: 30,
+            total_tokens: 630,
+            reasoning_tokens: 0,
+            finish_reason: None,
+        });
         assert_eq!(a.last_prompt_tokens, 600);
         assert_eq!(a.total_out_tokens, 50);
+    }
+
+    #[test]
+    fn reasoning_spend_is_visible_before_the_step_finishes() {
+        // The failure this exists for: a step that thinks for a minute and
+        // returns nothing looked identical to one that was merely slow.
+        let mut a = app();
+        a.apply_event(Event::Thinking { text: "x".repeat(8000) });
+        assert_eq!(a.step_reasoning_chars, 8000, "live count climbs as reasoning streams");
+
+        a.apply_event(Event::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 2048,
+            total_tokens: 2148,
+            reasoning_tokens: 2000,
+            finish_reason: Some("length".into()),
+        });
+        assert_eq!(a.last_reasoning_tokens, 2000, "the provider's number replaces the estimate");
+        assert_eq!(a.step_reasoning_chars, 0, "the live count resets for the next step");
+        assert_eq!(a.last_finish_reason.as_deref(), Some("length"), "cut-off is recorded");
+    }
+
+    #[test]
+    fn a_dropped_setting_is_shown_not_swallowed() {
+        let mut a = app();
+        a.apply_event(Event::Warning { message: "budget ignored".into() });
+        assert!(matches!(a.items[0].kind, Kind::Notice));
+        assert!(a.items[0].text.contains("budget ignored"));
+    }
+
+    #[test]
+    fn budgets_parse_in_both_spellings() {
+        assert_eq!(parse_budget("2000"), Some(2000));
+        assert_eq!(parse_budget("2k"), Some(2000));
+        assert_eq!(parse_budget("1.5k"), Some(1500));
+        assert_eq!(parse_budget("0"), None);
+        assert_eq!(parse_budget("lots"), None);
+        assert_eq!(compact_tokens(7900), "7.9k");
+        assert_eq!(compact_tokens(42), "42");
     }
 
     #[test]

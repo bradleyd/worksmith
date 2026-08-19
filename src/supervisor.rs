@@ -247,6 +247,8 @@ mod tests {
     fn token_budget_escalates() {
         let mut s = sup(SupervisorConfig { token_budget: Some(100), ..Default::default() });
         let usage = |n| Event::Usage {
+            reasoning_tokens: 0,
+            finish_reason: None,
             prompt_tokens: 0,
             completion_tokens: n,
             total_tokens: n,

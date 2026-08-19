@@ -20,13 +20,23 @@ pub enum Event {
     AssistantMessage { text: String },
     ToolCall { id: String, name: String, arguments: String },
     ToolResult { id: String, name: String, ok: bool, output: String },
-    Usage { prompt_tokens: u32, completion_tokens: u32, total_tokens: u32 },
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+        /// Share of `completion_tokens` spent reasoning rather than answering.
+        reasoning_tokens: u32,
+        /// Why the completion stopped — `"length"` means it was cut off.
+        finish_reason: Option<String>,
+    },
     /// The supervisor/loop nudged the model back on track (stuck detection).
     Nudge { reason: String },
     /// Old history was summarized to stay under the context limit.
     Compaction { messages_before: usize, messages_after: usize },
     /// Result of running the task's validation check.
     Validation { ok: bool, detail: String },
+    /// A setting was not honored, or something is off but not fatal.
+    Warning { message: String },
     Error { message: String },
     /// The whole user turn finished, with its final outcome (done, validation
     /// failed, stuck, max steps, aborted).

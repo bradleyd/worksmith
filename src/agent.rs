@@ -9,7 +9,6 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -17,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, EventBus};
-use crate::llm::{ChatRequest, LlmClient, Message, ModelOverride, StreamEvent};
+use crate::llm::{ChatRequest, LlmClient, Message, ModelOverride, StreamEvent, Thinking};
 use crate::session::Session;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::validation::Validator;
@@ -88,42 +87,47 @@ impl Steering {
     }
 }
 
-/// Whether the model thinks before answering, toggleable while a session is
-/// running — the "feeling lucky" switch. Shared by handle so the TUI can flip
-/// it between turns without rebuilding the agent.
+/// How much the model deliberates before answering, toggleable while a session
+/// is running — the "feeling lucky" switch, plus the budget in between. Shared
+/// by handle so the TUI can flip it between turns without rebuilding the agent.
 #[derive(Clone, Default)]
-pub struct ThinkingMode(Arc<AtomicI8>);
+pub struct ThinkingMode(Arc<Mutex<Option<Thinking>>>);
 
 impl ThinkingMode {
-    pub fn new(value: Option<bool>) -> Self {
-        let m = ThinkingMode::default();
-        m.set(value);
-        m
+    pub fn new(value: Option<Thinking>) -> Self {
+        ThinkingMode(Arc::new(Mutex::new(value)))
     }
 
     /// `None` = leave the provider's default alone (send nothing).
-    pub fn get(&self) -> Option<bool> {
-        match self.0.load(Ordering::Relaxed) {
-            1 => Some(true),
-            2 => Some(false),
-            _ => None,
-        }
+    pub fn get(&self) -> Option<Thinking> {
+        *self.0.lock().unwrap()
     }
 
-    pub fn set(&self, value: Option<bool>) {
-        let v = match value {
-            Some(true) => 1,
-            Some(false) => 2,
-            None => 0,
-        };
-        self.0.store(v, Ordering::Relaxed);
+    pub fn set(&self, value: Option<Thinking>) {
+        *self.0.lock().unwrap() = value;
     }
 
-    /// Flip between fast and thinking; an unset mode turns fast first.
+    /// Is thinking explicitly off (fast mode)?
+    pub fn is_fast(&self) -> bool {
+        self.get() == Some(Thinking::Off)
+    }
+
+    /// Flip between fast and thinking; an unset mode turns fast first. Returns
+    /// whether fast mode is now on.
     pub fn toggle_fast(&self) -> bool {
-        let fast = self.get() != Some(false);
-        self.set(Some(!fast));
+        let fast = !self.is_fast();
+        self.set(Some(if fast { Thinking::Off } else { Thinking::On }));
         fast
+    }
+
+    /// A short label for the footer: `off`, `on`, or the budget.
+    pub fn label(&self) -> Option<String> {
+        match self.get()? {
+            Thinking::Off => Some("off".to_string()),
+            Thinking::On => Some("on".to_string()),
+            Thinking::Budget(n) if n >= 1000 => Some(format!("{}k", n / 1000)),
+            Thinking::Budget(n) => Some(n.to_string()),
+        }
     }
 }
 
@@ -196,7 +200,7 @@ impl Agent {
     /// Ask the model to skip its reasoning pass. On a small Qwen this is the
     /// difference between 500 completion tokens and 31 for the same question —
     /// the loop is expected to catch what the model no longer deliberates over.
-    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+    pub fn with_thinking(mut self, thinking: Option<Thinking>) -> Self {
         self.thinking = ThinkingMode::new(thinking);
         self
     }
@@ -396,6 +400,7 @@ impl Agent {
                     match ev {
                         StreamEvent::TextDelta(t) => bus.emit(Event::MessageDelta { text: t }),
                         StreamEvent::ReasoningDelta(t) => bus.emit(Event::Thinking { text: t }),
+                        StreamEvent::Warning(message) => bus.emit(Event::Warning { message }),
                         _ => {}
                     }
                 }
@@ -418,6 +423,8 @@ impl Agent {
                 prompt_tokens: completion.usage.prompt_tokens,
                 completion_tokens: completion.usage.completion_tokens,
                 total_tokens: completion.usage.total_tokens,
+                reasoning_tokens: completion.usage.reasoning_tokens,
+                finish_reason: completion.finish_reason.clone(),
             });
 
             // A tool call whose arguments were cut off (hit the output-token

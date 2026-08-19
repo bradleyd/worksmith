@@ -76,14 +76,25 @@ checks caught in milliseconds.
 - **Web** (`web` tool): `search` via a configured provider (Brave, Tavily, or a
   self-hosted SearXNG — set `[web]` in config) and `fetch`, which pulls a URL and
   reduces it to readable text. Fetch needs no configuration.
-- **Fast mode** (`--fast`, `/fast`, `agent.thinking = "off"`): answer without a
-  reasoning pass — the feeling-lucky button. Measured on qwen3.5-9b, same
-  question: 101 completion tokens thinking vs 13 without. The bet is that the
-  validation loop catches what deliberation would have, which makes it the
-  biggest single cost lever in the harness. Nothing is sent unless you ask:
-  providers disagree on the field (`reasoning` vs `chat_template_kwargs`) and an
-  unrecognized one is a 400, so the dialect is guessed from the endpoint and
-  overridable with `thinking-param`.
+- **Thinking control** (`--fast` / `--think [budget]`, `/fast` and `/think`,
+  `agent.thinking`): fast mode answers without a reasoning pass — the
+  feeling-lucky button. Measured on qwen3.5-9b, same question: 101 completion
+  tokens thinking vs 13 without. The bet is that the validation loop catches
+  what deliberation would have, which makes it the biggest single cost lever in
+  the harness.
+
+  `thinking = 2000` is the setting in between. Small models have no sense of a
+  budget: given `max-tokens = 8192` and no cap on reasoning, one will spend all
+  8192 deliberating and return nothing at all. A budget caps the reasoning
+  alone, so the rest is still there for an answer. Only the `reasoning` dialect
+  can express it; on a chat-template provider it degrades to plain "on" and
+  says so rather than pretending.
+
+  Nothing is sent unless you ask: providers disagree on the field (`reasoning`
+  vs `chat_template_kwargs`) and an unrecognized one is a 400. The dialect is
+  guessed from the endpoint — a hostname heuristic, so set `thinking-param`
+  explicitly behind a proxy — and a 400 on a thinking request names the field
+  that was sent and where that choice came from.
 - **Skills** — the [Agent Skills](https://agentskills.io) format as published, so
   a `SKILL.md` you wrote for Claude Code, Codex, or Cursor works here unchanged
   (and vice versa). Found in `<project>/skills/`, `~/.claude/skills/`,
@@ -187,7 +198,9 @@ worksmith --model vllm/Qwen/Qwen3.5-9B --until "cargo test" "fix the failing tes
 
 Small local models are where the validation loop earns its keep — and where
 `--fast` matters most, since a thinking model can spend its whole token budget
-deliberating and return nothing.
+deliberating and return nothing. When that happens the loop nudges it to answer
+and, if it keeps coming back empty, ends the turn as stuck rather than reporting
+a silent success.
 
 **Mixing local with hosted** works too, but watch memory: two resident models on
 one machine will exhaust unified memory. Straddle instead (local workers,
@@ -208,7 +221,8 @@ escalates. This is what keeps weaker models on task.
 The default interactive mode is a full-screen ratatui interface that renders
 four visually distinct channels — **you**, the **assistant**, **tool** activity,
 and the model's **thinking** — with a footer showing the model, context %, and
-token counts.
+token counts, including `↻` for reasoning tokens (live as they stream) and
+`⚠cut` when the last completion was truncated rather than finished.
 
 Edits from `edit`/`write` render as colored unified diffs so you can see exactly
 what changed.

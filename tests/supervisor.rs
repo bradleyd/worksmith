@@ -175,6 +175,7 @@ async fn worker_is_escalated_after_its_nudges_run_out() {
                 prompt_tokens: 0,
                 completion_tokens: 100,
                 total_tokens: 100,
+                reasoning_tokens: 0,
             },
             ..ls_call()
         })

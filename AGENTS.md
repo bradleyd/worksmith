@@ -57,6 +57,10 @@ published format, not ours). Front-end-agnostic logic lives outside
 
 - Target model class is **Qwen3-27B** (vLLM/OpenRouter). Keep prompts and tool
   outputs small; `max-tokens` should be ≥4096 (a low cap truncates file-writing
-  tool calls).
+  tool calls). `max-tokens` covers reasoning *and* output: this model class has
+  no sense of a budget and will reason until it hits the cap, so prefer
+  `thinking = <budget>` over raising the cap, and `/fast` when the task doesn't
+  need deliberation. The footer's `↻` is the reasoning spend and `⚠cut` means
+  the last completion was truncated.
 - Destructive `bash` commands are refused by the safety guard
   (`tools::dangerous_command`) and hard-stop the turn.

@@ -102,6 +102,10 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// The share of `completion_tokens` spent reasoning, when the provider
+    /// breaks it out (`completion_tokens_details.reasoning_tokens`). This is the
+    /// number that explains a turn that took a minute and said nothing.
+    pub reasoning_tokens: u32,
 }
 
 /// A request for one model completion.
@@ -112,10 +116,35 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
-    /// `Some(false)` asks the model not to think before answering. `None` sends
-    /// nothing at all, which is the default: providers disagree about these
-    /// fields and a strict one rejects the request outright.
-    pub thinking: Option<bool>,
+    /// How much the model may deliberate before answering. `None` sends nothing
+    /// at all, which is the default: providers disagree about these fields and a
+    /// strict one rejects the request outright.
+    pub thinking: Option<Thinking>,
+}
+
+/// How much deliberation to ask for. `Budget` is the middle setting between
+/// "think as long as you like" and "don't think": a model with no budget fills
+/// whatever `max_tokens` allows and can reach the cap without ever answering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thinking {
+    Off,
+    On,
+    /// At most this many reasoning tokens before answering.
+    Budget(u32),
+}
+
+impl Thinking {
+    /// Every setting except `Off` means the model reasons.
+    pub fn enabled(self) -> bool {
+        self != Thinking::Off
+    }
+
+    pub fn budget(self) -> Option<u32> {
+        match self {
+            Thinking::Budget(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 /// How a provider spells "don't think". There is no common field, and sending
@@ -131,6 +160,23 @@ pub enum ThinkingDialect {
 }
 
 impl ThinkingDialect {
+    /// Can this dialect express a reasoning *budget*, or only on/off? OpenRouter
+    /// and OpenAI take `reasoning: {max_tokens}`; a chat-template kwarg is a
+    /// bool and nothing more. Asking for a budget where none exists must say so
+    /// rather than quietly behave like plain `on`.
+    pub fn supports_budget(self) -> bool {
+        matches!(self, ThinkingDialect::Reasoning)
+    }
+
+    /// The request field this dialect writes — for error messages that have to
+    /// name what we actually sent.
+    pub fn field(self) -> &'static str {
+        match self {
+            ThinkingDialect::Reasoning => "reasoning",
+            ThinkingDialect::ChatTemplate => "chat_template_kwargs",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<ThinkingDialect> {
         match s.trim().to_ascii_lowercase().as_str() {
             "reasoning" => Some(ThinkingDialect::Reasoning),
@@ -139,14 +185,43 @@ impl ThinkingDialect {
         }
     }
 
-    /// Guess from the endpoint when the config doesn't say. Hosted gateways
-    /// take `reasoning`; self-hosted serving stacks take the template kwarg.
+    /// Guess from the endpoint when the config doesn't say. Hosted gateways take
+    /// `reasoning`; self-hosted serving stacks take the template kwarg.
+    ///
+    /// This is a heuristic on a hostname, and it is wrong the moment a gateway
+    /// sits behind a proxy or a vanity domain — so it is only ever a fallback
+    /// for an unset `thinking-param`, and every caller carries the [`DialectSource`]
+    /// alongside it so a rejected request can say which spelling it used and
+    /// where that came from.
     pub fn guess_from_url(base_url: &str) -> ThinkingDialect {
         let u = base_url.to_ascii_lowercase();
-        if u.contains("openrouter.ai") || u.contains("api.openai.com") {
+        const HOSTED_GATEWAYS: [&str; 4] =
+            ["openrouter.ai", "api.openai.com", "api.together.xyz", "api.groq.com"];
+        if HOSTED_GATEWAYS.iter().any(|h| u.contains(h)) {
             ThinkingDialect::Reasoning
         } else {
             ThinkingDialect::ChatTemplate
+        }
+    }
+}
+
+/// Where a provider's [`ThinkingDialect`] came from. A guess that turns out to
+/// be wrong produces an HTTP 400 from the provider; knowing the value was
+/// guessed (and not configured) is the difference between a baffling error and
+/// one that tells you to set `thinking-param`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialectSource {
+    /// The provider's `thinking-param` said so.
+    Explicit,
+    /// Inferred from the base URL.
+    Guessed,
+}
+
+impl DialectSource {
+    pub fn describe(self) -> &'static str {
+        match self {
+            DialectSource::Explicit => "from this provider's `thinking-param`",
+            DialectSource::Guessed => "guessed from the provider's base-url",
         }
     }
 }
@@ -166,6 +241,10 @@ pub enum StreamEvent {
     ToolCallArgsDelta { index: usize, delta: String },
     /// Final token usage (if the provider reports it).
     Usage(Usage),
+    /// Something about the request was quietly not honored — a setting this
+    /// provider cannot express. Surfaced rather than swallowed, because a
+    /// silently dropped setting looks exactly like one that isn't working.
+    Warning(String),
 }
 
 /// The assembled result of a streamed completion.
@@ -209,7 +288,7 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
             );
             if let Some(d) = resolved.provider.thinking_param.as_deref().and_then(ThinkingDialect::parse)
             {
-                c = c.with_thinking_dialect(d);
+                c = c.with_thinking_dialect(d, DialectSource::Explicit);
             }
             Ok(std::sync::Arc::new(c))
         }

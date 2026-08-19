@@ -259,3 +259,32 @@ fn a_correct_config_still_loads() {
     assert_eq!(c.supervisor().max_nudges, 2);
     assert_eq!(c.agents_model(), Some("p/small"));
 }
+
+/// `thinking` takes a mode or a token budget. TOML hands us a string in one case
+/// and an integer in the other, and a budget that only worked when quoted would
+/// be a trap.
+#[test]
+fn thinking_accepts_a_mode_or_a_budget() {
+    use worksmith::llm::Thinking;
+
+    let load = |line: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join(".worksmith");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("config.toml"),
+            format!("model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\n[agent]\n{line}\n"),
+        )
+        .unwrap();
+        worksmith::config::Config::load(dir.path()).unwrap().thinking()
+    };
+
+    common::isolate_home();
+    assert_eq!(load("thinking = \"off\""), Some(Thinking::Off));
+    assert_eq!(load("thinking = \"on\""), Some(Thinking::On));
+    assert_eq!(load("thinking = 2000"), Some(Thinking::Budget(2000)));
+    assert_eq!(load("thinking = \"2000\""), Some(Thinking::Budget(2000)));
+    // Unset means "send nothing at all", which is what keeps strict providers
+    // working — not a silent default of on.
+    assert_eq!(load("max-steps = 5"), None);
+}
