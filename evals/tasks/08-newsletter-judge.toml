@@ -46,10 +46,12 @@ BANNED = ["let's dive in", "it's important to note", "furthermore", "additionall
 PUBLISHED = ["kubernetes", "microservice", "monitoring", "observability", "sqlite"]
 
 def strip_code(t):
-    # The style rules are about prose. A shell flag (`rsync --delete`) and a SQL
-    # comment (`-- claim jobs`) are not em-dash abuse, and grepping them as such
-    # failed three drafts that had done nothing wrong.
-    return re.sub(r"```.*?```", "", t, flags=re.S)
+    # The style rules are about prose. A shell flag (`rsync --delete`), a SQL
+    # comment (`-- claim jobs`), and an inline `git reset --hard` are not em-dash
+    # abuse. Grepping them as such failed four innocent drafts across two runs —
+    # fenced blocks first, then inline spans, which is the same mistake twice.
+    t = re.sub(r"```.*?```", "", t, flags=re.S)
+    return re.sub(r"`[^`\n]*`", "", t)
 
 def check(path):
     t = open(path).read()

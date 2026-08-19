@@ -80,8 +80,22 @@ Keep `validate` dependency-light (bash/grep/python3) so tasks run anywhere.
 
 ## Findings so far
 
-**2026-08, newsletter-judge in `workers` mode — a strong judge asserted
-compliance it had not checked.** Kimi K3 planning and judging, three
+**2026-08, newsletter-judge in `workers` mode — it works, and the judge is the
+weakest link.** Kimi K3 planning and judging, three deepseek-v4-flash workers
+drafting: three complete 1500-word newsletters on logging, CI pipelines, and
+message queues, plus a `decision.md` naming a winner with reasons. Every
+mechanical rule in the skill's checklist passes. ~$0.05 and about ten minutes.
+
+That is the architecture doing what it claims: cheap models draft in parallel,
+a stronger one judges, and a deterministic check gates the result.
+
+**But the judge was wrong both times it was asked.** Run one: "All three drafts
+clear the checklist's pass/fail bar … no topic repetition" — two contained a
+prose double hyphen and one reused a published topic. Run two: "All three
+drafts pass … ~1400-1500 words" — while the checklist requires 1500-2500, so
+its own quoted number contradicts the rule it says is satisfied.
+
+**Original finding, run one:** Kimi K3 planning and judging, three
 deepseek-v4-flash workers drafting (~$0.05, ~16k generated tokens). The
 workers produced three complete 1500-2500 word newsletters and the judge
 produced a decision naming a winner with a reasoned rationale. It also wrote:
