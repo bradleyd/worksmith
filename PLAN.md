@@ -709,6 +709,52 @@ merge/apply step that doesn't exist yet. Non-code work (the newsletter fan-out)
 doesn't need any of this, so it should be opt-in per spawn or inferred from
 whether the task touches tracked files.
 
+**M12 — Per-role model routing** *(future)*: the harness already makes several
+model calls that are not the user's turn — the fan-out planner, the compaction
+summarizer, the memory classifier, the fan-out judge, and the supervisor's
+unbuilt `model` mode. All of them currently inherit the session's model, which
+is both expensive (a frontier model summarizing a transcript) and, more
+importantly, unmeasurable: there is no way to ask which model is good at which
+internal job.
+
+Routing means naming those roles in config and letting each pick a model:
+
+```toml
+[agents]
+model = "openrouter/deepseek/deepseek-v4-flash-0731"   # workers (exists today)
+
+[roles]                                    # the harness's own calls
+planner    = "openrouter/qwen/qwen3.5-9b"
+classifier = "openrouter/qwen/qwen3.5-9b"  # memory extraction
+compactor  = "openrouter/qwen/qwen3.5-9b"
+judge      = "openrouter/moonshotai/kimi-k3"
+```
+
+Mechanically this is small: `ModelOverride` and `Agent::fork_with` already do
+the work, `llm::client_for` already builds a client per provider, and
+`Agent::ask` is the single choke point every helper call passes through.
+
+**Why it matters more than it looks.** Every failure worth fixing in these
+roles so far has been *format compliance, not intelligence*: a local 27B
+answered the planner with its own deliberation, a frontier judge twice reported
+rule compliance it had not checked, and the memory classifier's whole job is to
+emit `scope|kind|subject|content|importance` or nothing at all. Those are jobs
+where a small, narrowly-trained model can plausibly beat a large general one —
+and routing is what makes that a *measurable* claim instead of a hunch. Run a
+role on a big model and a small one, compare format-compliance rates, and the
+question "is a fine-tune worth it here?" answers itself before anyone trains
+anything.
+
+That is also the honest sequencing for the "ship specialist models" idea:
+**routing first, training much later, if ever.** Fine-tuning carries data,
+eval, quantization, hosting and versioning costs, against base models that
+improve quarterly and already cost ~$0.10/Mtok. The tool-shaped tasks
+(reading commits, extracting from a docx) are not model-limited at all —
+`bash`, `grep`, and `doc` already do them deterministically. Refusal-ablated
+models are a user's choice to configure, not something to ship: they trade
+away instruction-following, which is exactly what this harness exists to
+compensate for.
+
 ## 11. Open decisions
 
 1. `rig` vs hand-rolled provider layer (M0 decides). Rig's OpenAI-compat
