@@ -17,7 +17,7 @@ temperature = 0.7
 # the call's arguments, so a low cap truncates the call mid-JSON. It also has to
 # cover reasoning — a thinking model can spend the whole budget deliberating and
 # return nothing at all.
-max-tokens = 16384
+max-tokens = 8192
 
 # --- Providers -------------------------------------------------------------
 
@@ -76,7 +76,11 @@ keep-recent-turns = 6       # turns kept verbatim when compacting
 # max-tokens is still there for an answer. Only providers that speak the
 # `reasoning` dialect can express this (OpenRouter, OpenAI) — on a chat-template
 # provider (vLLM, llama.cpp) a budget degrades to plain "on" and says so.
-#   thinking = 2000
+#
+# 2000 is the shipped default for the Qwen3-27B class this targets: measured on
+# a chapter review, the same model with uncapped thinking spent all 8192 tokens
+# reasoning and returned nothing, three turns running.
+thinking = 2000
 #
 # Override per run with --fast / --think [budget], or live with /fast and
 # /think [on|off|auto|<tokens>].
