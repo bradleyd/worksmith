@@ -8,5 +8,8 @@
 # reference clones are for local design study only
 /reference
 
+# book-writer skill is private; never commit it
+skills/book-writer/
+
 # env
 .env
