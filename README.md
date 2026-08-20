@@ -112,7 +112,8 @@ checks caught in milliseconds.
   by text match, exact-subject hit, importance, recency, and a project boost.
   The agent reaches it through the `memory` tool (`search` / `remember`), with
   write-time dedup so restatements don't grow the store. Workers *propose*
-  rather than write — `/memory pending` and `/memory approve <id>` review them.
+  rather than write — `/memory pending` and `/memory approve <id|all>` review
+  them. Ids accept any unique prefix (git-style) and Tab completes them.
   `/memory extract` distills the current session into at most a few candidates
   using a classifier biased toward saving nothing.
 - **Memory mining** (`/memory mine [n]`): reads *past* sessions of the current
@@ -258,7 +259,9 @@ The line REPL has the same commands as the TUI:
 /new                      start a new session
 /compact                  summarize the session now
 /memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
-/memory search <query> | /memory extract | /memory pending | /memory approve <id>
+/memory search <query> | /memory extract | /memory mine [n]
+/memory pending | /memory approve <id|all>
+/mouse [on|off]           wheel scrolling vs. selecting text to copy
 /knowledge [index|search <query>|status]
 /spawn [-n N | --each-files <regex>] <task>
 /agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
