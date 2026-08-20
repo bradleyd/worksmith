@@ -208,6 +208,13 @@ struct App {
     cached_rows: Vec<Line<'static>>,
     cache_width: u16,
     dirty: bool,
+    /// Index of the first item whose cached rows are stale, and where each
+    /// item's rows start in `cached_rows`. Streaming appends to the *last* item
+    /// and set `dirty` for the whole transcript, so every token re-wrapped
+    /// everything — 15ms per token at 60 turns of real tool output, in a debug
+    /// build. Now only the tail is rebuilt.
+    dirty_from: Option<usize>,
+    item_starts: Vec<usize>,
     // Tab-completion state for the composer.
     completion: Option<Completion>,
     // Cosmetic/among-turn state.
@@ -277,6 +284,8 @@ impl App {
             cur_thinking: None,
             cached_rows: Vec::new(),
             cache_width: 0,
+            dirty_from: None,
+            item_starts: Vec::new(),
             dirty: true,
             completion: None,
             show_thinking: true,
@@ -299,18 +308,55 @@ impl App {
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
+        let at = self.items.len();
         self.items.push(Item { kind, text: text.into() });
-        self.dirty = true;
+        self.touch(at);
     }
 
-    /// Rebuild the wrapped-row cache only when content or width changed.
+    /// Mark item `index` (and everything after it) as needing re-wrapping.
+    fn touch(&mut self, index: usize) {
+        self.dirty = true;
+        self.dirty_from = Some(self.dirty_from.map_or(index, |d| d.min(index)));
+    }
+
+    /// Everything needs re-wrapping — a width change, or a toggle that changes
+    /// how items render.
+    fn touch_all(&mut self) {
+        self.dirty = true;
+        self.dirty_from = Some(0);
+    }
+
+    /// Rebuild the wrapped-row cache, doing only the work that changed.
     fn ensure_rows(&mut self, width: u16) {
-        if self.dirty || self.cache_width != width {
-            self.cached_rows =
-                build_rows(&self.items, self.collapse_tools, self.show_thinking, width);
-            self.cache_width = width;
-            self.dirty = false;
+        let width_changed = self.cache_width != width;
+        if !self.dirty && !width_changed {
+            return;
         }
+        let from = if width_changed { 0 } else { self.dirty_from.unwrap_or(0) };
+        // Never start past the last item with recorded rows: `item_starts` is
+        // what says where a rebuild may resume, and indexing past it would
+        // truncate the cache to nothing and silently lose the transcript.
+        let from = from.min(self.item_starts.len());
+
+        // Drop the stale tail, keep the prefix, and re-wrap only from `from`.
+        // A missing start means "nothing recorded yet for this item", i.e. keep
+        // every cached row and append.
+        let keep_rows = self.item_starts.get(from).copied().unwrap_or(self.cached_rows.len());
+        self.cached_rows.truncate(keep_rows);
+        self.item_starts.truncate(from);
+        for item in &self.items[from..] {
+            self.item_starts.push(self.cached_rows.len());
+            item_rows(
+                &mut self.cached_rows,
+                item,
+                self.collapse_tools,
+                self.show_thinking,
+                width,
+            );
+        }
+        self.cache_width = width;
+        self.dirty = false;
+        self.dirty_from = None;
     }
 
     // ---- composer (input editing) ----
@@ -516,24 +562,34 @@ impl App {
             }
             Event::Thinking { text } => {
                 self.step_reasoning_chars += text.len();
-                match self.cur_thinking {
-                    Some(i) => self.items[i].text.push_str(&text),
+                // Only the item being written to is stale — that is the whole
+                // point of tracking a start index per item.
+                let at = match self.cur_thinking {
+                    Some(i) => {
+                        self.items[i].text.push_str(&text);
+                        i
+                    }
                     None => {
                         self.items.push(Item { kind: Kind::Thinking, text });
                         self.cur_thinking = Some(self.items.len() - 1);
+                        self.items.len() - 1
                     }
-                }
-                self.dirty = true;
+                };
+                self.touch(at);
             }
             Event::MessageDelta { text } => {
-                match self.cur_assistant {
-                    Some(i) => self.items[i].text.push_str(&text),
+                let at = match self.cur_assistant {
+                    Some(i) => {
+                        self.items[i].text.push_str(&text);
+                        i
+                    }
                     None => {
                         self.items.push(Item { kind: Kind::Assistant, text });
                         self.cur_assistant = Some(self.items.len() - 1);
+                        self.items.len() - 1
                     }
-                }
-                self.dirty = true;
+                };
+                self.touch(at);
             }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
             Event::ToolCall { name, arguments, .. } => {
@@ -1204,6 +1260,19 @@ async fn handle_key(
                 app.dirty = true;
                 return Ok(Flow::Continue);
             }
+            // Enter takes the highlighted row too. Falling through to the
+            // command handler ran the half-typed text and answered "unknown
+            // command: /agen", which is the opposite of what a visible,
+            // highlighted list implies pressing Enter will do. An exactly-typed
+            // command still runs, so muscle memory for `/help<Enter>` survives.
+            KeyCode::Enter if hint_enter_accepts(&app.input) => {
+                if let Some(label) = app.hint.as_ref().and_then(|h| h.chosen()) {
+                    app.set_input(format!("{label} "));
+                    app.hint = None;
+                    app.dirty = true;
+                    return Ok(Flow::Continue);
+                }
+            }
             // Tab accepts the highlighted command. This is better than the old
             // blind prefix-cycling: you can see what you are accepting.
             KeyCode::Tab => {
@@ -1235,12 +1304,13 @@ async fn handle_key(
         KeyCode::Tab => complete(app, cwd, mem),
         KeyCode::Char('o') if ctrl => {
             app.collapse_tools = !app.collapse_tools;
-            app.dirty = true;
+            // Changes how *every* item renders, not just the tail.
+            app.touch_all();
             app.status = format!("tool output {}", if app.collapse_tools { "collapsed" } else { "expanded" });
         }
         KeyCode::Char('t') if ctrl => {
             app.show_thinking = !app.show_thinking;
-            app.dirty = true;
+            app.touch_all();
             app.status = format!("thinking {}", if app.show_thinking { "shown" } else { "hidden" });
         }
         KeyCode::Char('p') if ctrl => {
@@ -2445,6 +2515,13 @@ fn ui(f: &mut Frame, app: &App) {
     }
 }
 
+/// With the hint showing, does Enter take the highlighted row rather than run
+/// what is typed? Yes — unless the typed text is already exactly a command, so
+/// `/help<Enter>` still works the way the fingers expect.
+fn hint_enter_accepts(input: &str) -> bool {
+    !COMMANDS.iter().any(|(name, _)| *name == input.trim())
+}
+
 /// Draw the command hint anchored to the bottom of `above`, growing upward.
 fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
     let matches = ov.matches();
@@ -2579,23 +2656,42 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
 
 /// Build the fully-wrapped, styled rows for the transcript (each row already
 /// fits `width`). Tabs are expanded so widths are predictable.
+/// Wrap every item. The incremental cache in `ensure_rows` is checked against
+/// this, so it stays as the obvious-and-correct reference implementation.
+#[cfg(test)]
 fn build_rows(
     items: &[Item],
     collapse_tools: bool,
     show_thinking: bool,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let w = (width.max(12) as usize).saturating_sub(1);
     let mut rows: Vec<Line> = Vec::new();
-
     for item in items {
+        item_rows(&mut rows, item, collapse_tools, show_thinking, width);
+    }
+    rows
+}
+
+/// Append one item's wrapped rows. Split out of `build_rows` so the cache can
+/// rebuild a single item instead of the whole transcript: streaming mutates
+/// only the last item, and re-wrapping everything per token is what made a long
+/// session crawl (measured: 15ms per token at 60 turns of real tool output).
+fn item_rows(
+    rows: &mut Vec<Line<'static>>,
+    item: &Item,
+    collapse_tools: bool,
+    show_thinking: bool,
+    width: u16,
+) {
+    let w = (width.max(12) as usize).saturating_sub(1);
+    {
         if item.kind == Kind::Thinking && !show_thinking {
-            continue;
+            return;
         }
         if item.kind == Kind::Diff {
-            render_diff(&mut rows, &item.text, collapse_tools, width);
+            render_diff(rows, &item.text, collapse_tools, width);
             rows.push(Line::from(""));
-            continue;
+            return;
         }
         let (style, label): (Style, &str) = match item.kind {
             Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
@@ -2650,7 +2746,6 @@ fn build_rows(
         }
         rows.push(Line::from("")); // blank line between items
     }
-    rows
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
@@ -2810,6 +2905,41 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
 /// Draw the command picker into an off-screen buffer and print it. A dev aid:
 /// the layout is worth looking at, and a TUI is otherwise hard to inspect.
+/// How long a full re-wrap takes as a transcript grows. Streaming sets `dirty`
+/// on every token, so this cost is paid per token — the shape of that curve is
+/// the question, not the absolute number.
+pub fn bench_rows() {
+    // Realistic: tool results are capped at 24k, and a chapter review reads
+    // whole files. Rows, not items, are what the wrap loop walks.
+    for turns in [5usize, 20, 60] {
+        let mut app = App::new("m".into(), 128_000, None);
+        for i in 0..turns {
+            app.push(Kind::User, format!("question {i} about the chapter"));
+            app.push(Kind::Assistant, "answer ".repeat(60));
+            app.push(Kind::ToolResult, "x".repeat(12_000));
+        }
+        // The real streaming case: a token lands on the last item and the view
+        // redraws. Previously this re-wrapped the whole transcript.
+        app.push(Kind::Assistant, String::new());
+        app.ensure_rows(100);
+        let start = std::time::Instant::now();
+        let n = 200;
+        for _ in 0..n {
+            app.apply_event(crate::event::Event::MessageDelta { text: "token ".into() });
+            app.ensure_rows(100);
+        }
+        let each = start.elapsed() / n;
+        println!(
+            "{:>4} turns ({:>5} items, {:>6} rows): {:>8.3?} per re-wrap  → {:>7.1} re-wraps/sec",
+            turns,
+            app.items.len(),
+            app.cached_rows.len(),
+            each,
+            1.0 / each.as_secs_f64()
+        );
+    }
+}
+
 pub fn print_hint_preview(typed: &str) {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -3036,6 +3166,86 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ws-compl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::memory::MemoryStore::open(Some(&dir)).unwrap()
+    }
+
+    /// The incremental cache must be indistinguishable from re-wrapping
+    /// everything. It is a cache; if it can disagree with the truth it is a bug
+    /// generator, and this one already silently dropped the transcript once.
+    #[test]
+    fn the_row_cache_matches_a_full_rebuild() {
+        let mut a = app();
+        let full = |a: &App| build_rows(&a.items, a.collapse_tools, a.show_thinking, 60);
+        let text = |rows: &[Line]| -> Vec<String> {
+            rows.iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect()
+        };
+
+        a.push(Kind::User, "write the linter");
+        a.push(Kind::ToolResult, "output ".repeat(80));
+        a.ensure_rows(60);
+        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after appends");
+
+        // Streaming: repeated appends to the last item, the hot path.
+        for _ in 0..30 {
+            a.apply_event(Event::MessageDelta { text: "token ".into() });
+            a.ensure_rows(60);
+        }
+        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after streaming");
+        // The prefix is the thing at risk: a truncation bug loses it silently.
+        assert!(
+            text(&a.cached_rows)[0].contains("write the linter"),
+            "the first item survived streaming: {:?}",
+            &text(&a.cached_rows)[..2]
+        );
+
+        // An item pushed after streaming, then a toggle that changes how
+        // *every* item renders, then a width change.
+        a.push(Kind::Tool, "⚙ grep");
+        a.ensure_rows(60);
+        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after a later push");
+
+        a.collapse_tools = true;
+        a.touch_all();
+        a.ensure_rows(60);
+        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after a render toggle");
+
+        a.ensure_rows(30);
+        assert_eq!(
+            text(&a.cached_rows),
+            text(&build_rows(&a.items, a.collapse_tools, a.show_thinking, 30)),
+            "after a width change"
+        );
+    }
+
+    #[test]
+    fn streaming_rewraps_only_the_item_being_written() {
+        // The regression this exists for: every token re-wrapped the whole
+        // transcript, which at 60 turns of real tool output was 15ms per token.
+        let mut a = app();
+        a.push(Kind::ToolResult, "x".repeat(5_000));
+        a.ensure_rows(60);
+        let prefix = a.cached_rows.len();
+
+        a.apply_event(Event::MessageDelta { text: "hello".into() });
+        assert_eq!(a.dirty_from, Some(a.items.len() - 1), "only the last item is stale");
+        a.ensure_rows(60);
+        assert!(a.cached_rows.len() > prefix, "the prefix was kept, not rebuilt");
+        assert_eq!(a.item_starts.len(), a.items.len(), "one start per item");
+    }
+
+    #[test]
+    fn enter_takes_the_highlighted_command_unless_one_is_fully_typed() {
+        // The reported bug: Enter fell through to the command handler and ran
+        // the half-typed text — "unknown command: /agen" — while a highlighted
+        // list was on screen implying it would pick that.
+        assert!(hint_enter_accepts("/"));
+        assert!(hint_enter_accepts("/agen"));
+        assert!(hint_enter_accepts("/mem"));
+
+        // Fully typed: run it, so muscle memory survives.
+        assert!(!hint_enter_accepts("/help"));
+        assert!(!hint_enter_accepts("  /quit  "));
     }
 
     #[test]
