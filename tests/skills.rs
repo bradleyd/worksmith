@@ -129,3 +129,33 @@ fn the_bundled_docs_skill_satisfies_our_own_loader() {
     assert!(docs.description.to_lowercase().contains("doc"));
     assert!(docs.body().unwrap().contains("doc read"));
 }
+
+/// A skill in the wrong place is found by nothing and reported by nothing. The
+/// common mistake is a skill directory sitting beside the project rather than
+/// under `skills/`, which is what a newcomer does.
+#[test]
+fn a_misplaced_skill_can_be_pointed_at() {
+    use worksmith::skill::SkillCatalog;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_skill(dir.path(), "bluecollar-newsletter", "house style", "the guide");
+    let stray = dir.path().join("bluecollar-newsletter");
+
+    assert!(SkillCatalog::discover(dir.path()).is_empty(), "not in a skills/ dir, so not loaded");
+
+    let found = SkillCatalog::misplaced(dir.path());
+    assert_eq!(found.len(), 1, "but it can be spotted: {found:?}");
+    assert!(found[0].ends_with("bluecollar-newsletter/SKILL.md"));
+
+    // Every search path is reportable, so the empty case can say where it looked.
+    let searched = SkillCatalog::searched(dir.path());
+    assert!(searched.iter().any(|(p, _)| p.ends_with("skills")));
+    assert!(searched.iter().all(|(p, exists)| *exists == p.exists()));
+
+    // And once it is in the right place, it loads and is no longer "misplaced".
+    let proper = dir.path().join("skills");
+    std::fs::create_dir_all(&proper).unwrap();
+    std::fs::rename(&stray, proper.join("bluecollar-newsletter")).unwrap();
+    assert!(!SkillCatalog::discover(dir.path()).is_empty());
+    assert!(SkillCatalog::misplaced(dir.path()).is_empty());
+}

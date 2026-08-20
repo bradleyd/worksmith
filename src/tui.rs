@@ -2277,10 +2277,24 @@ fn skill_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = 
     match parts.next() {
         None => {
             if catalog.is_empty() {
+                app.push(Kind::Notice, "(no skills found). Looked in:".to_string());
+                for (path, exists) in crate::skill::SkillCatalog::searched(cwd) {
+                    let mark = if exists { "" } else { "  (missing)" };
+                    app.push(Kind::Notice, format!("    {}{mark}", path.display()));
+                }
+                // The usual mistake, named rather than left to be guessed.
+                for stray in crate::skill::SkillCatalog::misplaced(cwd) {
+                    app.push(
+                        Kind::Notice,
+                        format!(
+                            "  found {} but skills must live in <dir>/skills/<name>/SKILL.md",
+                            stray.display()
+                        ),
+                    );
+                }
                 app.push(
                     Kind::Notice,
-                    "(no skills — add one under .worksmith/skills/<name>/SKILL.md, or \
-                     ~/.claude/skills/ to share it with other tools)"
+                    "  a skill is a directory containing SKILL.md; put it in one of the above"
                         .to_string(),
                 );
             }

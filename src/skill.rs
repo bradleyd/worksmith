@@ -63,6 +63,34 @@ pub struct SkillCatalog {
 
 impl SkillCatalog {
     /// Search every location, lowest precedence first.
+    /// Directories that *would* hold a skill, and whether each exists. A skill
+    /// in the wrong place is found by nothing and reported by nothing, so the
+    /// empty case has to be able to say where it looked.
+    pub fn searched(project_dir: &Path) -> Vec<(PathBuf, bool)> {
+        search_paths(project_dir).into_iter().map(|p| (p.exists(), p)).map(|(e, p)| (p, e)).collect()
+    }
+
+    /// Look for a stray `SKILL.md` near the project that discovery cannot see.
+    /// The common mistake is a skill directory sitting beside the project
+    /// instead of under `skills/`, which is exactly what a newcomer does.
+    pub fn misplaced(project_dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(project_dir) else {
+            return found;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() && p.file_name().is_some_and(|n| n != "skills") {
+                let candidate = p.join("SKILL.md");
+                if candidate.is_file() {
+                    found.push(candidate);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
     pub fn discover(project_dir: &Path) -> SkillCatalog {
         let mut cat = SkillCatalog::default();
         for dir in search_paths(project_dir) {
@@ -153,7 +181,7 @@ impl SkillCatalog {
 /// Where skills live, lowest precedence first. Project beats global, and the
 /// worksmith-specific directory beats the shared one — so a skill can be
 /// tailored here without editing the copy other tools read.
-fn search_paths(project_dir: &Path) -> Vec<PathBuf> {
+pub fn search_paths(project_dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     // Shipped with the source tree (this repo's own `skills/`).
     paths.push(project_dir.join("skills"));
