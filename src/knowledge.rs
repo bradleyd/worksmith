@@ -64,7 +64,7 @@ impl KnowledgeStore {
 
     pub fn open_at(path: &Path, root: &Path) -> Result<KnowledgeStore> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            crate::config::ensure_project_dir(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let conn = Connection::open(path)

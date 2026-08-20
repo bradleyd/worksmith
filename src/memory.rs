@@ -70,7 +70,7 @@ fn now() -> i64 {
 
 fn open_db(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::config::ensure_project_dir(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let conn = Connection::open(path)

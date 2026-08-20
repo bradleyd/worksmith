@@ -47,7 +47,11 @@ shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
   Any test that creates a session or opens global memory must call
   `common::isolate_home()` first (`tests/common/mod.rs`), which points
   `WORKSMITH_HOME` at a per-process scratch dir. Without it the test writes into
-  the developer's real `~/.worksmith/sessions/`.
+  the developer's real `~/.worksmith/sessions/`. Do not call `set_var` on
+  `WORKSMITH_HOME` yourself in a test that shares a binary with others: the
+  variable is process-wide and tests run in parallel, so a test that moves it
+  breaks its neighbours. A test that genuinely needs its own home (first-run,
+  project trust) gets its own file, since cargo gives each one a process.
   The TUI is smoke-tested under a PTY (`script -q /dev/null …`), since it needs a
   real terminal.
 - Don't edit `reference/`. Those are gitignored TypeScript design clones (pi,

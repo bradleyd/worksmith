@@ -491,6 +491,60 @@ pub fn global_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".worksmith"))
 }
 
+/// The annotated project-config sample, dropped into a project's `.worksmith/`
+/// the first time that directory is created. Short on purpose: a project config
+/// overrides the global one field by field, so it only needs the handful of
+/// settings that are genuinely per-project.
+const PROJECT_EXAMPLE: &str = r#"# Worksmith, this project only.
+#
+# Everything here overrides ~/.worksmith/config.toml field by field, and all of
+# it is optional. Copy this file to config.toml and uncomment what you need.
+#
+# Worksmith asks before using a project config the first time it sees one, and
+# again whenever the file changes: it can run shell commands and redirect where
+# your prompts are sent. `/trust` shows the current decision.
+
+# The model for this project's sessions.
+# model = "openrouter/qwen/qwen3.8-27b"
+
+# [agent]
+# validate = "cargo test"      # a turn is not done until this passes
+# thinking = 2000              # cap reasoning, leaving room for an answer
+# max-steps = 50
+
+# [agents]
+# model = "local/Qwen3.5-9B"   # workers on a cheaper or local model
+# validate = "cargo check"     # per-worker check (read-only is safest today)
+# max = 4
+
+# A provider only this project uses. Local servers (oMLX, llama.cpp, vLLM,
+# LM Studio) all speak the OpenAI-compatible API; point base-url at yours.
+# [providers.local]
+# type = "openai-compat"
+# base-url = "http://127.0.0.1:8000/v1"
+# thinking-param = "chat-template"
+
+# [tools]
+# bash-timeout-secs = 300
+"#;
+
+/// Create a project's `.worksmith/` directory, seeding the annotated sample the
+/// first time. Centralised so memory and knowledge cannot each create the
+/// directory in their own way and disagree about what lives in it.
+pub fn ensure_project_dir(dir: &Path) -> std::io::Result<()> {
+    let existed = dir.exists();
+    std::fs::create_dir_all(dir)?;
+    // Only on creation, and never over a real config: a project that has made
+    // its choices should not find a sample appearing next to them.
+    if !existed && dir.file_name().is_some_and(|n| n == ".worksmith") {
+        let example = dir.join(EXAMPLE_CONFIG);
+        if !example.exists() && !dir.join("config.toml").exists() {
+            let _ = std::fs::write(&example, PROJECT_EXAMPLE);
+        }
+    }
+    Ok(())
+}
+
 /// Env var that relocates the whole global state directory.
 pub const GLOBAL_DIR_ENV: &str = "WORKSMITH_HOME";
 
