@@ -181,6 +181,12 @@ async fn convert(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     };
     let full_in = resolve_path(ctx, path);
     let full_out = resolve_path(ctx, out);
+    // `convert` (and `create`, which is convert with a different name) writes a
+    // file at a model-chosen path. Same rule as `write` and `edit`: leaving the
+    // project is a different act than editing what you were pointed at.
+    if let Some(refusal) = super::approve_write_outside_cwd(ctx, &full_out).await {
+        return ToolOutput::error(refusal);
+    }
     if !full_in.exists() {
         return ToolOutput::error(format!("no such file: {}", full_in.display()));
     }
@@ -242,6 +248,11 @@ async fn extract(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     };
     let full_in = resolve_path(ctx, path);
     let out_dir = resolve_path(ctx, out);
+    // `extract` writes N files into a directory, so the directory is the thing
+    // to ask about.
+    if let Some(refusal) = super::approve_write_outside_cwd(ctx, &out_dir).await {
+        return ToolOutput::error(refusal);
+    }
     if !full_in.exists() {
         return ToolOutput::error(format!("no such file: {}", full_in.display()));
     }

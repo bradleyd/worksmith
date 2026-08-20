@@ -250,7 +250,8 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
 - **Approval gate**: catastrophic commands (`rm -rf /`, `mkfs`, `curl | sh`) are
   refused outright. Outward-facing or irreversible ones prompt before running:
   `git push`, `sudo`, `cargo publish`, `curl -X POST`, `kubectl delete`, and
-  writes outside the working directory. Answer `y` once, `a` for the session, or
+  writes outside the working directory, whether they come from `write`, `edit`
+  or `doc`. Answer `y` once, `a` for the session, or
   `n` to decline. A denial is not fatal. The model is told what was skipped and
   carries on. Where nothing can prompt (`--print`, `--mode json`) the answer is
   no, because a headless agent that pushes because nobody objected is the exact

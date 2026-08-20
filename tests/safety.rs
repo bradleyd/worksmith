@@ -159,3 +159,53 @@ async fn writing_outside_the_project_needs_approval() {
     assert!(!out.is_error, "writing inside the project must not prompt: {}", out.content);
     assert!(dir.path().join("inside.txt").exists());
 }
+
+/// `doc convert`/`create`/`extract` write files at model-chosen paths, the same
+/// as `write` and `edit`. They were missed when the approval gate went in.
+#[tokio::test]
+async fn doc_writes_outside_the_project_need_approval() {
+    use std::sync::Arc;
+    use worksmith::tools::approval::RefuseWhenUnattended;
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("src.md"), "# hello\n").unwrap();
+
+    let reg = ToolRegistry::with_builtins();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        approver: Arc::new(RefuseWhenUnattended),
+        ..Default::default()
+    };
+
+    let escaped = outside.path().join("escaped.docx");
+    let out = reg
+        .run(
+            "doc",
+            serde_json::json!({
+                "action": "create",
+                "path": "src.md",
+                "out": escaped.display().to_string(),
+            }),
+            &ctx,
+        )
+        .await;
+
+    assert!(out.is_error, "should be refused: {}", out.content);
+    assert!(out.content.contains("did not approve"), "says why: {}", out.content);
+    assert!(!escaped.exists(), "nothing was written outside the project");
+
+    // Extraction writes N files into a directory, so the directory is gated too.
+    let out = reg
+        .run(
+            "doc",
+            serde_json::json!({
+                "action": "extract",
+                "path": "src.md",
+                "out": outside.path().display().to_string(),
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(out.is_error, "should be refused: {}", out.content);
+}
