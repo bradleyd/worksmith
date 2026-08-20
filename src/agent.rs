@@ -9,6 +9,7 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -161,6 +162,9 @@ pub struct Agent {
     tool_ctx: ToolContext,
     steering: Steering,
     thinking: ThinkingMode,
+    /// The provider's prompt-token count for the most recent completion — what
+    /// the next request will cost, as opposed to what we estimate it costs.
+    last_prompt_tokens: AtomicU32,
 }
 
 impl Agent {
@@ -194,6 +198,7 @@ impl Agent {
             tool_ctx,
             steering: Steering::new(),
             thinking: ThinkingMode::default(),
+            last_prompt_tokens: AtomicU32::new(0),
         }
     }
 
@@ -262,6 +267,8 @@ impl Agent {
             // A worker takes the parent's setting as it stands now; flipping
             // the parent later shouldn't retroactively change a running worker.
             thinking: ThinkingMode::new(self.thinking.get()),
+            // Its own context, so its own accounting.
+            last_prompt_tokens: AtomicU32::new(0),
         }
     }
 
@@ -370,7 +377,12 @@ impl Agent {
             }
 
             // Compact if the working history is approaching the context limit.
-            if estimate_tokens(session.messages()) > self.compaction_trigger()
+            // `estimate_tokens` only sees the session's messages — not the system
+            // prompt, the tool schemas, or loaded skill text, all of which are in
+            // every real request. It therefore reads low, by a margin that grows
+            // with the toolset, so trust the provider's own count once we have
+            // one and keep the estimate only for the first step of a session.
+            if self.working_tokens(session) > self.compaction_trigger()
                 && let Err(e) = self.compact(session).await
             {
                 // Compaction is best-effort; a failure shouldn't kill the turn.
@@ -419,6 +431,7 @@ impl Agent {
                 }
             };
 
+            self.last_prompt_tokens.store(completion.usage.prompt_tokens, Ordering::Relaxed);
             self.bus.emit(Event::Usage {
                 prompt_tokens: completion.usage.prompt_tokens,
                 completion_tokens: completion.usage.completion_tokens,
@@ -578,6 +591,14 @@ impl Agent {
         Ok(IdleReason::MaxSteps)
     }
 
+    /// What the next request will actually cost in prompt tokens: the provider's
+    /// count for the last one, falling back to a rough estimate before any
+    /// completion has landed.
+    fn working_tokens(&self, session: &Session) -> usize {
+        let reported = self.last_prompt_tokens.load(Ordering::Relaxed) as usize;
+        reported.max(estimate_tokens(session.messages()))
+    }
+
     fn compaction_trigger(&self) -> usize {
         // Compact at 75% of the context limit, leaving headroom for the reply.
         self.context_limit * 3 / 4
@@ -585,7 +606,13 @@ impl Agent {
 
     /// One-shot helper completion: no tools, no session, no streaming to the
     /// bus — just the model's text. Used for the harness's own side calls
-    /// (compaction, fan-out planning), not for user turns.
+    /// (compaction, fan-out planning, memory extraction), not for user turns.
+    ///
+    /// Thinking is forced OFF regardless of the session's setting. These calls
+    /// are format-following, not reasoning, and they run on budgets of 512-2048
+    /// tokens — a session-level reasoning budget larger than that ceiling makes
+    /// the call structurally impossible to satisfy, and it comes back empty
+    /// every time. That is how memory extraction silently produced nothing.
     pub async fn ask(&self, system: &str, user: &str, max_tokens: u32) -> Result<String> {
         let req = ChatRequest {
             model: self.model.clone(),
@@ -593,7 +620,7 @@ impl Agent {
             tools: vec![],
             temperature: Some(0.2),
             max_tokens: Some(max_tokens),
-            thinking: self.thinking.get(),
+            thinking: Some(Thinking::Off),
         };
         // Drain the stream sink; we only want the assembled text.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);

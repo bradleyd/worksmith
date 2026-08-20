@@ -69,8 +69,16 @@ fn truncated_call(name: &str, partial_args: &str) -> Completion {
 }
 
 fn build_agent(client: MockClient, cwd: &std::path::Path, stuck_threshold: u32) -> Agent {
+    build_agent_with_client(Arc::new(client), cwd, stuck_threshold)
+}
+
+fn build_agent_with_client(
+    client: Arc<dyn LlmClient>,
+    cwd: &std::path::Path,
+    stuck_threshold: u32,
+) -> Agent {
     Agent::new(
-        Arc::new(client),
+        client,
         Arc::new(ToolRegistry::with_builtins()),
         EventBus::new(),
         "mock".into(),
@@ -374,4 +382,119 @@ async fn the_reasoning_trace_and_finish_reason_are_persisted() {
     let log = std::fs::read_to_string(&path).unwrap();
     assert!(log.contains("let me think about this at length"), "reasoning missing from {log}");
     assert!(log.contains("\"finish_reason\":\"length\""), "finish_reason missing from {log}");
+}
+
+/// Records what the client was actually asked for, so a test can assert on the
+/// request rather than the reply.
+struct RecordingClient {
+    seen: Arc<Mutex<Vec<Option<worksmith::llm::Thinking>>>>,
+    reply: String,
+    prompt_tokens: u32,
+}
+
+#[async_trait]
+impl LlmClient for RecordingClient {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+        _sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        self.seen.lock().unwrap().push(req.thinking);
+        Ok(Completion {
+            content: Some(self.reply.clone()),
+            usage: worksmith::llm::Usage {
+                prompt_tokens: self.prompt_tokens,
+                completion_tokens: 5,
+                total_tokens: self.prompt_tokens + 5,
+                reasoning_tokens: 0,
+            },
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn helper_calls_never_inherit_the_session_thinking_budget() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    // A 2000-token reasoning budget inside ask()'s 512-token ceiling is not
+    // satisfiable: the call returns empty every time, which is what left the
+    // memory store empty while looking like "nothing worth saving".
+    let client = RecordingClient {
+        seen: seen.clone(),
+        reply: "summary".into(),
+        prompt_tokens: 0,
+    };
+    let agent = build_agent_with_client(Arc::new(client), dir.path(), 3)
+        .with_thinking(Some(worksmith::llm::Thinking::Budget(2000)));
+
+    agent.ask("system", "user", 512).await.unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        &[Some(worksmith::llm::Thinking::Off)],
+        "helper calls are format-following, not reasoning"
+    );
+}
+
+#[tokio::test]
+async fn compaction_uses_the_providers_token_count_not_the_estimate() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Short messages: the char-based estimate is nowhere near the limit. But the
+    // provider reports a prompt far larger, because the system prompt, tool
+    // schemas and skill text are in the request and not in this vector.
+    for _ in 0..3 {
+        session.append_message(Message::user("hi")).unwrap();
+        session.append_message(Message::assistant(Some("ok".into()), vec![])).unwrap();
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let client = RecordingClient { seen, reply: "answer".into(), prompt_tokens: 900 };
+    let agent = Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        1000, // context_limit → compaction at 750
+        1,    // keep_recent_turns
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+        },
+    );
+
+    // First turn: nothing reported yet, so the estimate applies and nothing
+    // compacts. It also records the provider's 900-token prompt.
+    agent
+        .run_turn(&mut session, "one", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+    let after_first = session.messages().len();
+
+    // Second turn: 900 > 750, so compaction runs even though the estimate is
+    // still tiny.
+    agent
+        .run_turn(&mut session, "two", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        session.messages().len() < after_first + 2,
+        "history should have collapsed: {} messages after {} + a turn",
+        session.messages().len(),
+        after_first
+    );
 }

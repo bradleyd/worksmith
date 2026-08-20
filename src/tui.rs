@@ -576,7 +576,7 @@ async fn run_loop(
     // Fan-out groups still collecting their members' results.
     let mut groups: Vec<GroupAcc> = Vec::new();
     // A memory-extraction classifier call in flight.
-    let mut extract: Option<JoinHandle<String>> = None;
+    let mut extract: Option<JoinHandle<Result<String, String>>> = None;
 
     loop {
         // Start queued workers whose slot just freed.
@@ -677,9 +677,12 @@ async fn run_loop(
                                     app.status = "distilling memories…".into();
                                     let a = agent.clone();
                                     extract = Some(tokio::spawn(async move {
+                                        // A failed extraction must not read as
+                                        // "nothing worth saving" — that is how an
+                                        // empty memory store looks healthy.
                                         a.ask(crate::memory::EXTRACTION_PROMPT, &transcript, 512)
                                             .await
-                                            .unwrap_or_default()
+                                            .map_err(|e| e.to_string())
                                     }));
                                 }
                             }
@@ -731,7 +734,7 @@ async fn run_loop(
                 extract = None;
                 app.status = "/help for keys and commands".into();
                 match res {
-                    Ok(text) => {
+                    Ok(Ok(text)) => {
                         let candidates = crate::memory::parse_candidates(&text);
                         if candidates.is_empty() {
                             app.push(Kind::Notice, "nothing worth remembering".to_string());
@@ -755,7 +758,8 @@ async fn run_loop(
                             }
                         }
                     }
-                    Err(e) => app.push(Kind::Error, format!("extraction failed: {e}")),
+                    Ok(Err(e)) => app.push(Kind::Error, format!("extraction failed: {e}")),
+                    Err(e) => app.push(Kind::Error, format!("extraction task failed: {e}")),
                 }
                 if app.follow { app.scroll_up = 0; }
             }
