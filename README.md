@@ -104,6 +104,12 @@ checks caught in milliseconds.
   a `git pull` that edits the config asks again. Headless runs never prompt —
   they ignore the file and say so, or take `--trust-project`. `/trust` shows the
   current decision and `/trust revoke` reopens it.
+- **Watching a worker** (`/agents tail <id>`): a worker's events go to its own
+  bus and never reach the parent's transcript, so `/agents` could report status
+  but never what a worker was *doing*. Each worker now keeps a bounded log of
+  its tool calls, output, nudges and validation results, and `tail` streams it
+  into the conversation live — with a cursor, so following never re-prints what
+  you already saw, and a count when a busy worker outruns the cap.
 - **Steering a running turn**: type while the model works and press Enter — the
   message lands before its next model call, so a correction ("no, use the other
   file") arrives while it still matters instead of after. Anything typed just as
@@ -296,7 +302,7 @@ The line REPL has the same commands as the TUI:
 /mouse [on|off]           wheel scrolling vs. selecting text to copy
 /knowledge [index|search <query>|status]
 /spawn [-n N | --each-files <regex>] <task>
-/agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
+/agents [list|tail <id>|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
 /validate <cmd|off>       success check for a turn
 @path                     include a file's contents in your message
 ```

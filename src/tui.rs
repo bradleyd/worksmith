@@ -158,6 +158,9 @@ struct App {
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
+    /// Which worker we're following, and how far we've printed. A worker's
+    /// events go to its own bus, so this polls its recorded log instead.
+    tail: Option<(String, usize)>,
     /// A command waiting on the user's yes/no. While this is set, keys answer
     /// the question instead of editing the composer — the agent's task is
     /// blocked until it gets a reply.
@@ -206,6 +209,7 @@ impl App {
             pending_fanout: None,
             pending_extract: false,
             pending_mine: None,
+            tail: None,
             pending_approval: None,
             mouse: false,
         }
@@ -673,6 +677,28 @@ async fn run_loop(
                     let report = single_report(&w);
                     deliver_to_parent(&app, &agent, &session, report).await;
                 }
+            }
+        }
+
+        // Stream anything new from the worker being followed. Polling its
+        // recorded log rather than subscribing to its bus keeps this working
+        // after the worker finishes, and survives a slow reader.
+        if let Some((id, from)) = app.tail.clone() {
+            match workers.log_since(&id, from) {
+                Some((lines, next, missed)) => {
+                    if missed > 0 {
+                        app.push(
+                            Kind::Notice,
+                            format!("[{id}] … {missed} lines scrolled past"),
+                        );
+                    }
+                    for l in lines {
+                        app.push(Kind::Tool, format!("[{id}] {l}"));
+                    }
+                    app.tail = Some((id, next));
+                }
+                // The worker was dropped (e.g. /new); stop rather than spin.
+                None => app.tail = None,
             }
         }
 
@@ -1159,8 +1185,11 @@ KNOWLEDGE & SKILLS
   /skill [name]                       load a skill
 
 WORKERS
-  /spawn [-n N | --each-files <re>] [--model <spec>] <task>
-  /agents [kill|show|nudge <id>|drop-queued]
+  /spawn [-n N | --each-files <re>] [--model <spec>] [--until <check>] <task>
+  /agents                             list them
+  /agents tail <id>                   watch one work, live
+  /agents show <id>                   its result once finished
+  /agents [kill|nudge <id>|drop-queued]
 
 PROJECT
   /trust                              is this project's own config in effect?
@@ -1820,6 +1849,34 @@ fn agents_command<'a>(
     mut parts: impl Iterator<Item = &'a str>,
 ) {
     match parts.next().unwrap_or("list") {
+        // The one thing `/agents` could not do: show what a worker is doing
+        // *now*. `show` dumps a finished result; status is a single line.
+        "tail" | "follow" | "watch" => match parts.next() {
+            Some("off") | Some("stop") => {
+                app.tail = None;
+                app.push(Kind::Notice, "stopped following".to_string());
+            }
+            Some(id) => match workers.log_since(id, 0) {
+                Some((lines, next, _)) => {
+                    if lines.is_empty() {
+                        app.push(Kind::Notice, format!("{id} hasn't done anything yet"));
+                    }
+                    for l in lines {
+                        app.push(Kind::Tool, format!("[{id}] {l}"));
+                    }
+                    app.tail = Some((id.to_string(), next));
+                    app.push(
+                        Kind::Notice,
+                        format!("following {id} — /agents tail off to stop"),
+                    );
+                }
+                None => app.push(Kind::Error, format!("no agent `{id}`")),
+            },
+            None => app.push(
+                Kind::Notice,
+                "usage: /agents tail <id> | /agents tail off".to_string(),
+            ),
+        },
         "list" | "" => {
             let list = workers.list();
             if list.is_empty() && workers.queued_count() == 0 {
@@ -2016,7 +2073,7 @@ fn arg_completions(
 ) -> Option<Vec<String>> {
     let opts: &[&str] = match first.trim_start_matches('/') {
         "agents" | "workers" if prev == 1 => {
-            &["list", "show", "kill", "nudge", "drop-queued"]
+            &["list", "show", "tail", "kill", "nudge", "drop-queued"]
         }
         "spawn" if prev == 1 => &["-n", "--each-files", "--model"],
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],

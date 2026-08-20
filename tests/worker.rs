@@ -237,3 +237,39 @@ async fn an_unchecked_worker_still_stops_when_the_model_says_so() {
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
     assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "bad");
 }
+
+/// A worker's events go to its own bus and never reach the parent's transcript,
+/// so `/agents` could show status but never *what it was doing*. The log is how
+/// the parent sees inside a running worker.
+#[tokio::test]
+async fn a_workers_activity_can_be_followed_while_it_runs() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = template_agent(
+        vec![
+            tool_call("write", r#"{"path":"a.txt","content":"one"}"#),
+            tool_call("write", r#"{"path":"b.txt","content":"two"}"#),
+            done("finished both files"),
+        ],
+        dir.path(),
+    );
+    let mut mgr = WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4);
+    let id = started(&mut mgr, "write two files");
+    assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
+
+    let (lines, next, missed) = mgr.log_since(&id, 0).expect("the worker exists");
+    assert_eq!(missed, 0);
+    assert!(next > 0, "the cursor advances past what was read");
+    let joined = lines.join("\n");
+    assert!(joined.contains("⚙ write"), "tool calls are visible: {joined}");
+    assert!(joined.contains("finished both files"), "so is what it said: {joined}");
+
+    // Reading again from the cursor yields nothing — a follower must not
+    // re-print what it already showed on every poll.
+    let (again, next2, _) = mgr.log_since(&id, next).unwrap();
+    assert!(again.is_empty(), "nothing new: {again:?}");
+    assert_eq!(next2, next);
+
+    assert!(mgr.log_since("nope", 0).is_none(), "an unknown id is not a panic");
+}
+

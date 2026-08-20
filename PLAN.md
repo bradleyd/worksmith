@@ -507,7 +507,11 @@ it's the surface open-source contributors build against.
   a message that arrives too late to be drained starts the next turn instead,
   which covers the same need. Before this, mid-turn input was cleared from the
   composer and discarded.
-- Agent panel: `/agents` list/tail/kill, footer running-count (§7).
+- ~~Agent panel: `/agents` list/tail/kill, footer running-count (§7).~~ **Done
+  (2026-08-20)** — `tail` was the missing piece: worker events go to their own
+  bus, so the parent could show status but not activity. Each worker keeps a
+  bounded log; `tail` follows it by cursor. A dedicated *tab* for this is still
+  M8; this is the 80% without the layout work.
 - Streaming: token-by-token, tool calls rendered inline, collapsible.
 - **Role-distinct rendering (four channels).** The user must be able to tell
   at a glance which stream they're looking at. Each gets its own visual

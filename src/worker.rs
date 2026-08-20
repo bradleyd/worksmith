@@ -54,6 +54,13 @@ struct Runtime {
     tokens: u32,
     /// Supervisor interventions so far.
     nudges: usize,
+    /// A bounded transcript of what this worker did, for `/agents tail`. Its
+    /// events go to its own bus and never reach the parent's, so without this
+    /// there is no way to see what a running worker is doing — only its status.
+    log: Vec<String>,
+    /// Every line ever produced, including ones the cap has since dropped —
+    /// that difference is what tells a reader it missed something.
+    log_total: usize,
     /// Set when the supervisor pulled this worker off the floor; it wins over
     /// the (necessarily "aborted") turn outcome when reporting.
     escalation: Option<String>,
@@ -260,6 +267,18 @@ impl WorkerManager {
     /// Spawn a worker for `task` with the given `system` prompt. At the
     /// concurrency cap the task is queued instead and started by [`Self::pump`]
     /// when a slot frees.
+    /// Lines of a worker's activity from `from` onward, with the index to ask
+    /// for next. Returning a cursor rather than the whole log is what lets the
+    /// TUI follow a live worker without re-printing what it already showed.
+    ///
+    /// The log is capped, so a slow reader can miss lines on a very busy worker;
+    /// the count of what was dropped is reported rather than hidden.
+    pub fn log_since(&self, id: &str, from: usize) -> Option<(Vec<String>, usize, usize)> {
+        let w = self.workers.iter().find(|w| w.id == id)?;
+        let g = w.runtime.lock().unwrap();
+        Some(slice_from(&g.log, g.log_total, from))
+    }
+
     pub fn spawn(&mut self, task: String, system: String) -> Result<SpawnOutcome, String> {
         self.spawn_in(task, system, None, None, None)
     }
@@ -434,6 +453,8 @@ impl WorkerManager {
             result: String::new(),
             tokens: 0,
             nudges: 0,
+            log: Vec::new(),
+            log_total: 0,
             escalation: None,
         }));
         let cancel = CancellationToken::new();
@@ -618,7 +639,52 @@ fn apply(
     }
 }
 
+/// How many lines of a worker's activity to keep. Enough to see what it has
+/// been doing, bounded because a long-running worker would otherwise grow
+/// without limit in the parent's memory.
+const LOG_LINES: usize = 200;
+
+/// Lines from `from` onward, given a capped log holding the tail of `total`
+/// lines. Returns the lines, the next cursor, and how many were dropped before
+/// the reader could see them.
+fn slice_from(log: &[String], total: usize, from: usize) -> (Vec<String>, usize, usize) {
+    let kept = log.len();
+    // `total` counts every line ever produced; `log` holds only the last `kept`.
+    let first_kept = total.saturating_sub(kept);
+    let missed = first_kept.saturating_sub(from);
+    let start = from.max(first_kept) - first_kept;
+    (log[start.min(kept)..].to_vec(), total, missed)
+}
+
+fn log_line(g: &mut Runtime, line: String) {
+    if g.log.len() >= LOG_LINES {
+        g.log.remove(0);
+    }
+    g.log.push(line);
+    g.log_total += 1;
+}
+
 fn update_last(g: &mut Runtime, e: Event) {
+    // `last` is the one-line status; the log is the history behind it.
+    match &e {
+        Event::ToolCall { name, .. } => log_line(g, format!("⚙ {name}")),
+        Event::ToolResult { name, ok, output, .. } => {
+            let mark = if *ok { "" } else { "✗ " };
+            log_line(g, format!("  {mark}{name}: {}", first_line(output)));
+        }
+        Event::AssistantMessage { text } => {
+            for l in text.lines().filter(|l| !l.trim().is_empty()) {
+                log_line(g, l.to_string());
+            }
+        }
+        Event::Nudge { reason } => log_line(g, format!("↻ {reason}")),
+        Event::Validation { ok, detail } => {
+            log_line(g, format!("{} {detail}", if *ok { "✓" } else { "✗" }))
+        }
+        Event::Warning { message } => log_line(g, format!("⚠ {message}")),
+        Event::Error { message } => log_line(g, format!("error: {message}")),
+        _ => {}
+    }
     match e {
         Event::ToolCall { name, arguments, .. } => {
             g.tool_calls += 1;
@@ -650,4 +716,80 @@ fn update_last(g: &mut Runtime, e: Event) {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    fn lines(n: usize) -> Vec<String> {
+        (0..n).map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn a_reader_sees_each_line_once() {
+        let log = lines(5);
+        let (got, next, missed) = slice_from(&log, 5, 0);
+        assert_eq!(got, log);
+        assert_eq!((next, missed), (5, 0));
+
+        // Polling again from the cursor must not re-print anything, or a
+        // follower would repeat the whole worker on every frame.
+        let (got, next, missed) = slice_from(&log, 5, next);
+        assert!(got.is_empty());
+        assert_eq!((next, missed), (5, 0));
+    }
+
+    #[test]
+    fn only_what_is_new_comes_back() {
+        let log = lines(5);
+        assert_eq!(slice_from(&log, 5, 3).0, vec!["3".to_string(), "4".to_string()]);
+    }
+
+    #[test]
+    fn lines_dropped_by_the_cap_are_counted_not_hidden() {
+        // 100 lines happened; the log kept the last 10. A reader starting from
+        // zero missed 90, and saying so beats implying nothing happened.
+        let log = lines(10);
+        let (got, next, missed) = slice_from(&log, 100, 0);
+        assert_eq!(got.len(), 10);
+        assert_eq!(next, 100);
+        assert_eq!(missed, 90);
+
+        // A reader already past the dropped region missed nothing.
+        let (got, _, missed) = slice_from(&log, 100, 95);
+        assert_eq!(got.len(), 5);
+        assert_eq!(missed, 0);
+    }
+
+    #[test]
+    fn a_cursor_beyond_the_end_is_not_a_panic() {
+        // Can happen if a worker is replaced (`/new`) while being followed.
+        let log = lines(3);
+        let (got, next, _) = slice_from(&log, 3, 99);
+        assert!(got.is_empty());
+        assert_eq!(next, 3);
+    }
+
+    #[test]
+    fn the_log_keeps_only_its_last_lines() {
+        let mut rt = Runtime {
+            status: WorkerStatus::Running,
+            last: String::new(),
+            tool_calls: 0,
+            changed: Vec::new(),
+            result: String::new(),
+            tokens: 0,
+            nudges: 0,
+            log: Vec::new(),
+            log_total: 0,
+            escalation: None,
+        };
+        for i in 0..(LOG_LINES + 50) {
+            log_line(&mut rt, i.to_string());
+        }
+        assert_eq!(rt.log.len(), LOG_LINES, "bounded, so a long worker can't grow forever");
+        assert_eq!(rt.log_total, LOG_LINES + 50, "but the count remembers what happened");
+        assert_eq!(rt.log[0], "50", "the oldest lines are the ones dropped");
+    }
 }
