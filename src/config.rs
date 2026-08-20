@@ -158,6 +158,13 @@ pub struct ResolvedModel {
 impl Config {
     /// Load `~/.worksmith/config.toml`, then overlay `<project>/.worksmith/config.toml`.
     pub fn load(project_dir: &Path) -> Result<Config> {
+        // First run: there is no ~/.worksmith yet, and every error downstream
+        // ("set `model` in config.toml") names a file in a directory that does
+        // not exist and whose path is never printed. Create it and leave an
+        // annotated reference next to it, so "which config.toml, where?" has an
+        // answer on disk.
+        ensure_global_dir();
+
         let mut cfg = Config::default();
         if let Some(global) = global_config_path()
             && global.exists() {
@@ -316,7 +323,19 @@ impl Config {
         let spec = cli_override
             .map(str::to_string)
             .or_else(|| self.model.clone())
-            .context("no model configured (set `model` in config.toml or pass --model)")?;
+            .with_context(|| {
+                let path = global_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.worksmith/config.toml".to_string());
+                let example = global_dir()
+                    .map(|d| d.join(EXAMPLE_CONFIG).display().to_string())
+                    .unwrap_or_default();
+                format!(
+                    "no model configured — set `model` in {path}, or pass --model\n\
+                     an annotated starter config is at {example}: copy it to config.toml \
+                     and set `model` plus the matching [providers.*] section"
+                )
+            })?;
 
         let (provider_name, model) = match spec.split_once('/') {
             Some((p, m)) => (p.to_string(), m.to_string()),
@@ -336,7 +355,29 @@ impl Config {
         let provider = self
             .providers
             .get(&provider_name)
-            .with_context(|| format!("provider `{provider_name}` not found in config"))?
+            .with_context(|| {
+                let known: Vec<&str> = self.providers.keys().map(String::as_str).collect();
+                let path = global_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.worksmith/config.toml".to_string());
+                if known.is_empty() {
+                    // The first-run case: naming the section to write beats
+                    // reporting the absence of something they never wrote.
+                    format!(
+                        "provider `{provider_name}` not found — no providers are configured. \
+                         Add a [providers.{provider_name}] section to {path} (see \
+                         {} for a worked example)",
+                        global_dir()
+                            .map(|d| d.join(EXAMPLE_CONFIG).display().to_string())
+                            .unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "provider `{provider_name}` not found in {path} (configured: {})",
+                        known.join(", ")
+                    )
+                }
+            })?
             .clone();
 
         let api_key = provider
@@ -373,6 +414,28 @@ pub fn global_dir() -> Option<PathBuf> {
 
 /// Env var that relocates the whole global state directory.
 pub const GLOBAL_DIR_ENV: &str = "WORKSMITH_HOME";
+
+/// The annotated reference config dropped into the global directory on first
+/// run. Not `config.toml`: writing that would pick a model and a provider on the
+/// user's behalf, and a wrong guess there is worse than an empty directory.
+pub const EXAMPLE_CONFIG: &str = "config.example.toml";
+
+/// The shipped example, compiled in so it cannot drift from the real one.
+const EXAMPLE_CONFIG_BODY: &str = include_str!("../config.example.toml");
+
+/// Create the global directory if it is missing, and seed the annotated example
+/// beside it. Best-effort: a read-only or unwritable home should not stop a run
+/// that passes `--model` and never needs the directory.
+pub fn ensure_global_dir() {
+    let Some(dir) = global_dir() else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let example = dir.join(EXAMPLE_CONFIG);
+    if !example.exists() {
+        let _ = std::fs::write(&example, EXAMPLE_CONFIG_BODY);
+    }
+}
 
 /// Collect `AGENTS.md` / `CLAUDE.md` from `start` up to the filesystem root,
 /// nearest-last so more-specific instructions land later in the prompt.
