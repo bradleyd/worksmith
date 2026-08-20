@@ -290,3 +290,40 @@ fn thinking_accepts_a_mode_or_a_budget() {
     // working — not a silent default of on.
     assert_eq!(load("max-steps = 5"), None);
 }
+
+/// `api-key-env` naming a variable nobody exported sends the request with no
+/// Authorization header. The server answers 401 and the cause looks like
+/// anything except "you forgot to export it".
+#[test]
+fn a_named_but_unset_api_key_env_is_reported() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".worksmith");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        "model = \"local/m\"\n[providers.local]\nbase-url = \"http://127.0.0.1:8000/v1\"\n\
+         api-key-env = \"WS_TEST_KEY_DEFINITELY_UNSET\"\n",
+    )
+    .unwrap();
+
+    let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
+    let resolved = c.resolve_model(None).unwrap();
+    assert!(resolved.api_key.is_none());
+    assert_eq!(
+        resolved.missing_key_env.as_deref(),
+        Some("WS_TEST_KEY_DEFINITELY_UNSET"),
+        "the caller needs to be able to say which variable"
+    );
+
+    // Omitting api-key-env entirely is the normal local-server case and must
+    // not warn about anything.
+    std::fs::write(
+        cfg.join("config.toml"),
+        "model = \"local/m\"\n[providers.local]\nbase-url = \"http://127.0.0.1:8000/v1\"\n",
+    )
+    .unwrap();
+    let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
+    let resolved = c.resolve_model(None).unwrap();
+    assert!(resolved.missing_key_env.is_none());
+}

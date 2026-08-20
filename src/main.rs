@@ -20,7 +20,7 @@ use worksmith::session::Session;
 use worksmith::tools::{ToolContext, ToolRegistry};
 use worksmith::tui::run_tui;
 use worksmith::validation::CommandValidator;
-use worksmith::worker::WorkerManager;
+use worksmith::worker::{WorkerManager, WorkerStatus};
 
 #[derive(Parser, Debug)]
 #[command(name = "worksmith", version, about = "A minimal terminal coding-agent harness")]
@@ -427,7 +427,21 @@ async fn run_spawn(
     };
     let body = worksmith::report::group_report(&group);
 
-    if *no_synthesis || !config.synthesize() || group.done.len() < 2 {
+    // Nothing to combine. Asking a model to "combine their results" when every
+    // worker failed does not produce an error, it produces an agentic turn that
+    // tries to do the whole job itself, for up to max-steps. That reads as a
+    // hang and costs real tokens. Observed with three workers 401ing against a
+    // local endpoint.
+    let succeeded = group.done.iter().filter(|w| w.status == WorkerStatus::Done).count();
+    if succeeded == 0 {
+        let _ = writeln!(stdout(), "{body}");
+        bail!(
+            "all {} workers failed; nothing to synthesize (see the reasons above)",
+            group.done.len()
+        );
+    }
+
+    if *no_synthesis || !config.synthesize() || succeeded < 2 {
         let _ = writeln!(stdout(), "{body}");
         return Ok(());
     }
@@ -435,10 +449,15 @@ async fn run_spawn(
     // The parent decides. This is the whole point of the split: cheap doers,
     // one smarter judgment at the end.
     session.append_message(worksmith::llm::Message::user(body))?;
+    // One-shot: this command prints and exits, so a question at the end reaches
+    // nobody. Observed: a synthesis turn that ended "want me to apply that
+    // sourcing pass?" and then exited, with no way to say yes.
     let ask = format!(
         "Your {} background workers just reported back (above). Combine their results into \
-         one answer to the original request: {}",
-        group.done.len(),
+         one answer to the original request: {}\n\n\
+         This runs non-interactively and your answer is printed as the final output. \
+         Do not ask follow-up questions or offer to do more work; give the finished answer.",
+        succeeded,
         group.request
     );
     let sys = build_system_prompt(cwd, &mem);

@@ -174,6 +174,9 @@ pub struct ResolvedModel {
     pub provider: ProviderConfig,
     pub model: String,
     pub api_key: Option<String>,
+    /// Set when `api-key-env` names a variable that is not exported. The request
+    /// will go out unauthenticated; the caller should warn.
+    pub missing_key_env: Option<String>,
 }
 
 impl Config {
@@ -459,12 +462,21 @@ impl Config {
             })?
             .clone();
 
+        // A named-but-unset variable is almost always a mistake, and swallowing
+        // it sends the request with no Authorization header at all. The server
+        // answers 401 and the cause looks like anything but "you forgot to
+        // export it". Carry the fact so the caller can say so.
+        let missing_key_env = provider
+            .api_key_env
+            .as_ref()
+            .filter(|env| std::env::var(env).is_err())
+            .cloned();
         let api_key = provider
             .api_key_env
             .as_ref()
             .and_then(|env| std::env::var(env).ok());
 
-        Ok(ResolvedModel { provider, model, api_key })
+        Ok(ResolvedModel { provider, model, api_key, missing_key_env })
     }
 }
 

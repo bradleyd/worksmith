@@ -279,6 +279,22 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .context("building HTTP client")?;
+    // Warn once per variable, not once per worker: a fan-out of five would
+    // otherwise print the same line five times.
+    if let Some(var) = &resolved.missing_key_env {
+        static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+            std::sync::Mutex::new(None);
+        let mut guard = WARNED.lock().unwrap();
+        let seen = guard.get_or_insert_with(std::collections::HashSet::new);
+        if seen.insert(var.clone()) {
+            eprintln!(
+                "warning: ${var} is not set, so requests to `{}` go out with no API key. \
+                 Export it, or drop `api-key-env` if the endpoint needs none.",
+                resolved.provider.base_url
+            );
+        }
+    }
+
     match resolved.provider.kind.as_str() {
         "openai-compat" => {
             let mut c = openai::OpenAiCompatClient::new(
