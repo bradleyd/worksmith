@@ -783,6 +783,91 @@ models are a user's choice to configure, not something to ship: they trade
 away instruction-following, which is exactly what this harness exists to
 compensate for.
 
+## 8a. Workflows, designed 2026-08-20
+
+Grounded in a real run rather than a hypothetical: `worksmith spawn -n 3 "write
+candidate articles ... then choose the best one"`. That worked, and everything
+awkward about it points at the same thing.
+
+### What the real run showed
+
+- The shape is right. Cheap workers draft, the smart parent judges. The judgment
+  it produced named four reasons and caught an unsourced statistic.
+- **The planner invented a third task nobody wanted.** Asked for two articles
+  with `-n 3`, it produced two drafts plus an "analysis notes" document. A stage
+  count belongs in a file, not in a flag the planner reinterprets.
+- **The pick was prose.** A paragraph saying candidate 2, which a human can act
+  on and the loop cannot. Nothing downstream could branch on it.
+- **It ended by asking a question** in a non-interactive command, so the answer
+  reached nobody.
+- **Rerunning it means retyping it**, and any change to the prompt silently
+  changes the experiment.
+
+### Shape
+
+`workflows/<name>.toml` in the project (and `~/.worksmith/workflows/` for ones
+you reuse everywhere). Discovered like skills, run with `/workflow <name>` or
+`worksmith workflow <name>`.
+
+```toml
+name = "candidates"
+description = "Draft N candidates, pick one against a rubric"
+
+[[step]]
+id = "draft"
+workers = 3                      # explicit, not a planner's guess
+prompt = "Write one candidate article on {{topic}}. Save it to {{out}}."
+model = "omlx/Qwen3.5-9B"        # optional per-stage model
+out = "candidate-{{worker}}.md"  # each worker gets its own path
+
+[[step]]
+id = "judge"
+after = "draft"
+kind = "judge"                   # a verdict, not prose
+rubric = "references/style-guide.md"
+prompt = "Pick the strongest candidate for a blue-collar engineering audience."
+on-fail = { next = "draft", max-retries = 1 }
+```
+
+### The three decisions that matter
+
+**Stages pass paths, not payloads.** Workers share a cwd, so stage 2 reads what
+stage 1 wrote. Re-sending a 2,000-word draft through four stages is 4x the
+context for nothing. `out` exists so each worker writes somewhere predictable,
+which also fixes the collision M11 is filed for.
+
+**A judge stage returns a verdict, not prose.** Fixed shape: `{ choice, reason,
+confidence }`, or `{ pass, reason, refs }` for a review stage. That is what lets
+`on-fail` mean something. A judge that writes paragraphs is a stage the loop
+cannot branch on, which is exactly what the real run produced. This is the same
+question as open decision #9 (what is a check?) seen from the other end: a
+`judge` check kind and a judge *stage* want the same verdict type, and should
+share one.
+
+**Variables are named and few.** `{{topic}}` from the invocation, `{{worker}}`
+and `{{out}}` from the runner. No general templating language. The moment a
+workflow file needs conditionals it wants to be a program, and this is not the
+place to grow one.
+
+### Deliberately not
+
+- **Not skills.** The Agent Skills spec covers none of orchestration,
+  determinism, or validation. Forking a format thirty tools agree on to smuggle
+  in a state machine costs the interop and gains nothing.
+- **Not a pipe syntax.** `/spawn "a" | "b"` is shell idiom in a place where you
+  write prose to a model.
+- **Not a DAG.** `after` gives a linear chain with fan-out inside a stage. That
+  covers draft/review/revise and the run above. A general dependency graph is a
+  much larger thing to earn.
+
+### Depends on
+
+`--until` per worker exists (2026-08-20). What is missing is the verdict type,
+which decision #9 should settle first, and per-worker output paths, which want
+M11's tree-per-worker to be genuinely safe. A first version that only does
+`workers = N` plus a judge stage would already beat retyping the command, and
+would have prevented the invented third task.
+
 ## 10a. Working order (decided 2026-08-20)
 
 Milestones above are the map; this is the route, most valuable first. Written
