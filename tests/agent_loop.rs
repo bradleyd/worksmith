@@ -498,3 +498,55 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
         after_first
     );
 }
+
+#[tokio::test]
+async fn a_compacted_session_stays_compacted_when_reopened() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+
+    for _ in 0..3 {
+        session.append_message(Message::user("x".repeat(300))).unwrap();
+        session.append_message(Message::assistant(Some("y".repeat(300)), vec![])).unwrap();
+    }
+
+    let client = MockClient::new(vec![done("SUMMARY: earlier work"), done("final answer")]);
+    let agent = Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        200, // tiny context limit → compaction runs
+        1,
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+        },
+    );
+
+    agent
+        .run_turn(&mut session, "new question", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+    let live: Vec<String> =
+        session.messages().iter().map(|m| m.content.clone().unwrap_or_default()).collect();
+    assert_eq!(live.len(), 3, "compacted in memory");
+    drop(session);
+
+    // Reopening must reproduce the compacted view. Replaying the raw message
+    // entries instead would rebuild the full pre-compaction history and lose the
+    // summary — the session would silently undo its own context management.
+    let reopened = Session::open(&path).unwrap();
+    let after: Vec<String> =
+        reopened.messages().iter().map(|m| m.content.clone().unwrap_or_default()).collect();
+    assert_eq!(after, live, "reopened history must match the compacted one");
+    assert!(after[0].contains("SUMMARY: earlier work"), "the summary survived: {after:?}");
+}

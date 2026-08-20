@@ -646,17 +646,13 @@ impl Agent {
     /// session JSONL. Public so `/compact` can force it.
     pub async fn compact(&self, session: &mut Session) -> Result<()> {
         // Gather what we need, then drop the borrow before the await.
-        let (before, recent, transcript) = {
+        let (before, split, transcript) = {
             let msgs = session.messages();
             let split = compaction_split(msgs, self.keep_recent_turns);
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
             }
-            (
-                msgs.len(),
-                msgs[split..].to_vec(),
-                render_transcript(&msgs[..split]),
-            )
+            (msgs.len(), split, render_transcript(&msgs[..split]))
         };
 
         let sys = "You are compacting a coding-agent conversation. Summarize the \
@@ -669,14 +665,8 @@ impl Agent {
             return Ok(()); // don't discard history for an empty summary
         }
 
-        let mut new_msgs = Vec::with_capacity(recent.len() + 1);
-        new_msgs.push(Message::user(format!(
-            "[Summary of earlier conversation]\n{summary}"
-        )));
-        new_msgs.extend(recent);
-        let after = new_msgs.len();
-
-        session.replace_messages(new_msgs)?;
+        session.compact(&summary, split)?;
+        let after = session.messages().len();
         self.bus.emit(Event::Compaction {
             messages_before: before,
             messages_after: after,
