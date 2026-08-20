@@ -235,6 +235,10 @@ struct App {
     pending_mine: Option<usize>,
     /// A floating picker, when one is open. It owns the keyboard while up.
     overlay: Option<Overlay>,
+    /// The as-you-type command hint. Unlike `overlay` it is *not* modal: the
+    /// composer keeps the keyboard and this just follows what is typed, the way
+    /// a shell completion menu does.
+    hint: Option<Overlay>,
     /// Which worker we're following, and how far we've printed. A worker's
     /// events go to its own bus, so this polls its recorded log instead.
     tail: Option<(String, usize)>,
@@ -287,6 +291,7 @@ impl App {
             pending_extract: false,
             pending_mine: None,
             overlay: None,
+            hint: None,
             tail: None,
             pending_approval: None,
             mouse: false,
@@ -396,6 +401,38 @@ impl App {
         self.cursor = 0;
         self.history_idx = None;
         self.completion = None;
+    }
+
+    /// Show the command list while a `/command` is being typed, and hide it
+    /// once the command is complete (a space means arguments now, and the
+    /// argument completions are a different thing).
+    fn refresh_hint(&mut self) {
+        let typed = self.input.trim_start();
+        let showing = typed.starts_with('/')
+            && !typed.contains(char::is_whitespace)
+            && !self.input.contains('\n');
+        if !showing {
+            self.hint = None;
+            return;
+        }
+        let items: Vec<OverlayItem> = COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(typed))
+            .map(|(name, desc)| OverlayItem {
+                label: (*name).to_string(),
+                description: (*desc).to_string(),
+            })
+            .collect();
+        if items.is_empty() {
+            self.hint = None;
+            return;
+        }
+        // Keep the highlighted row where it was if it is still in range, so
+        // typing one more character doesn't jump the selection around.
+        let selected = self.hint.as_ref().map(|h| h.selected).unwrap_or(0).min(items.len() - 1);
+        let mut ov = Overlay::new("commands", items);
+        ov.selected = selected;
+        self.hint = Some(ov);
     }
 
     fn set_input(&mut self, text: String) {
@@ -1151,6 +1188,43 @@ async fn handle_key(
         return Ok(Flow::Continue);
     }
 
+    // The as-you-type hint is not modal — it only claims the keys it needs, and
+    // only while it is visible.
+    if app.hint.is_some() {
+        match key.code {
+            // Up/Down browse the list rather than input history: while typing a
+            // command, the list is what you are looking at.
+            KeyCode::Up => {
+                app.hint.as_mut().unwrap().move_by(-1);
+                app.dirty = true;
+                return Ok(Flow::Continue);
+            }
+            KeyCode::Down => {
+                app.hint.as_mut().unwrap().move_by(1);
+                app.dirty = true;
+                return Ok(Flow::Continue);
+            }
+            // Tab accepts the highlighted command. This is better than the old
+            // blind prefix-cycling: you can see what you are accepting.
+            KeyCode::Tab => {
+                if let Some(label) = app.hint.as_ref().and_then(|h| h.chosen()) {
+                    app.set_input(format!("{label} "));
+                    app.hint = None;
+                    app.dirty = true;
+                    return Ok(Flow::Continue);
+                }
+            }
+            // First Esc dismisses the list; a second one clears the composer, so
+            // Esc never does two things at once.
+            KeyCode::Esc => {
+                app.hint = None;
+                app.dirty = true;
+                return Ok(Flow::Continue);
+            }
+            _ => {}
+        }
+    }
+
     // Any key other than Tab ends an in-progress completion cycle.
     if key.code != KeyCode::Tab {
         app.completion = None;
@@ -1240,6 +1314,8 @@ async fn handle_key(
         KeyCode::Char(c) if !ctrl => app.insert_char(c),
         _ => {}
     }
+    // One place, so no edit path can forget it.
+    app.refresh_hint();
     Ok(Flow::Continue)
 }
 
@@ -2357,10 +2433,69 @@ fn ui(f: &mut Frame, app: &App) {
     render_input(f, chunks[1], app);
     render_footer(f, chunks[2], app);
 
+    // The as-you-type hint sits directly above the composer, where you are
+    // already looking, rather than in the middle of the screen.
+    if let Some(hint) = &app.hint {
+        render_hint(f, chunks[1], hint);
+    }
+
     // Last, so it composites over everything else.
     if let Some(ov) = &app.overlay {
         render_overlay(f, f.area(), ov);
     }
+}
+
+/// Draw the command hint anchored to the bottom of `above`, growing upward.
+fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
+    let matches = ov.matches();
+    if matches.is_empty() {
+        return;
+    }
+    let label_w = matches.iter().map(|(_, i)| i.label.chars().count()).max().unwrap_or(0);
+    let desc_w = matches.iter().map(|(_, i)| i.description.chars().count()).max().unwrap_or(0);
+    let width = (label_w + desc_w + 8).clamp(20, above.width.saturating_sub(2) as usize) as u16;
+    let rows = (matches.len() as u16).min(8);
+    let height = rows + 2;
+    if above.y < height {
+        return; // no room above the composer; the footer hint still applies
+    }
+    let rect = Rect { x: above.x, y: above.y - height, width, height };
+
+    f.render_widget(ratatui::widgets::Clear, rect);
+    // Say when the list is longer than the window; eight of fourteen looks
+    // like all of them otherwise.
+    let title = if matches.len() as u16 > rows {
+        format!(" ↑↓ · Tab accepts · {rows}/{} ", matches.len())
+    } else {
+        " ↑↓ · Tab accepts ".to_string()
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let sel = ov.sel_index(matches.len());
+    let first = sel.saturating_sub(inner.height.saturating_sub(1) as usize);
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(inner.height as usize)
+        .map(|(i, (_, item))| {
+            let style = if i == sel {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            // A marker as well as a style: bold alone is invisible in a
+            // low-contrast theme, and this row is the one Tab will accept.
+            let marker = if i == sel { "▸ " } else { "  " };
+            Line::from(vec![
+                Span::styled(format!("{marker}{:<label_w$}  ", item.label), style),
+                Span::styled(item.description.clone(), Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// A centered floating list. `Clear` blanks what is underneath, which is what
@@ -2675,6 +2810,25 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
 /// Draw the command picker into an off-screen buffer and print it. A dev aid:
 /// the layout is worth looking at, and a TUI is otherwise hard to inspect.
+pub fn print_hint_preview(typed: &str) {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new("qwen/qwen3.8-27b".into(), 128_000, None);
+    app.push(Kind::User, "review chapter 9".to_string());
+    app.set_input(typed.to_string());
+    app.refresh_hint();
+    app.ensure_rows(80);
+
+    let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    term.draw(|f| ui(f, &app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    for y in 0..buf.area.height {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        println!("{}", row.trim_end());
+    }
+}
+
 pub fn print_overlay_preview() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2882,6 +3036,77 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ws-compl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::memory::MemoryStore::open(Some(&dir)).unwrap()
+    }
+
+    #[test]
+    fn the_hint_follows_a_command_being_typed() {
+        let mut a = app();
+        a.set_input("/".into());
+        a.refresh_hint();
+        assert_eq!(a.hint.as_ref().unwrap().matches().len(), COMMANDS.len());
+
+        a.set_input("/me".into());
+        a.refresh_hint();
+        let got: Vec<String> =
+            a.hint.as_ref().unwrap().matches().iter().map(|(_, i)| i.label.clone()).collect();
+        assert_eq!(got, vec!["/memory"]);
+
+        // Once the command is complete and arguments start, this is the wrong
+        // list to be showing — argument completion is a different thing.
+        a.set_input("/memory ".into());
+        a.refresh_hint();
+        assert!(a.hint.is_none(), "a space ends it");
+
+        // Nothing matches: no popup rather than an empty box.
+        a.set_input("/zzz".into());
+        a.refresh_hint();
+        assert!(a.hint.is_none());
+
+        // Ordinary prose is not a command.
+        a.set_input("what does /memory do".into());
+        a.refresh_hint();
+        assert!(a.hint.is_none());
+    }
+
+    #[test]
+    fn typing_further_does_not_jump_the_selection() {
+        let mut a = app();
+        a.set_input("/m".into());
+        a.refresh_hint();
+        a.hint.as_mut().unwrap().move_by(1); // highlight /mouse
+        assert_eq!(a.hint.as_ref().unwrap().chosen().as_deref(), Some("/mouse"));
+
+        // One more character narrows the list; the selection must stay valid
+        // rather than pointing past the end or silently resetting.
+        a.set_input("/mo".into());
+        a.refresh_hint();
+        let h = a.hint.as_ref().unwrap();
+        assert!(h.chosen().is_some(), "something is always selectable");
+        assert!(h.matches().len() <= 2);
+    }
+
+    #[test]
+    fn the_hint_draws_above_the_composer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut a = app();
+        a.set_input("/me".into());
+        a.refresh_hint();
+        a.ensure_rows(80);
+
+        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        term.draw(|f| ui(f, &a)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+
+        let hint_row = rows.iter().position(|r| r.contains("/memory")).expect("hint is drawn");
+        let composer_row =
+            rows.iter().position(|r| r.contains("/me ")).unwrap_or(rows.len() - 1);
+        assert!(hint_row < composer_row, "the hint sits above what you are typing");
+        assert!(rows.iter().any(|r| r.contains("Tab accepts")), "and says how to take it");
     }
 
     #[test]

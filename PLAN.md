@@ -815,17 +815,32 @@ easy to lose.
    check is `workers` vs `workers --until` on the 9B rather than assuming the
    +34 transfers.
 
-3. **M9 metrics, the cost-per-solved-task spine first.** The instrument, not
+3. **UX pass (in progress).** Steering, `/agents tail`, and the picker overlay
+   are done. Remaining: the `/model` picker — which needs a `[models]` config
+   section, and that is the same table M9 wants for prices, so the two want
+   doing together — and `@path` fuzzy picking.
+
+4. **Sandboxing, OS-local rather than Docker** *(decided 2026-08-20)*. See §11.9
+   and the reasoning recorded there: WASM cannot sandbox the native toolchain
+   worksmith exists to run, and a container breaks "edit my working tree in
+   place" while demanding the toolchain live in an image. macOS `sandbox-exec`
+   profiles and Linux Landlock (+ optional network namespace) let the real
+   toolchain run while restricting paths, and network denial is the only
+   OS-level thing that actually stops push and exfiltration. To be planned
+   before it is built.
+
+5. **M9 metrics, the cost-per-solved-task spine first.** The instrument, not
    decoration: it is what proves the differentiator to anyone else, and the only
    way M10 frugal mode can be judged. Pulls in the footer cost figure, which
    needs M9's price table. The metrics *tab* rides on M8's tabbed layout, which
    also answers "watch worker w2 work" — let tabs land as part of this rather
    than as their own goal.
 
-4. **M11 worktree sandbox.** Already evidence-backed by the three-worker
-   `draft-1.md` collision. Collision, security-in-depth, and undo in one.
+6. **M11 worktree sandbox.** Already evidence-backed by the three-worker
+   `draft-1.md` collision. Collision and undo — *not* a security boundary; that
+   is item 4's job.
 
-5. **MCP (§6) last.** It multiplies tool surface with third-party code under a
+7. **MCP (§6) last.** It multiplies tool surface with third-party code under a
    harness that has no permission model. Doing it before (1) means arbitrary
    tools executing unattended on a weak model's say-so.
 
