@@ -104,6 +104,12 @@ checks caught in milliseconds.
   a `git pull` that edits the config asks again. Headless runs never prompt —
   they ignore the file and say so, or take `--trust-project`. `/trust` shows the
   current decision and `/trust revoke` reopens it.
+- **A picker overlay**: `/help` opens a floating, filterable list of commands
+  with descriptions — type to narrow, ↑↓ to move, Enter to put it in the
+  composer (not to run it, so you can look before you leap), Esc to leave with
+  whatever you had typed intact. One component, since everything awkward here is
+  picking an opaque thing; models, sessions and worker ids are the next users of
+  it. `/help keys` still prints the full reference.
 - **Watching a worker** (`/agents tail <id>`): a worker's events go to its own
   bus and never reach the parent's transcript, so `/agents` could report status
   but never what a worker was *doing*. Each worker now keeps a bounded log of

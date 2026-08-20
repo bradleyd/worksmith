@@ -534,10 +534,21 @@ it's the surface open-source contributors build against.
 - **Vim keybindings (later).** A vim mode for navigation/scrolling (`j/k`,
   `gg/G`, `Ctrl+U/D`, counts) and eventually modal editing in the composer.
   M8-era polish alongside the tabbed layout.
+- **A note on menus (2026-08-20):** which-key-style leader trees were considered
+and rejected — they solve a modal editor's problem (dozens of chords to
+memorize), and this app has one text field with Tab completion. The part worth
+stealing is showing what is available *with descriptions* rather than requiring
+recall, which is what the picker does. Telescope's shape, not which-key's.
+
 - **Themes (later).** Selectable color themes (e.g. a `[theme]` config section
   or `/theme`), plus respecting light/dark terminals. The four-channel palette
   (user/assistant/tool/thinking) should be theme-driven rather than hard-coded.
-- **Command & path autocomplete (later).** In the composer: complete `/`
+- **Command & path autocomplete (partly done 2026-08-20).** `/help` is a
+  filterable popup list with descriptions, backed by one `COMMANDS` table that
+  also feeds Tab completion — they used to be separate hand-maintained lists.
+  The overlay component is reusable; `/model`, `/resume` and worker pickers are
+  the next users. Still to do: the popup appearing *as you type* `/` in the
+  composer, and `@path` fuzzy picking. Original entry: complete `/`
   slash-commands (with a popup list + descriptions) and `@path` file references
   (fuzzy, tab to accept). Steal the behavior from `reference/gemini-cli`'s
   @mention/shell completion and `reference/pi`'s `fuzzy.ts`.

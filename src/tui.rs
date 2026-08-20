@@ -82,10 +82,85 @@ struct Item {
 const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 
 /// Slash commands offered by Tab-completion.
-const COMMANDS: &[&str] = &[
-    "/help", "/new", "/compact", "/memory", "/knowledge", "/skill", "/spawn", "/agents",
-    "/validate", "/fast", "/think", "/mouse", "/trust", "/quit",
+/// Every slash command with what it does. One table, so the completion popup,
+/// Tab completion and `/help` cannot drift from each other — they used to be
+/// three separate lists maintained by hand.
+const COMMANDS: &[(&str, &str)] = &[
+    ("/help", "keys and commands"),
+    ("/new", "start a fresh session"),
+    ("/compact", "summarize the history now"),
+    ("/memory", "what is remembered — search, mine, review"),
+    ("/knowledge", "the project's own docs and source"),
+    ("/skill", "load a skill"),
+    ("/spawn", "run a task in background workers"),
+    ("/agents", "list workers, or tail one live"),
+    ("/validate", "the check a turn must pass"),
+    ("/fast", "answer without thinking first"),
+    ("/think", "thinking, optionally capped to a budget"),
+    ("/mouse", "wheel scrolling vs. selecting text"),
+    ("/trust", "is this project's own config in effect?"),
+    ("/quit", "exit"),
 ];
+
+/// A floating list: a filter line and a scrollable set of choices. One
+/// component, because everything awkward in this UI is picking an opaque thing
+/// — a command, a model, a session, a worker id.
+struct Overlay {
+    title: String,
+    items: Vec<OverlayItem>,
+    filter: String,
+    selected: usize,
+}
+
+#[derive(Clone)]
+struct OverlayItem {
+    label: String,
+    description: String,
+}
+
+impl Overlay {
+    fn new(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
+        Self { title: title.into(), items, filter: String::new(), selected: 0 }
+    }
+
+    /// Items matching the filter, as `(original index, item)`.
+    fn matches(&self) -> Vec<(usize, &OverlayItem)> {
+        let f = self.filter.trim().to_ascii_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                f.is_empty()
+                    || i.label.to_ascii_lowercase().contains(&f)
+                    || i.description.to_ascii_lowercase().contains(&f)
+            })
+            .collect()
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        let n = self.matches().len();
+        if n == 0 {
+            self.selected = 0;
+            return;
+        }
+        let cur = self.selected.min(n - 1) as isize;
+        self.selected = (cur + delta).rem_euclid(n as isize) as usize;
+    }
+
+    /// Which row is highlighted, clamped to the current matches. Typing narrows
+    /// the list under the cursor, so the stored index can point past the end;
+    /// clamping in one place keeps what is drawn and what Enter picks in
+    /// agreement, instead of highlighting a row that selects nothing.
+    fn sel_index(&self, matches: usize) -> usize {
+        self.selected.min(matches.saturating_sub(1))
+    }
+
+    /// The label of the highlighted row, if the filter matched anything.
+    fn chosen(&self) -> Option<String> {
+        let m = self.matches();
+        m.get(self.sel_index(m.len())).map(|(_, i)| i.label.clone())
+    }
+}
 
 /// Active Tab-completion state (candidates for the current token).
 struct Completion {
@@ -158,6 +233,8 @@ struct App {
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
+    /// A floating picker, when one is open. It owns the keyboard while up.
+    overlay: Option<Overlay>,
     /// Which worker we're following, and how far we've printed. A worker's
     /// events go to its own bus, so this polls its recorded log instead.
     tail: Option<(String, usize)>,
@@ -209,6 +286,7 @@ impl App {
             pending_fanout: None,
             pending_extract: false,
             pending_mine: None,
+            overlay: None,
             tail: None,
             pending_approval: None,
             mouse: false,
@@ -1038,6 +1116,41 @@ async fn handle_key(
         return Ok(Flow::Continue);
     }
 
+    // A picker owns the keyboard while it is up. Esc always returns to the
+    // composer with whatever was typed still there — a modal you can get stuck
+    // in is worse than no modal.
+    if let Some(ov) = &mut app.overlay {
+        match key.code {
+            KeyCode::Esc => app.overlay = None,
+            KeyCode::Up => ov.move_by(-1),
+            KeyCode::Down => ov.move_by(1),
+            KeyCode::Char('p') if ctrl => ov.move_by(-1),
+            KeyCode::Char('n') if ctrl => ov.move_by(1),
+            KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
+            KeyCode::Backspace => {
+                ov.filter.pop();
+                ov.selected = 0;
+            }
+            KeyCode::Enter => {
+                let chosen = ov.chosen();
+                app.overlay = None;
+                if let Some(label) = chosen {
+                    // Put it in the composer rather than running it: a picker
+                    // that fires commands on Enter is a picker you cannot use
+                    // to *look* at something.
+                    app.set_input(format!("{label} "));
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                ov.filter.push(c);
+                ov.selected = 0;
+            }
+            _ => {}
+        }
+        app.dirty = true;
+        return Ok(Flow::Continue);
+    }
+
     // Any key other than Tab ends an in-progress completion cycle.
     if key.code != KeyCode::Tab {
         app.completion = None;
@@ -1145,6 +1258,18 @@ async fn handle_command(
     let mut parts = input.trim_start_matches('/').split_whitespace();
     let head = parts.next().unwrap_or("");
     match head {
+        "help" | "h" if parts.clone().next().is_none() => {
+            // The command list as something you can filter and read, rather than
+            // a wall you scroll back through. `/help keys` still prints it all.
+            let items = COMMANDS
+                .iter()
+                .map(|(name, desc)| OverlayItem {
+                    label: (*name).to_string(),
+                    description: (*desc).to_string(),
+                })
+                .collect();
+            app.overlay = Some(Overlay::new("commands · type to filter", items));
+        }
         "help" | "h" => {
             // One wrapped paragraph of everything was unreadable. Group it, put
             // one thing per line, and align the descriptions.
@@ -2045,8 +2170,8 @@ fn compute_completions(input: &str, cwd: &Path, mem: &MemoryStore) -> Option<(us
         let rest = token.strip_prefix('/')?;
         let cands: Vec<String> = COMMANDS
             .iter()
-            .filter(|c| c[1..].starts_with(rest))
-            .map(|c| format!("{c} "))
+            .filter(|(c, _)| c[1..].starts_with(rest))
+            .map(|(c, _)| format!("{c} "))
             .collect();
         return (!cands.is_empty()).then_some((token_start, cands));
     }
@@ -2231,6 +2356,75 @@ fn ui(f: &mut Frame, app: &App) {
     render_transcript(f, chunks[0], app);
     render_input(f, chunks[1], app);
     render_footer(f, chunks[2], app);
+
+    // Last, so it composites over everything else.
+    if let Some(ov) = &app.overlay {
+        render_overlay(f, f.area(), ov);
+    }
+}
+
+/// A centered floating list. `Clear` blanks what is underneath, which is what
+/// makes it read as a window rather than as text drawn over the transcript.
+fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
+    let matches = ov.matches();
+    // Bounds are constant and ordered, so clamp cannot panic here.
+    let width = area.width.saturating_sub(8).clamp(20, 76);
+    let rows = (matches.len() as u16).clamp(1, 14);
+    let height = (rows + 2).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 3;
+    let rect = Rect { x, y, width, height };
+
+    f.render_widget(ratatui::widgets::Clear, rect);
+
+    let title = if ov.filter.is_empty() {
+        format!(" {} ", ov.title)
+    } else {
+        format!(" {} · {} ", ov.title, ov.filter)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(" ↑↓ move · Enter pick · Esc close ");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    // Keep the selection on screen when the list is longer than the window.
+    let visible = inner.height as usize;
+    let sel = ov.sel_index(matches.len());
+    let first = sel.saturating_sub(visible.saturating_sub(1));
+    let label_w = matches.iter().map(|(_, i)| i.label.chars().count()).max().unwrap_or(0).min(20);
+
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(i, (_, item))| {
+            let selected = i == sel;
+            let marker = if selected { "▸ " } else { "  " };
+            let label = format!("{:<label_w$}", item.label);
+            let style = if selected {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(format!("{marker}{label}"), style),
+                Span::styled(
+                    format!("  {}", item.description),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        })
+        .collect();
+
+    let body = if lines.is_empty() {
+        vec![Line::from(Span::styled("(nothing matches)", Style::default().fg(Color::DarkGray)))]
+    } else {
+        lines
+    };
+    f.render_widget(Paragraph::new(body), inner);
 }
 
 fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
@@ -2479,6 +2673,34 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// Draw the command picker into an off-screen buffer and print it. A dev aid:
+/// the layout is worth looking at, and a TUI is otherwise hard to inspect.
+pub fn print_overlay_preview() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new("qwen/qwen3.8-27b".into(), 128_000, None);
+    app.push(Kind::User, "review chapter 9".to_string());
+    app.push(Kind::Assistant, "Reading the docx…".to_string());
+    let items = COMMANDS
+        .iter()
+        .map(|(name, desc)| OverlayItem {
+            label: (*name).to_string(),
+            description: (*desc).to_string(),
+        })
+        .collect();
+    app.overlay = Some(Overlay::new("commands · type to filter", items));
+    app.ensure_rows(80);
+
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| ui(f, &app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    for y in 0..buf.area.height {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        println!("{}", row.trim_end());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2660,6 +2882,87 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ws-compl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::memory::MemoryStore::open(Some(&dir)).unwrap()
+    }
+
+    #[test]
+    fn the_picker_filters_on_label_and_description() {
+        let mut ov = Overlay::new(
+            "commands",
+            vec![
+                OverlayItem { label: "/memory".into(), description: "what is remembered".into() },
+                OverlayItem { label: "/mouse".into(), description: "wheel vs. selection".into() },
+                OverlayItem { label: "/quit".into(), description: "exit".into() },
+            ],
+        );
+        assert_eq!(ov.matches().len(), 3);
+
+        ov.filter = "mo".into();
+        let got: Vec<&str> = ov.matches().iter().map(|(_, i)| i.label.as_str()).collect();
+        assert_eq!(got, vec!["/memory", "/mouse"]);
+
+        // Matching the description too is the point: you look for what a thing
+        // *does* when you cannot remember what it is called.
+        ov.filter = "remember".into();
+        assert_eq!(ov.matches().len(), 1);
+        assert_eq!(ov.chosen().as_deref(), Some("/memory"));
+
+        ov.filter = "zzz".into();
+        assert!(ov.matches().is_empty());
+        assert_eq!(ov.chosen(), None, "an empty list must not yield a selection");
+    }
+
+    #[test]
+    fn selection_wraps_and_survives_a_shrinking_list() {
+        let mut ov = Overlay::new(
+            "commands",
+            vec![
+                OverlayItem { label: "/a".into(), description: "one".into() },
+                OverlayItem { label: "/b".into(), description: "two".into() },
+            ],
+        );
+        ov.move_by(1);
+        assert_eq!(ov.chosen().as_deref(), Some("/b"));
+        ov.move_by(1);
+        assert_eq!(ov.chosen().as_deref(), Some("/a"), "wraps to the top");
+        ov.move_by(-1);
+        assert_eq!(ov.chosen().as_deref(), Some("/b"), "and to the bottom");
+
+        // Filtering to fewer items than the current index must not panic or
+        // point past the end.
+        ov.selected = 1;
+        ov.filter = "one".into();
+        assert_eq!(ov.chosen().as_deref(), Some("/a"));
+    }
+
+    #[test]
+    fn every_command_is_listed_with_a_description() {
+        // The table backs completion, the picker and /help at once; an entry
+        // without a description would show as a blank row.
+        for (name, desc) in COMMANDS {
+            assert!(name.starts_with('/'), "{name} should be a slash command");
+            assert!(!desc.trim().is_empty(), "{name} has no description");
+        }
+    }
+
+    #[test]
+    fn the_picker_draws_over_the_transcript() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app();
+        app.push(Kind::Assistant, "x".repeat(400));
+        app.overlay = Some(Overlay::new(
+            "commands",
+            vec![OverlayItem { label: "/memory".into(), description: "what is remembered".into() }],
+        ));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| ui(f, &app)).unwrap();
+        let rendered: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+
+        assert!(rendered.contains("/memory"), "the picker is on screen");
+        assert!(rendered.contains("what is remembered"), "with its description");
+        assert!(rendered.contains("Esc close"), "and how to get out of it");
     }
 
     #[test]
