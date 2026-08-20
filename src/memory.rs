@@ -363,6 +363,36 @@ impl MemoryStore {
         Ok((MemoryRow { status: "proposed".into(), ..row }, true))
     }
 
+    /// Resolve a possibly-abbreviated id. Memories are keyed by UUID, and a
+    /// user cannot be expected to retype 36 characters to approve one — so any
+    /// unambiguous prefix works, the way git resolves short hashes.
+    pub fn resolve_id(&self, prefix: &str) -> Result<IdMatch> {
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Ok(IdMatch::None);
+        }
+        let mut hits: Vec<String> = Vec::new();
+        for conn in self.conns() {
+            let mut stmt = conn.prepare("SELECT id FROM memories WHERE id LIKE ?1 || '%'")?;
+            let rows = stmt.query_map([prefix], |r| r.get::<_, String>(0))?;
+            for id in rows {
+                hits.push(id?);
+            }
+        }
+        hits.sort();
+        hits.dedup();
+        match hits.len() {
+            0 => Ok(IdMatch::None),
+            1 => Ok(IdMatch::Unique(hits.remove(0))),
+            _ => Ok(IdMatch::Ambiguous(hits)),
+        }
+    }
+
+    /// Ids of proposals awaiting review, for tab completion.
+    pub fn pending_ids(&self) -> Result<Vec<String>> {
+        Ok(self.pending()?.into_iter().map(|r| r.id).collect())
+    }
+
     /// Has the miner already read this session? Recorded in the project store
     /// when there is one — mining is per-project, and so is its bookkeeping.
     pub fn was_mined(&self, session_id: &str) -> Result<bool> {
@@ -511,6 +541,25 @@ subject: a short topic key, 1-4 words
 importance: 0-100
 
 If nothing is worth keeping, output exactly: NONE";
+
+/// The result of resolving a short id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdMatch {
+    Unique(String),
+    /// Several memories share the prefix — the caller should show them rather
+    /// than guess.
+    Ambiguous(Vec<String>),
+    None,
+}
+
+/// How much of a UUID to show. Eight hex characters is what git settled on and
+/// it stays unambiguous well past any plausible number of memories.
+pub const SHORT_ID: usize = 8;
+
+/// The displayable short form of an id.
+pub fn short_id(id: &str) -> &str {
+    &id[..id.len().min(SHORT_ID)]
+}
 
 /// A memory the extractor proposed, before it's written anywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]

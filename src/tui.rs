@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, TurnResult};
 use crate::event::{Event, EventBus};
 use crate::llm::Thinking;
-use crate::memory::{MemoryStore, Scope};
+use crate::memory::{IdMatch, MemoryStore, Scope, short_id};
 use crate::prompt::{build_system_prompt, build_worker_prompt};
 use crate::session::Session;
 use crate::validation::CommandValidator;
@@ -77,7 +77,7 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 /// Slash commands offered by Tab-completion.
 const COMMANDS: &[&str] = &[
     "/help", "/new", "/compact", "/memory", "/knowledge", "/skill", "/spawn", "/agents",
-    "/validate", "/fast", "/think", "/quit",
+    "/validate", "/fast", "/think", "/mouse", "/quit",
 ];
 
 /// Active Tab-completion state (candidates for the current token).
@@ -151,6 +151,9 @@ struct App {
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
+    /// Is mouse capture on? Off by default so the terminal keeps its own text
+    /// selection; `/mouse on` trades that for wheel scrolling.
+    mouse: bool,
 }
 
 impl App {
@@ -192,6 +195,7 @@ impl App {
             pending_fanout: None,
             pending_extract: false,
             pending_mine: None,
+            mouse: false,
         }
     }
 
@@ -493,7 +497,12 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 fn setup_terminal() -> Result<Term> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)
+    // Deliberately NOT EnableMouseCapture. Capturing the mouse takes drag events
+    // away from the terminal, which kills click-and-drag text selection — you
+    // can no longer copy anything out of the window. All it buys is wheel
+    // scrolling, and PageUp/PageDown and Ctrl+U/Ctrl+D already do that.
+    // `/mouse on` turns capture on for anyone who wants the wheel instead.
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)
         .context("entering alternate screen")?;
     Terminal::new(CrosstermBackend::new(out)).context("creating terminal")
 }
@@ -920,7 +929,7 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
-        KeyCode::Tab => complete(app, cwd),
+        KeyCode::Tab => complete(app, cwd, mem),
         KeyCode::Char('o') if ctrl => {
             app.collapse_tools = !app.collapse_tools;
             app.dirty = true;
@@ -1010,16 +1019,51 @@ async fn handle_command(
     let head = parts.next().unwrap_or("");
     match head {
         "help" | "h" => {
+            // One wrapped paragraph of everything was unreadable. Group it, put
+            // one thing per line, and align the descriptions.
             app.push(
                 Kind::Notice,
-                "keys: Enter=send  Alt+Enter=newline  Ctrl+G=$EDITOR  Esc=abort/clear  \
-                 Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
-                 commands: /new /compact /memory [search|extract|mine|pending|approve] \
-                 /knowledge [index|search] /skill [name] /validate <cmd|off> \
-                 /fast [on|off|auto] \
-                 /think [on|off|auto|<tokens>] \
-                 /spawn [-n N | --each-files <regex>] [--model <spec>] <task> \
-                 /agents [kill|show|nudge <id> | drop-queued] /quit   @path includes a file"
+                "\
+KEYS
+  Enter          send                 Alt+Enter    newline
+  Tab            complete             Ctrl+G       edit in $EDITOR
+  Esc            abort / clear        Ctrl+C       quit
+  Ctrl+O         show tool output     Ctrl+T       show thinking
+  PageUp/Down    scroll               Ctrl+U/D     scroll
+
+SESSION
+  /new                                start a fresh session
+  /compact                            summarize the history now
+  /validate <cmd|off>                 command that must pass before a turn is done
+  /quit
+
+MODEL
+  /fast [on|off|auto]                 answer without thinking first
+  /think [on|off|auto|<tokens>]       thinking, optionally capped to a budget
+
+MEMORY
+  /memory                             list what is remembered
+  /memory search <query>              search it
+  /memory extract                     distill this session into proposals
+  /memory mine [n]                    mine past sessions of this project
+  /memory pending                     review proposals
+  /memory approve <id|all>            accept one, or all of them
+  /memory forget <id>                 delete one
+  /memory show <id>                   show one in full
+  /memory add <scope> <kind> <subject> <content...>
+
+KNOWLEDGE & SKILLS
+  /knowledge [index|search <query>]   the project's own docs and source
+  /skill [name]                       load a skill
+
+WORKERS
+  /spawn [-n N | --each-files <re>] [--model <spec>] <task>
+  /agents [kill|show|nudge <id>|drop-queued]
+
+TERMINAL
+  /mouse [on|off]                     wheel scrolling vs. selecting text to copy
+
+Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     .to_string(),
             );
         }
@@ -1158,6 +1202,41 @@ async fn handle_command(
             };
             app.push(Kind::Notice, msg);
         }
+        "mouse" => {
+            let want = match parts.next() {
+                Some("on") => true,
+                Some("off") => false,
+                None => !app.mouse,
+                Some(other) => {
+                    app.push(Kind::Error, format!("usage: /mouse [on|off] (got {other})"));
+                    return Ok(true);
+                }
+            };
+            let mut out = io::stdout();
+            let res = if want {
+                execute!(out, EnableMouseCapture)
+            } else {
+                execute!(out, DisableMouseCapture)
+            };
+            match res {
+                Ok(()) => {
+                    app.mouse = want;
+                    app.push(
+                        Kind::Notice,
+                        if want {
+                            "mouse capture on — wheel scrolls, but the terminal can no longer \
+                             select text"
+                                .to_string()
+                        } else {
+                            "mouse capture off — drag to select and copy; PageUp/PageDown and \
+                             Ctrl+U/Ctrl+D scroll"
+                                .to_string()
+                        },
+                    );
+                }
+                Err(e) => app.push(Kind::Error, format!("mouse: {e}")),
+            }
+        }
         "validate" => {
             let rest: Vec<&str> = parts.collect();
             let rest = rest.join(" ");
@@ -1183,6 +1262,30 @@ async fn handle_command(
     Ok(true)
 }
 
+/// Resolve a user-typed id, which is normally an 8-character prefix. Reports
+/// the failure itself and returns None, so callers stay readable.
+fn resolve_memory_id(app: &mut App, mem: &MemoryStore, typed: &str) -> Option<String> {
+    match mem.resolve_id(typed) {
+        Ok(IdMatch::Unique(id)) => Some(id),
+        Ok(IdMatch::None) => {
+            app.push(Kind::Notice, format!("(no memory matching `{typed}`)"));
+            None
+        }
+        Ok(IdMatch::Ambiguous(ids)) => {
+            let shown: Vec<&str> = ids.iter().map(|i| short_id(i)).collect();
+            app.push(
+                Kind::Notice,
+                format!("`{typed}` matches {}: {}", ids.len(), shown.join(", ")),
+            );
+            None
+        }
+        Err(e) => {
+            app.push(Kind::Error, format!("memory error: {e}"));
+            None
+        }
+    }
+}
+
 /// `/memory [list|global|project | show <id> | forget <id> | add <scope> <kind> <subject> <content…>]`
 fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator<Item = &'a str>) {
     let sub = parts.next().unwrap_or("list");
@@ -1190,8 +1293,9 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
         "list" | "" => memory_list(app, mem, None),
         "global" => memory_list(app, mem, Some(Scope::Global)),
         "project" => memory_list(app, mem, Some(Scope::Project)),
-        "show" => match parts.next() {
-            Some(id) => match mem.get(id) {
+        "show" => {
+            if let Some(id) = parts.next().and_then(|t| resolve_memory_id(app, mem, t)) {
+                match mem.get(&id) {
                 Ok(Some(r)) => app.push(
                     Kind::Notice,
                     format!(
@@ -1199,19 +1303,20 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                         r.scope, r.kind, r.subject, r.importance, r.status, r.content
                     ),
                 ),
-                Ok(None) => app.push(Kind::Notice, format!("(no memory {id})")),
-                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
-            },
-            None => app.push(Kind::Notice, "usage: /memory show <id>".to_string()),
-        },
-        "forget" => match parts.next() {
-            Some(id) => match mem.forget(id) {
-                Ok(true) => app.push(Kind::Notice, format!("forgot {id}")),
-                Ok(false) => app.push(Kind::Notice, format!("(no memory {id})")),
-                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
-            },
-            None => app.push(Kind::Notice, "usage: /memory forget <id>".to_string()),
-        },
+                    Ok(None) => app.push(Kind::Notice, format!("(no memory {id})")),
+                    Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                }
+            }
+        }
+        "forget" => {
+            if let Some(id) = parts.next().and_then(|t| resolve_memory_id(app, mem, t)) {
+                match mem.forget(&id) {
+                    Ok(true) => app.push(Kind::Notice, format!("forgot {}", short_id(&id))),
+                    Ok(false) => app.push(Kind::Notice, format!("(no memory {id})")),
+                    Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                }
+            }
+        }
         "search" | "find" => {
             let query = parts.collect::<Vec<_>>().join(" ");
             if query.trim().is_empty() {
@@ -1227,8 +1332,8 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                                 Kind::Notice,
                                 format!(
                                     "{:.2}  {}  [{}/{}] {}: {}",
-                                    h.score, h.row.id, h.row.scope, h.row.kind, h.row.subject,
-                                    h.row.content
+                                    h.score, short_id(&h.row.id), h.row.scope, h.row.kind,
+                                    h.row.subject, h.row.content
                                 ),
                             );
                         }
@@ -1253,28 +1358,62 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
         }
         "pending" | "proposed" => match mem.pending() {
             Ok(rows) if rows.is_empty() => {
-                app.push(Kind::Notice, "(no proposals from workers)".to_string())
+                app.push(Kind::Notice, "(nothing pending)".to_string())
             }
             Ok(rows) => {
+                let n = rows.len();
                 for r in rows {
                     app.push(
                         Kind::Notice,
                         format!(
-                            "{}  [{}/{}] {}: {}  (/memory approve {} | /memory forget {})",
-                            r.id, r.scope, r.kind, r.subject, r.content, r.id, r.id
+                            "{}  [{}/{}] {}: {}",
+                            short_id(&r.id), r.scope, r.kind, r.subject, r.content
                         ),
                     );
                 }
+                // One hint for the batch. Repeating two full uuids per row made
+                // the list unreadable and still left the id to be retyped.
+                app.push(
+                    Kind::Notice,
+                    format!(
+                        "{n} pending — /memory approve <id> (Tab completes) · \
+                         /memory approve all · /memory forget <id>"
+                    ),
+                );
             }
             Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
         },
+        // `all` matters here: mining files several proposals at once, and
+        // approving them one uuid at a time is the slowest part of the loop.
         "approve" => match parts.next() {
-            Some(id) => match mem.approve(id) {
-                Ok(true) => app.push(Kind::Notice, format!("approved {id}")),
-                Ok(false) => app.push(Kind::Notice, format!("(no pending proposal {id})")),
+            Some("all") => match mem.pending_ids() {
+                Ok(ids) if ids.is_empty() => {
+                    app.push(Kind::Notice, "(nothing pending)".to_string())
+                }
+                Ok(ids) => {
+                    let mut n = 0;
+                    for id in &ids {
+                        match mem.approve(id) {
+                            Ok(true) => n += 1,
+                            Ok(false) => {}
+                            Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                        }
+                    }
+                    app.push(Kind::Notice, format!("approved {n} proposals"));
+                }
                 Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
             },
-            None => app.push(Kind::Notice, "usage: /memory approve <id>".to_string()),
+            Some(t) => {
+                if let Some(id) = resolve_memory_id(app, mem, t) {
+                    match mem.approve(&id) {
+                        Ok(true) => app.push(Kind::Notice, format!("approved {}", short_id(&id))),
+                        Ok(false) => app
+                            .push(Kind::Notice, format!("(not pending: {})", short_id(&id))),
+                        Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+                    }
+                }
+            }
+            None => app.push(Kind::Notice, "usage: /memory approve <id|all>".to_string()),
         },
         "add" => {
             let scope = parts.next().and_then(Scope::parse);
@@ -1295,7 +1434,27 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                 ),
             }
         }
-        other => app.push(Kind::Error, format!("unknown /memory subcommand: {other}")),
+        "help" | "?" => app.push(
+            Kind::Notice,
+            "\
+  /memory                             list what is remembered
+  /memory global | project            list one scope
+  /memory search <query>              search it
+  /memory extract                     distill this session into proposals
+  /memory mine [n]                    mine past sessions of this project
+  /memory pending                     review proposals
+  /memory approve <id|all>            accept one, or all of them
+  /memory forget <id>                 delete one
+  /memory show <id>                   show one in full
+  /memory add <scope> <kind> <subject> <content...>
+
+Ids accept any unique prefix, and Tab completes them."
+                .to_string(),
+        ),
+        other => app.push(
+            Kind::Error,
+            format!("unknown /memory subcommand: {other} — try /memory help"),
+        ),
     }
 }
 
@@ -1306,7 +1465,10 @@ fn memory_list(app: &mut App, mem: &MemoryStore, scope: Option<Scope>) {
             for r in rows {
                 app.push(
                     Kind::Notice,
-                    format!("{}  [{}/{}] {}: {}", r.id, r.scope, r.kind, r.subject, r.content),
+                    format!(
+                        "{}  [{}/{}] {}: {}",
+                        short_id(&r.id), r.scope, r.kind, r.subject, r.content
+                    ),
                 );
             }
         }
@@ -1606,7 +1768,7 @@ fn tool_summary(name: &str, arguments: &str) -> String {
 
 /// Tab-complete the current token: `/command` in command position, or `@path`
 /// file references anywhere. Repeated Tab cycles the candidates.
-fn complete(app: &mut App, cwd: &Path) {
+fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore) {
     if let Some(c) = &mut app.completion {
         if c.candidates.len() > 1 {
             c.idx = (c.idx + 1) % c.candidates.len();
@@ -1619,7 +1781,7 @@ fn complete(app: &mut App, cwd: &Path) {
         return;
     }
 
-    let Some((start, candidates)) = compute_completions(&app.input, cwd) else {
+    let Some((start, candidates)) = compute_completions(&app.input, cwd, mem) else {
         return;
     };
     app.input.truncate(start);
@@ -1645,7 +1807,7 @@ fn completion_status(c: &Completion) -> String {
 
 /// Compute completion candidates for the current (last) token. Returns the byte
 /// offset where the token starts and the replacement strings.
-fn compute_completions(input: &str, cwd: &Path) -> Option<(usize, Vec<String>)> {
+fn compute_completions(input: &str, cwd: &Path, mem: &MemoryStore) -> Option<(usize, Vec<String>)> {
     let token_start = input.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
     let token = &input[token_start..];
 
@@ -1674,7 +1836,7 @@ fn compute_completions(input: &str, cwd: &Path) -> Option<(usize, Vec<String>)> 
         return None;
     }
     let prev = input[..token_start].split_whitespace().count();
-    let cands = arg_completions(first, prev, token, &tokens, cwd)?;
+    let cands = arg_completions(first, prev, token, &tokens, cwd, mem)?;
     (!cands.is_empty()).then_some((token_start, cands))
 }
 
@@ -1685,6 +1847,7 @@ fn arg_completions(
     token: &str,
     tokens: &[&str],
     cwd: &Path,
+    mem: &MemoryStore,
 ) -> Option<Vec<String>> {
     let opts: &[&str] = match first.trim_start_matches('/') {
         "agents" | "workers" if prev == 1 => {
@@ -1695,13 +1858,26 @@ fn arg_completions(
         "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
         "think" if prev == 1 => &["on", "off", "auto", "2000"],
+        "mouse" if prev == 1 => &["on", "off"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
             1 => &[
-                "list", "global", "project", "search", "show", "pending", "approve", "extract",
-                "mine",
-                "forget", "add",
+                "list", "global", "project", "search", "show", "pending", "approve",
+                "extract", "mine", "forget", "add", "help",
             ],
+            // Ids are UUIDs. Completing them is the difference between the
+            // review loop being usable and the user retyping 36 characters from
+            // a terminal they cannot even select text in.
+            2 if matches!(tokens.get(1), Some(&"approve")) => {
+                let mut out = memory_id_candidates(mem, token, true);
+                if "all".starts_with(token) {
+                    out.insert(0, "all ".to_string());
+                }
+                return Some(out);
+            }
+            2 if matches!(tokens.get(1), Some(&"forget") | Some(&"show")) => {
+                return Some(memory_id_candidates(mem, token, false));
+            }
             2 if tokens.get(1) == Some(&"add") => &["global", "project"],
             3 if tokens.get(1) == Some(&"add") => {
                 &["decision", "constraint", "preference", "fact", "lesson"]
@@ -1711,6 +1887,19 @@ fn arg_completions(
         _ => return None,
     };
     Some(opts.iter().filter(|o| o.starts_with(token)).map(|o| format!("{o} ")).collect())
+}
+
+/// Short ids matching `token`. `pending_only` narrows to proposals, which is
+/// what `approve` can act on — offering ids it would reject is worse than
+/// offering none.
+fn memory_id_candidates(mem: &MemoryStore, token: &str, pending_only: bool) -> Vec<String> {
+    let ids = if pending_only { mem.pending_ids() } else { mem.list(None).map(|rows| rows.into_iter().map(|r| r.id).collect()) };
+    ids.unwrap_or_default()
+        .iter()
+        .map(|id| short_id(id).to_string())
+        .filter(|id| id.starts_with(token))
+        .map(|id| format!("{id} "))
+        .collect()
 }
 
 /// Installed skill names matching `token` — completion has to read the disk
@@ -2240,33 +2429,41 @@ mod tests {
         assert_eq!(a.input, "draft", "past newest restores the draft");
     }
 
+    /// Completion needs a store to offer memory ids; these tests are about the
+    /// command grammar, so an empty one in a temp dir is the point.
+    fn probe_store() -> crate::memory::MemoryStore {
+        let dir = std::env::temp_dir().join(format!("ws-compl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::memory::MemoryStore::open(Some(&dir)).unwrap()
+    }
+
     #[test]
     fn completes_slash_commands() {
-        let (start, c) = compute_completions("/me", Path::new(".")).unwrap();
+        let (start, c) = compute_completions("/me", Path::new("."), &probe_store()).unwrap();
         assert_eq!(start, 0);
         assert_eq!(c, vec!["/memory ".to_string()]);
 
-        let (_, all) = compute_completions("/", Path::new(".")).unwrap();
+        let (_, all) = compute_completions("/", Path::new("."), &probe_store()).unwrap();
         assert!(all.len() >= 5);
 
         // Not in command position → no command completion.
-        assert!(compute_completions("hi /me", Path::new(".")).is_none());
+        assert!(compute_completions("hi /me", Path::new("."), &probe_store()).is_none());
     }
 
     #[test]
     fn completes_subcommands_and_args() {
         // /agents subcommands
-        let (_, c) = compute_completions("/agents ", Path::new(".")).unwrap();
+        let (_, c) = compute_completions("/agents ", Path::new("."), &probe_store()).unwrap();
         assert!(c.contains(&"list ".to_string()) && c.contains(&"kill ".to_string()), "{c:?}");
-        let (_, c) = compute_completions("/agents k", Path::new(".")).unwrap();
+        let (_, c) = compute_completions("/agents k", Path::new("."), &probe_store()).unwrap();
         assert_eq!(c, vec!["kill ".to_string()]);
 
         // /memory subcommands, then add's scope + kind
-        let (_, c) = compute_completions("/memory ", Path::new(".")).unwrap();
+        let (_, c) = compute_completions("/memory ", Path::new("."), &probe_store()).unwrap();
         assert!(c.contains(&"forget ".to_string()) && c.contains(&"add ".to_string()), "{c:?}");
-        let (_, c) = compute_completions("/memory add ", Path::new(".")).unwrap();
+        let (_, c) = compute_completions("/memory add ", Path::new("."), &probe_store()).unwrap();
         assert_eq!(c, vec!["global ".to_string(), "project ".to_string()]);
-        let (_, c) = compute_completions("/memory add project ", Path::new(".")).unwrap();
+        let (_, c) = compute_completions("/memory add project ", Path::new("."), &probe_store()).unwrap();
         assert!(c.contains(&"decision ".to_string()) && c.contains(&"lesson ".to_string()), "{c:?}");
     }
 
@@ -2277,13 +2474,13 @@ mod tests {
         std::fs::write(dir.path().join("main.rs"), "").unwrap();
         std::fs::write(dir.path().join("mod.rs"), "").unwrap();
 
-        let (start, c) = compute_completions("@m", dir.path()).unwrap();
+        let (start, c) = compute_completions("@m", dir.path(), &probe_store()).unwrap();
         assert_eq!(start, 0);
         assert!(c.contains(&"@main.rs".to_string()), "{c:?}");
         assert!(c.contains(&"@mod.rs".to_string()), "{c:?}");
 
         // Directories get a trailing slash.
-        let (_, d) = compute_completions("@s", dir.path()).unwrap();
+        let (_, d) = compute_completions("@s", dir.path(), &probe_store()).unwrap();
         assert!(d.contains(&"@src/".to_string()), "{d:?}");
     }
 

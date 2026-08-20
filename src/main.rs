@@ -916,6 +916,28 @@ fn handle_knowledge<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
     }
 }
 
+/// Resolve a user-typed (usually abbreviated) memory id, reporting the failure
+/// itself. Same rule as the TUI: any unambiguous prefix works.
+fn resolve_memory_id(mem: &MemoryStore, typed: &str) -> Option<String> {
+    use worksmith::memory::{IdMatch, short_id};
+    match mem.resolve_id(typed) {
+        Ok(IdMatch::Unique(id)) => Some(id),
+        Ok(IdMatch::None) => {
+            println!("(no memory matching `{typed}`)");
+            None
+        }
+        Ok(IdMatch::Ambiguous(ids)) => {
+            let shown: Vec<&str> = ids.iter().map(|i| short_id(i)).collect();
+            println!("`{typed}` matches {}: {}", ids.len(), shown.join(", "));
+            None
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            None
+        }
+    }
+}
+
 async fn handle_memory<'a>(
     mut parts: impl Iterator<Item = &'a str>,
     mem: &MemoryStore,
@@ -980,12 +1002,23 @@ async fn handle_memory<'a>(
             Err(e) => eprintln!("memory error: {e}"),
         },
         "approve" => match parts.next() {
-            Some(id) => match mem.approve(id) {
-                Ok(true) => println!("approved {id}"),
-                Ok(false) => println!("(no pending proposal {id})"),
+            Some("all") => match mem.pending_ids() {
+                Ok(ids) if ids.is_empty() => println!("(nothing pending)"),
+                Ok(ids) => {
+                    let n = ids.iter().filter(|id| mem.approve(id).unwrap_or(false)).count();
+                    println!("approved {n} proposals");
+                }
                 Err(e) => eprintln!("memory error: {e}"),
             },
-            None => println!("usage: /memory approve <id>"),
+            Some(t) => {
+                let Some(id) = resolve_memory_id(mem, t) else { return };
+                match mem.approve(&id) {
+                    Ok(true) => println!("approved {}", worksmith::memory::short_id(&id)),
+                    Ok(false) => println!("(no pending proposal {t})"),
+                    Err(e) => eprintln!("memory error: {e}"),
+                }
+            }
+            None => println!("usage: /memory approve <id|all>"),
         },
         "extract" | "distill" => {
             let transcript = render_recent(session, 40);
@@ -1029,7 +1062,8 @@ async fn handle_memory<'a>(
                 eprintln!("usage: /memory show <id>");
                 return;
             };
-            match mem.get(id) {
+            let Some(id) = resolve_memory_id(mem, id) else { return };
+            match mem.get(&id) {
                 Ok(Some(r)) => println!(
                     "[{}] {} ({}) importance={} status={}\n{}",
                     r.scope, r.subject, r.kind, r.importance, r.status, r.content
@@ -1043,8 +1077,9 @@ async fn handle_memory<'a>(
                 eprintln!("usage: /memory forget <id>");
                 return;
             };
-            match mem.forget(id) {
-                Ok(true) => println!("(forgot {id})"),
+            let Some(id) = resolve_memory_id(mem, id) else { return };
+            match mem.forget(&id) {
+                Ok(true) => println!("(forgot {})", worksmith::memory::short_id(&id)),
                 Ok(false) => println!("(no memory {id})"),
                 Err(e) => eprintln!("error: {e}"),
             }

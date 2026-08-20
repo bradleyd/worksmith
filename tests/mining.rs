@@ -42,7 +42,7 @@ fn only_this_projects_sessions_are_mined() {
 fn short_sessions_are_skipped_and_never_reconsidered() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
-    seed_session(dir.path(), 2); // below the 10-user-message floor
+    seed_session(dir.path(), 2); // 4 messages — below the activity floor
     let mem = store(dir.path());
 
     let p = plan(&mem, dir.path(), 10).unwrap();
@@ -140,4 +140,58 @@ fn an_empty_archive_says_so() {
     let p = plan(&store(dir.path()), dir.path(), 10).unwrap();
     assert_eq!(p.report, MineReport::default());
     assert!(p.report.summary().contains("no past sessions"));
+}
+
+#[test]
+fn a_short_id_prefix_resolves_like_a_git_hash() {
+    use worksmith::memory::{IdMatch, short_id};
+
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mem = store(dir.path());
+    let row = mem.remember(Scope::Project, "fact", "pandoc", "round-trips docx", 60).unwrap();
+
+    // Nobody is retyping 36 characters out of a terminal, so the short form
+    // shown in listings has to be the form the commands accept.
+    let short = short_id(&row.id).to_string();
+    assert_eq!(short.len(), 8);
+    assert_eq!(mem.resolve_id(&short).unwrap(), IdMatch::Unique(row.id.clone()));
+    assert_eq!(mem.resolve_id(&row.id).unwrap(), IdMatch::Unique(row.id.clone()));
+    assert_eq!(mem.resolve_id("").unwrap(), IdMatch::None);
+    assert_eq!(mem.resolve_id("zzzzzzzz").unwrap(), IdMatch::None);
+}
+
+#[test]
+fn an_ambiguous_prefix_is_reported_rather_than_guessed() {
+    use worksmith::memory::IdMatch;
+
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mem = store(dir.path());
+    for i in 0..3 {
+        mem.remember(Scope::Project, "fact", &format!("s{i}"), "c", 60).unwrap();
+    }
+
+    // Every uuid shares the empty prefix; "" is None, but a 1-char prefix will
+    // usually hit several. Acting on a guess would approve the wrong memory.
+    let all = mem.list(None).unwrap();
+    let first_char = &all[0].id[..1];
+    match mem.resolve_id(first_char).unwrap() {
+        IdMatch::Unique(_) => {} // legitimately unique, nothing to assert
+        IdMatch::Ambiguous(ids) => assert!(ids.len() > 1),
+        IdMatch::None => panic!("a prefix of an existing id must match something"),
+    }
+}
+
+#[test]
+fn only_pending_ids_are_offered_for_approval() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mem = store(dir.path());
+    mem.remember(Scope::Project, "fact", "active", "already approved", 60).unwrap();
+    let (proposed, _) = mem.propose(Scope::Project, "fact", "waiting", "needs review", 60).unwrap();
+
+    // Completing ids that `approve` would reject is worse than completing none.
+    let ids = mem.pending_ids().unwrap();
+    assert_eq!(ids, vec![proposed.id]);
 }
