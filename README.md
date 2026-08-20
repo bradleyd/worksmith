@@ -263,9 +263,10 @@ Tests point `WORKSMITH_HOME` at a per-process scratch directory
 
 ### Cutting a release
 
-1. Bump `version` in `Cargo.toml` (and `version` in the tap's formula,
-   `bradleyd/homebrew-worksmith` → `Formula/worksmith.rb`).
+1. Bump `version` in `Cargo.toml`, then in the tap's formula
+   (`bradleyd/homebrew-worksmith` → `Formula/worksmith.rb`: the URL's
+   `v<version>` tag + version inside the tarball name).
 2. Push; tag `v<version>` — the release workflow builds the macOS arm64 and
    Linux x86_64 (musl static) binaries and attaches them to the GitHub release.
-3. Fill the formula's `sha256` values from the release artifacts and push the
+3. Fill the formula's `sha256` from the macOS release artifact and push the
    tap. Users then get it with `brew upgrade`.
