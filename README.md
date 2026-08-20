@@ -104,6 +104,13 @@ checks caught in milliseconds.
   a `git pull` that edits the config asks again. Headless runs never prompt —
   they ignore the file and say so, or take `--trust-project`. `/trust` shows the
   current decision and `/trust revoke` reopens it.
+- **Normal mode** (Esc on an empty composer): read the transcript with the
+  keyboard — `j`/`k`, `g`/`G`, `Ctrl+U`/`Ctrl+D`, `/` to search with `n`/`N` to
+  cycle matches, and `y` to yank the *message* under the cursor (not the wrapped
+  line) to the system clipboard via OSC 52, which works over SSH. `i`, `Enter`
+  or `Esc` returns to typing. The mode exists to reclaim the alphabet — `j` and
+  `/` cannot coexist with a composer that eats every character — and nothing is
+  mode-only, so a mode you never enter cannot trap you.
 - **A picker overlay**: `/help` opens a floating, filterable list of commands
   with descriptions — type to narrow, ↑↓ to move, Enter to put it in the
   composer (not to run it, so you can look before you leap), Esc to leave with

@@ -60,6 +60,43 @@ type PlannedFanOut = (
     Option<String>,
 );
 
+/// Typing, or reading. See `App::mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Insert,
+    Normal,
+}
+
+/// A `/` search over the transcript.
+#[derive(Debug, Clone, Default)]
+struct Search {
+    pattern: String,
+    /// True while the pattern is being typed; Enter commits it.
+    typing: bool,
+}
+
+/// Put `text` on the system clipboard using OSC 52, the terminal's own
+/// clipboard escape. No pbcopy/xclip dependency, and it works over SSH — the
+/// terminal emulator does the writing, wherever it is running.
+///
+/// Not every terminal enables it (some require opting in), which is why the
+/// caller reports failure rather than assuming success.
+fn copy_to_clipboard(text: &str) -> io::Result<()> {
+    use base64::Engine;
+    use std::io::Write;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut out = io::stdout();
+    // ESC ] 52 ; c ; <base64> BEL — `c` is the clipboard selection.
+    write!(out, "\x1b]52;c;{encoded}\x07")?;
+    out.flush()
+}
+
+/// The plain text of a rendered row, for searching.
+fn row_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -240,6 +277,15 @@ struct App {
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
+    /// Insert (typing) or normal (reading). Normal mode exists to reclaim the
+    /// alphabet: `j`, `k`, `/`, `y` cannot coexist with a composer that eats
+    /// every character. Nothing is mode-*only* — every insert-mode key still
+    /// works — so a mode you never enter cannot trap you.
+    mode: Mode,
+    /// Row the cursor sits on in normal mode, an index into `cached_rows`.
+    cursor_row: usize,
+    /// The active `/` search: the pattern, and whether it is still being typed.
+    search: Option<Search>,
     /// A floating picker, when one is open. It owns the keyboard while up.
     overlay: Option<Overlay>,
     /// The as-you-type command hint. Unlike `overlay` it is *not* modal: the
@@ -299,6 +345,9 @@ impl App {
             pending_fanout: None,
             pending_extract: false,
             pending_mine: None,
+            mode: Mode::Insert,
+            cursor_row: 0,
+            search: None,
             overlay: None,
             hint: None,
             tail: None,
@@ -311,6 +360,74 @@ impl App {
         let at = self.items.len();
         self.items.push(Item { kind, text: text.into() });
         self.touch(at);
+    }
+
+    // ---- normal mode ----
+
+    /// Enter reading mode, putting the cursor on the last visible row.
+    fn enter_normal(&mut self) {
+        self.mode = Mode::Normal;
+        self.cursor_row = self.cached_rows.len().saturating_sub(1);
+        self.follow = false; // reading, not tailing
+    }
+
+    fn enter_insert(&mut self) {
+        self.mode = Mode::Insert;
+        self.search = None;
+        self.follow = true;
+    }
+
+    /// Move the cursor by `delta` rows, clamped, keeping it on screen.
+    fn cursor_by(&mut self, delta: isize) {
+        let last = self.cached_rows.len().saturating_sub(1);
+        let next = (self.cursor_row as isize + delta).clamp(0, last as isize) as usize;
+        self.cursor_row = next;
+    }
+
+    /// Which item a row belongs to. `item_starts` already records where each
+    /// item begins, so this is the lookup that makes "yank what I'm looking at"
+    /// mean the whole message rather than one wrapped line.
+    fn item_at_row(&self, row: usize) -> Option<usize> {
+        if self.item_starts.is_empty() {
+            return None;
+        }
+        Some(match self.item_starts.binary_search(&row) {
+            Ok(i) => i,
+            Err(0) => 0,
+            Err(i) => i - 1,
+        })
+    }
+
+    /// Rows matching the committed search pattern, in order.
+    fn search_hits(&self) -> Vec<usize> {
+        let Some(s) = &self.search else { return Vec::new() };
+        if s.pattern.is_empty() {
+            return Vec::new();
+        }
+        let needle = s.pattern.to_ascii_lowercase();
+        self.cached_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| row_text(l).to_ascii_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Jump to the next match after the cursor, wrapping. Returns false when
+    /// nothing matches, so the caller can say so instead of moving silently.
+    fn jump_match(&mut self, forward: bool) -> bool {
+        let hits = self.search_hits();
+        if hits.is_empty() {
+            return false;
+        }
+        let cur = self.cursor_row;
+        let next = if forward {
+            hits.iter().find(|&&r| r > cur).copied().unwrap_or(hits[0])
+        } else {
+            hits.iter().rev().find(|&&r| r < cur).copied().unwrap_or(*hits.last().unwrap())
+        };
+        self.cursor_row = next;
+        true
     }
 
     /// Mark item `index` (and everything after it) as needing re-wrapping.
@@ -1244,6 +1361,83 @@ async fn handle_key(
         return Ok(Flow::Continue);
     }
 
+    // Normal mode owns the alphabet. Nothing here is reachable unless you
+    // deliberately entered it, and every route out is one key.
+    if app.mode == Mode::Normal {
+        // A search being typed takes precedence: it is a prompt, not a mode.
+        if let Some(s) = &mut app.search
+            && s.typing
+        {
+            match key.code {
+                KeyCode::Esc => app.search = None,
+                KeyCode::Enter => {
+                    s.typing = false;
+                    if !app.jump_match(true) {
+                        let p = app.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
+                        app.status = format!("no match for `{p}`");
+                        app.search = None;
+                    }
+                }
+                KeyCode::Backspace => {
+                    s.pattern.pop();
+                }
+                KeyCode::Char(c) if !ctrl => s.pattern.push(c),
+                _ => {}
+            }
+            return Ok(Flow::Continue);
+        }
+
+        match key.code {
+            KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
+            // Back to typing. Several routes, because being stuck in a mode is
+            // the failure people remember.
+            KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Enter | KeyCode::Esc => {
+                app.enter_insert();
+                app.status = "insert".into();
+            }
+            KeyCode::Char('j') | KeyCode::Down => app.cursor_by(1),
+            KeyCode::Char('k') | KeyCode::Up => app.cursor_by(-1),
+            KeyCode::Char('d') if ctrl => app.cursor_by(10),
+            KeyCode::Char('u') if ctrl => app.cursor_by(-10),
+            KeyCode::PageDown => app.cursor_by(20),
+            KeyCode::PageUp => app.cursor_by(-20),
+            KeyCode::Char('G') => app.cursor_by(isize::MAX / 2),
+            KeyCode::Char('g') => {
+                // `gg` in vim; a single `g` here, since there is no other g-verb
+                // to disambiguate from and a hidden two-key chord is worse.
+                app.cursor_row = 0;
+            }
+            KeyCode::Char('/') => app.search = Some(Search { pattern: String::new(), typing: true }),
+            KeyCode::Char('n') => {
+                if !app.jump_match(true) {
+                    app.status = "no matches".into();
+                }
+            }
+            KeyCode::Char('N') => {
+                if !app.jump_match(false) {
+                    app.status = "no matches".into();
+                }
+            }
+            // Yank the whole item under the cursor, not the wrapped row: what
+            // you want is the message, the tool output, the code block.
+            KeyCode::Char('y') => match app.item_at_row(app.cursor_row) {
+                Some(i) => {
+                    let text = app.items[i].text.clone();
+                    match copy_to_clipboard(&text) {
+                        Ok(()) => {
+                            let n = text.lines().count();
+                            app.status = format!("yanked {n} lines");
+                        }
+                        Err(e) => app.push(Kind::Error, format!("clipboard: {e}")),
+                    }
+                }
+                None => app.status = "nothing to yank".into(),
+            },
+            _ => {}
+        }
+        return Ok(Flow::Continue);
+    }
+
     // The as-you-type hint is not modal — it only claims the keys it needs, and
     // only while it is visible.
     if app.hint.is_some() {
@@ -1321,6 +1515,11 @@ async fn handle_key(
             if app.running {
                 cancel.cancel();
                 app.status = "aborting…".into();
+            } else if app.input.is_empty() {
+                // Nothing to clear, so Esc means "stop typing, start reading".
+                // Never steals an Esc that had a job to do.
+                app.enter_normal();
+                app.status = "normal · j k /search n N · y yank · i insert".into();
             } else {
                 app.clear_input();
             }
@@ -1423,12 +1622,20 @@ async fn handle_command(
                 Kind::Notice,
                 "\
 KEYS
+  Esc            (empty composer) read the transcript — see NORMAL below
   Enter          send — or steer the running turn
   Alt+Enter      newline
   Tab            complete             Ctrl+G       edit in $EDITOR
   Esc            abort / clear        Ctrl+C       quit
   Ctrl+O         show tool output     Ctrl+T       show thinking
   PageUp/Down    scroll               Ctrl+U/D     scroll
+
+NORMAL MODE (Esc on an empty composer)
+  j k  ↑ ↓       move            Ctrl+U/D   half page
+  g  G           top / bottom    PageUp/Dn  page
+  /              search          n  N       next / previous match
+  y              yank the message under the cursor to the clipboard
+  i  Enter  Esc  back to typing
 
 SESSION
   /new                                start a fresh session
@@ -2645,10 +2852,53 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
     let rows = &app.cached_rows;
     let h = area.height as usize;
     let total = rows.len();
-    let up = (app.scroll_up as usize).min(total.saturating_sub(1));
-    let end = total.saturating_sub(up);
+
+    // In normal mode the window follows the cursor instead of the tail —
+    // otherwise `k` would move a cursor you cannot see.
+    let end = if app.mode == Mode::Normal {
+        (app.cursor_row + 1).max(h.min(total)).min(total)
+    } else {
+        let up = (app.scroll_up as usize).min(total.saturating_sub(1));
+        total.saturating_sub(up)
+    };
     let start = end.saturating_sub(h);
-    let view = rows[start..end].to_vec();
+
+    let hits: Vec<usize> = if app.mode == Mode::Normal { app.search_hits() } else { Vec::new() };
+    let view: Vec<Line> = rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let row = start + i;
+            if app.mode == Mode::Normal && row == app.cursor_row {
+                // Reverse video: readable in any theme, unlike a colour choice.
+                let spans = line
+                    .spans
+                    .iter()
+                    .map(|sp| {
+                        Span::styled(
+                            sp.content.clone(),
+                            sp.style.add_modifier(Modifier::REVERSED),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Line::from(spans)
+            } else if hits.contains(&row) {
+                Line::from(
+                    line.spans
+                        .iter()
+                        .map(|sp| {
+                            Span::styled(
+                                sp.content.clone(),
+                                sp.style.fg(Color::Black).bg(Color::Yellow),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                line.clone()
+            }
+        })
+        .collect();
 
     let para = Paragraph::new(view).block(Block::default().borders(Borders::NONE));
     f.render_widget(para, area);
@@ -2749,7 +2999,13 @@ fn item_rows(
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
-    let title = if app.running {
+    let title = if app.mode == Mode::Normal {
+        // The single worst modal failure is not knowing which mode you are in.
+        match &app.search {
+            Some(s) if s.typing => format!(" NORMAL · /{} ", s.pattern),
+            _ => " NORMAL · j k · /search · y yank · i insert ".to_string(),
+        }
+    } else if app.running {
         // Say that typing is useful right now. " working… " reads as "wait",
         // which is what made people assume input was ignored — and it was.
         " working… · Enter steers the running turn · Esc aborts ".to_string()
@@ -2937,6 +3193,31 @@ pub fn bench_rows() {
             each,
             1.0 / each.as_secs_f64()
         );
+    }
+}
+
+/// Normal mode with a search active, drawn off-screen so the layout and the
+/// mode indicator can be looked at rather than assumed.
+pub fn print_normal_preview() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new("qwen/qwen3.8-27b".into(), 128_000, None);
+    app.push(Kind::User, "review chapter 9".to_string());
+    app.push(Kind::Assistant, "The listing captions are missing for 9-3 and 9-14.".to_string());
+    app.push(Kind::Tool, "⚙ read Chapter9.docx".to_string());
+    app.push(Kind::ToolResult, "styles: Body, CodeAnnotated, ListPlain".to_string());
+    app.ensure_rows(78);
+    app.enter_normal();
+    app.cursor_by(-4);
+    app.search = Some(Search { pattern: "listing".into(), typing: false });
+
+    let mut term = Terminal::new(TestBackend::new(78, 14)).unwrap();
+    term.draw(|f| ui(f, &app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    for y in 0..buf.area.height {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        println!("{}", row.trim_end());
     }
 }
 
@@ -3232,6 +3513,109 @@ mod tests {
         a.ensure_rows(60);
         assert!(a.cached_rows.len() > prefix, "the prefix was kept, not rebuilt");
         assert_eq!(a.item_starts.len(), a.items.len(), "one start per item");
+    }
+
+    #[test]
+    fn a_row_maps_back_to_the_item_it_came_from() {
+        // `y` yanks the message, not the wrapped line under the cursor, so this
+        // lookup is what makes the feature mean anything.
+        let mut a = app();
+        a.push(Kind::User, "short");
+        a.push(Kind::Assistant, "long ".repeat(60));
+        a.push(Kind::Tool, "⚙ grep");
+        a.ensure_rows(40);
+
+        assert_eq!(a.item_at_row(0), Some(0));
+        let assistant_start = a.item_starts[1];
+        assert_eq!(a.item_at_row(assistant_start), Some(1));
+        assert_eq!(a.item_at_row(assistant_start + 1), Some(1), "a wrapped row is still item 1");
+        assert_eq!(a.item_at_row(a.item_starts[2]), Some(2));
+        assert_eq!(a.item_at_row(9_999), Some(2), "past the end clamps to the last item");
+    }
+
+    #[test]
+    fn search_finds_wraps_and_reports_nothing_found() {
+        let mut a = app();
+        a.push(Kind::Assistant, "the listing caption is missing");
+        a.push(Kind::Assistant, "unrelated");
+        a.push(Kind::Assistant, "another listing here");
+        a.ensure_rows(80);
+        a.enter_normal();
+
+        a.search = Some(Search { pattern: "LISTING".into(), typing: false });
+        let hits = a.search_hits();
+        assert_eq!(hits.len(), 2, "case-insensitive: {hits:?}");
+
+        // Jumping repeatedly cycles the matches and comes back round, rather
+        // than stopping at the last one.
+        a.cursor_row = 0;
+        let mut visited = Vec::new();
+        for _ in 0..3 {
+            assert!(a.jump_match(true));
+            visited.push(a.cursor_row);
+        }
+        assert_eq!(visited, vec![hits[1], hits[0], hits[1]], "forward wraps: {visited:?}");
+
+        // Backwards cycles the other way.
+        assert!(a.jump_match(false));
+        assert_eq!(a.cursor_row, hits[0]);
+
+        // A pattern that matches nothing must say so, not move the cursor.
+        a.search = Some(Search { pattern: "zzz".into(), typing: false });
+        let before = a.cursor_row;
+        assert!(!a.jump_match(true));
+        assert_eq!(a.cursor_row, before);
+    }
+
+    #[test]
+    fn leaving_normal_mode_resumes_following_the_tail() {
+        let mut a = app();
+        a.push(Kind::Assistant, "hello");
+        a.ensure_rows(80);
+
+        a.enter_normal();
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(!a.follow, "reading should not jump to the bottom on new output");
+
+        a.search = Some(Search { pattern: "x".into(), typing: true });
+        a.enter_insert();
+        assert_eq!(a.mode, Mode::Insert);
+        assert!(a.follow, "typing means you want to see what arrives");
+        assert!(a.search.is_none(), "a stale search must not keep highlighting");
+    }
+
+    #[test]
+    fn the_cursor_and_matches_are_visibly_marked() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut a = app();
+        a.push(Kind::Assistant, "the listing caption");
+        a.push(Kind::Assistant, "plain row");
+        a.ensure_rows(78);
+        a.enter_normal();
+        a.cursor_row = 0;
+        a.search = Some(Search { pattern: "listing".into(), typing: false });
+
+        let mut term = Terminal::new(TestBackend::new(78, 10)).unwrap();
+        term.draw(|f| ui(f, &a)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // Row 0 is both the cursor and a match; the cursor wins, and it is
+        // reverse video so it reads in any theme rather than a colour that
+        // might vanish.
+        assert!(
+            buf[(2, 0)].modifier.contains(Modifier::REVERSED),
+            "the cursor row is marked: {:?}",
+            buf[(2, 0)]
+        );
+
+        // And the mode is stated, because not knowing which mode you are in is
+        // the failure people remember.
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        assert!(rows.iter().any(|r| r.contains("NORMAL")), "mode is visible");
     }
 
     #[test]

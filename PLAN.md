@@ -531,9 +531,17 @@ it's the surface open-source contributors build against.
   M8. The main-view footer stays a quick-glance summary; depth lives in tabs.
 - **Scrolling.** Mouse wheel + PageUp/Down + Ctrl+U/D (half-page) + Up/Down +
   Home/End, with follow-tail on new output. (Shipped in M2.)
-- **Vim keybindings (later).** A vim mode for navigation/scrolling (`j/k`,
-  `gg/G`, `Ctrl+U/D`, counts) and eventually modal editing in the composer.
-  M8-era polish alongside the tabbed layout.
+- **Vim keybindings — navigation done (2026-08-20).** Esc on an empty composer
+  enters a normal mode: `j/k`, `g/G`, `Ctrl+U/D`, `/` search with `n/N`, and `y`
+  to yank the item under the cursor (OSC 52, so it works over SSH). Modal
+  editing in the composer is deliberately *not* done: the mode earns its place
+  by shipping search and yank — things the always-insert model cannot do —
+  rather than by adding focus for its own sake, and every insert-mode key still
+  works, so the mode cannot trap you.
+
+  Click-to-focus was considered and dropped: it needs mouse capture, which is
+  what kills terminal text selection, and the preference here is keyboard over
+  mouse. `/mouse on` remains for wheel scrolling.
 - **A note on menus (2026-08-20):** which-key-style leader trees were considered
 and rejected — they solve a modal editor's problem (dozens of chords to
 memorize), and this app has one text field with Tab completion. The part worth

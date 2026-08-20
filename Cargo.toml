@@ -23,6 +23,8 @@ serde_json = "1"
 toml = "1"
 # Fingerprinting project configs for the trust store; already in the tree.
 sha2 = "0.10"
+# OSC 52 clipboard writes; already in the tree.
+base64 = "0.22"
 
 # errors
 anyhow = "1"
