@@ -86,6 +86,12 @@ impl Steering {
     fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.inbox.lock().unwrap())
     }
+
+    /// Anything pushed but not yet drained. A message typed just as a turn ends
+    /// would otherwise sit here unseen until some later turn happened to start.
+    pub fn drain(&self) -> Vec<String> {
+        self.take()
+    }
 }
 
 /// How much the model deliberates before answering, toggleable while a session

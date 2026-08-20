@@ -104,6 +104,11 @@ checks caught in milliseconds.
   a `git pull` that edits the config asks again. Headless runs never prompt —
   they ignore the file and say so, or take `--trust-project`. `/trust` shows the
   current decision and `/trust revoke` reopens it.
+- **Steering a running turn**: type while the model works and press Enter — the
+  message lands before its next model call, so a correction ("no, use the other
+  file") arrives while it still matters instead of after. Anything typed just as
+  a turn ends starts the next one rather than disappearing. This is what
+  "human-in-the-loop is a feature, not a fallback" has to mean in practice.
 - **Checked workers** (`/spawn --until "<check>"`, `[agents] validate`): a
   spawned worker gets the same validation-driven loop as the main agent —
   re-planning until the check passes instead of stopping when the model says it

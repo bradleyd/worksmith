@@ -500,8 +500,13 @@ it's the surface open-source contributors build against.
   `/compact` `/session` `/tree` `/settings` `/memory` `/export` `/quit`.
 - Shortcuts: Ctrl+L model, Ctrl+P cycle, Shift+Tab thinking level,
   Ctrl+O collapse tool output, Esc abort, Esc-Esc `/tree`.
-- Message queue: Enter = steering, Alt+Enter = follow-up (replicate — it's
-  a big quality-of-life win).
+- ~~Message queue: Enter = steering, Alt+Enter = follow-up.~~ **Done
+  (2026-08-20):** Enter mid-turn steers the running turn (the agent drains its
+  mailbox at the top of every step). Alt+Enter stays newline — it was already
+  bound and retraining that costs more than the follow-up variant is worth;
+  a message that arrives too late to be drained starts the next turn instead,
+  which covers the same need. Before this, mid-turn input was cleared from the
+  composer and discarded.
 - Agent panel: `/agents` list/tail/kill, footer running-count (§7).
 - Streaming: token-by-token, tool calls rendered inline, collapsible.
 - **Role-distinct rendering (four channels).** The user must be able to tell

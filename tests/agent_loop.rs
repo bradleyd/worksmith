@@ -554,3 +554,53 @@ async fn a_compacted_session_stays_compacted_when_reopened() {
     assert_eq!(after, live, "reopened history must match the compacted one");
     assert!(after[0].contains("SUMMARY: earlier work"), "the summary survived: {after:?}");
 }
+
+#[tokio::test]
+async fn a_message_that_misses_the_turn_is_recoverable_rather_than_lost() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let agent = build_agent(MockClient::new(vec![done("answered")]), dir.path(), 3);
+    let steering = agent.steering();
+
+    agent
+        .run_turn(&mut session, "hi", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // Typed just as the turn ended: too late to be drained by a step, and it
+    // would otherwise sit in the mailbox until some later turn happened to
+    // start. The user pressed Enter, so it has to be recoverable.
+    steering.push("actually, use tabs");
+    assert_eq!(steering.drain(), vec!["actually, use tabs"]);
+    assert!(steering.drain().is_empty(), "draining twice must not duplicate it");
+}
+
+#[tokio::test]
+async fn steering_the_agent_consumed_is_not_offered_again() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let agent = build_agent(
+        MockClient::new(vec![tool_call("ls", r#"{"path":"."}"#), done("answered")]),
+        dir.path(),
+        3,
+    );
+    let steering = agent.steering();
+    steering.push("look in src/ instead");
+
+    agent
+        .run_turn(&mut session, "hi", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // The turn drained it, so the caller must not start a second turn with it.
+    assert!(steering.drain().is_empty(), "a delivered message must not be re-sent");
+    let delivered = session
+        .messages()
+        .iter()
+        .any(|m| m.content.as_deref().is_some_and(|c| c.contains("look in src/ instead")));
+    assert!(delivered, "and it should have reached the conversation");
+}

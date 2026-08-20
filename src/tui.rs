@@ -901,6 +901,28 @@ async fn run_loop(
                     Ok(Err(e)) => app.push(Kind::Error, format!("turn error: {e:#}")),
                     Err(_) => app.push(Kind::Error, "turn task failed".to_string()),
                 }
+
+                // Steering that arrived too late to be drained would otherwise
+                // sit in the mailbox until some later turn happened to start.
+                // The user pressed Enter; that has to produce an answer.
+                let late = agent.steering().drain();
+                if !late.is_empty() {
+                    app.push(
+                        Kind::Notice,
+                        "(that arrived as the turn ended — starting a new one)".to_string(),
+                    );
+                    start_turn(
+                        late.join("\n"),
+                        &mut app,
+                        &agent,
+                        &session,
+                        &mem,
+                        &cwd,
+                        bash_timeout,
+                        &mut turn,
+                        &mut cancel,
+                    );
+                }
             }
 
             // Spinner animation while a turn runs.
@@ -1055,13 +1077,24 @@ async fn handle_key(
                 return Ok(Flow::Continue);
             }
 
+            let message = expand_file_mentions(&input, cwd);
+
+            // Mid-turn, this is *steering*: the agent drains its mailbox at the
+            // top of every step, so the message lands before the next model
+            // call. Previously the composer was cleared and the text thrown
+            // away with a "a turn is already running" notice — typing a
+            // correction while the model worked simply destroyed it, in a
+            // harness whose stated bet is human-in-the-loop.
             if app.running {
-                app.status = "a turn is already running (Esc to abort)".into();
+                agent.steering().push(message);
+                app.push(Kind::User, format!("↳ {input}"));
+                app.status = "sent — the model sees it at its next step".into();
+                if app.follow {
+                    app.scroll_up = 0;
+                }
                 return Ok(Flow::Continue);
             }
 
-            // Start a turn.
-            let message = expand_file_mentions(&input, cwd);
             start_turn(message, app, agent, session, mem, cwd, bash_timeout, turn, cancel);
         }
         // Ignore control-chords; accept normal (and shifted) chars at the cursor.
@@ -1093,7 +1126,8 @@ async fn handle_command(
                 Kind::Notice,
                 "\
 KEYS
-  Enter          send                 Alt+Enter    newline
+  Enter          send — or steer the running turn
+  Alt+Enter      newline
   Tab            complete             Ctrl+G       edit in $EDITOR
   Esc            abort / clear        Ctrl+C       quit
   Ctrl+O         show tool output     Ctrl+T       show thinking
@@ -2235,7 +2269,9 @@ fn build_rows(
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let title = if app.running {
-        " working… ".to_string()
+        // Say that typing is useful right now. " working… " reads as "wait",
+        // which is what made people assume input was ignored — and it was.
+        " working… · Enter steers the running turn · Esc aborts ".to_string()
     } else {
         " message · Enter send · Alt+Enter newline ".to_string()
     };
