@@ -77,7 +77,7 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 /// Slash commands offered by Tab-completion.
 const COMMANDS: &[&str] = &[
     "/help", "/new", "/compact", "/memory", "/knowledge", "/skill", "/spawn", "/agents",
-    "/validate", "/fast", "/think", "/mouse", "/quit",
+    "/validate", "/fast", "/think", "/mouse", "/trust", "/quit",
 ];
 
 /// Active Tab-completion state (candidates for the current token).
@@ -1115,6 +1115,10 @@ WORKERS
   /spawn [-n N | --each-files <re>] [--model <spec>] <task>
   /agents [kill|show|nudge <id>|drop-queued]
 
+PROJECT
+  /trust                              is this project's own config in effect?
+  /trust revoke                       decide again on the next start
+
 TERMINAL
   /mouse [on|off]                     wheel scrolling vs. selecting text to copy
 
@@ -1256,6 +1260,55 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 None => "thinking left to the provider's default".to_string(),
             };
             app.push(Kind::Notice, msg);
+        }
+        "trust" => {
+            use crate::trust::{Decision, TrustStore, prompt_for};
+            let mut store = TrustStore::load();
+            let Some(p) = prompt_for(cwd, &store) else {
+                app.push(Kind::Notice, "this project has no .worksmith/config.toml".to_string());
+                return Ok(true);
+            };
+            match parts.next() {
+                // Revoking is the point of having the command: a decision you
+                // cannot revisit is one you will make carelessly.
+                Some("revoke") | Some("forget") => {
+                    if store.revoke(cwd) {
+                        app.push(
+                            Kind::Notice,
+                            "forgot this project's trust decision — worksmith will ask again \
+                             next start"
+                                .to_string(),
+                        );
+                    } else {
+                        app.push(Kind::Notice, "(no decision recorded for this project)".to_string());
+                    }
+                }
+                Some(other) => app.push(
+                    Kind::Error,
+                    format!("usage: /trust [revoke] (got {other})"),
+                ),
+                None => {
+                    let state = match store.decision_for(cwd, &p.fingerprint) {
+                        Some(Decision::Trust) => "trusted — its config is in effect",
+                        Some(Decision::Ignore) => "ignored — running on your global config",
+                        None => "undecided — its config is NOT in effect",
+                    };
+                    app.push(Kind::Notice, format!("{}\n{state}", p.config_path.display()));
+                    for (key, value, why) in &p.settings {
+                        app.push(
+                            Kind::Notice,
+                            match why {
+                                Some(w) => format!("  ! {key} = {value}\n      {w}"),
+                                None => format!("    {key} = {value}"),
+                            },
+                        );
+                    }
+                    app.push(
+                        Kind::Notice,
+                        "/trust revoke to decide again on the next start".to_string(),
+                    );
+                }
+            }
         }
         "mouse" => {
             let want = match parts.next() {
@@ -1914,6 +1967,7 @@ fn arg_completions(
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
         "think" if prev == 1 => &["on", "off", "auto", "2000"],
         "mouse" if prev == 1 => &["on", "off"],
+        "trust" if prev == 1 => &["revoke"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
             1 => &[

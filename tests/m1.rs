@@ -192,7 +192,8 @@ base-url = "http://localhost:8000/v1"
     )
     .unwrap();
 
-    let cfg = Config::load(dir.path()).unwrap();
+    // `load_trusted`: these exercise config merging, not the trust prompt.
+    let cfg = Config::load_trusted(dir.path()).unwrap();
     let resolved = cfg.resolve_model(None).unwrap();
     assert_eq!(resolved.model, "qwen3");
     assert_eq!(resolved.provider.base_url, "http://localhost:8000/v1");
@@ -238,7 +239,7 @@ fn a_mistyped_config_section_fails_loudly() {
     )
     .unwrap();
 
-    let err = worksmith::config::Config::load(dir.path()).unwrap_err();
+    let err = worksmith::config::Config::load_trusted(dir.path()).unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("supervisor"), "the error must name the offending key: {msg}");
 }
@@ -256,7 +257,7 @@ fn a_correct_config_still_loads() {
     )
     .unwrap();
 
-    let c = worksmith::config::Config::load(dir.path()).unwrap();
+    let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
     assert_eq!(c.supervisor().max_nudges, 2);
     assert_eq!(c.agents_model(), Some("p/small"));
 }
@@ -277,7 +278,7 @@ fn thinking_accepts_a_mode_or_a_budget() {
             format!("model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\n[agent]\n{line}\n"),
         )
         .unwrap();
-        worksmith::config::Config::load(dir.path()).unwrap().thinking()
+        worksmith::config::Config::load_trusted(dir.path()).unwrap().thinking()
     };
 
     common::isolate_home();

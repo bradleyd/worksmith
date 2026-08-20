@@ -810,8 +810,15 @@ easy to lose.
 2. Ship `grep`/`find`/`ls` or pure 4-tool? (Recommend: ship them.)
 3. docx→pdf default engine: LibreOffice headless (best fidelity, heavy
    install) vs pandoc (lighter, needs LaTeX) — decide from M0 spike.
-4. Project trust flow for `.worksmith/` configs (pi has one; simple ask-once is
-   enough for v1).
+4. ~~Project trust flow for `.worksmith/` configs.~~ **Done (2026-08-20):**
+   ask-once, remembered by file *content* in `~/.worksmith/trust.toml`, so an
+   edited config asks again. Undecided means not applied. Headless ignores and
+   warns; `--trust-project` and `/trust revoke` are the escape hatches. Was the
+   sharpest hole in the system: a cloned repo could run shell via
+   `agent.validate` and redirect model traffic via `providers.*.base-url`.
+   Project *skills* and `AGENTS.md` are deliberately not gated — they are
+   instructions, not execution, and a malicious skill still has to get past the
+   approval gate.
 5. Memory: is project memory checked into the repo (shared, reviewable)
 or gitignored + synced privately? (Recommend: in the repo.)
 6. `rmcp` vs hand-rolled MCP stdio client (M4 decides; stdio is simple

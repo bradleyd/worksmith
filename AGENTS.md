@@ -62,6 +62,10 @@ published format, not ours). Front-end-agnostic logic lives outside
   `thinking = <budget>` over raising the cap, and `/fast` when the task doesn't
   need deliberation. The footer's `↻` is the reasoning spend and `⚠cut` means
   the last completion was truncated.
+- A project's `.worksmith/config.toml` is not applied until trusted
+  (`trust.rs`); `Config::load` gates it, `Config::load_trusted` skips the gate
+  and is what tests and `--trust-project` use. Decisions are keyed by file
+  content, so an edit re-asks.
 - Command safety is two tiers in `tools::policy`. **Refuse** (catastrophic and
   local) hard-stops the turn — `tools::dangerous_command` is the same list under
   its older name. **Ask** (outward-facing or irreversible: push, sudo, publish,

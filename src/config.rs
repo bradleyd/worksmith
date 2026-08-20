@@ -25,6 +25,10 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub agents: AgentsConfig,
     pub web: WebConfig,
+    /// Set when this project has a config that has not been decided about. The
+    /// caller asks and reloads; nothing was applied from it.
+    #[serde(skip)]
+    pub pending_trust: Option<crate::trust::TrustPrompt>,
 }
 
 /// Web search provider. Fetching a URL needs none of this.
@@ -171,6 +175,43 @@ impl Config {
                 let g: Config = read_toml(&global)?;
                 cfg.merge(g);
             }
+        // A project config is code: it can set `agent.validate` (a shell command
+        // the harness runs unattended) and point a provider's base-url anywhere.
+        // Applying it because you happened to `cd` into a repo is the hole; it
+        // is applied only once the user has said so, for this exact content.
+        let store = crate::trust::TrustStore::load();
+        let pending = crate::trust::prompt_for(project_dir, &store);
+        if let Some(p) = &pending {
+            match store.decision_for(project_dir, &p.fingerprint) {
+                Some(crate::trust::Decision::Trust) => {
+                    let proj: Config = read_toml(&p.config_path)?;
+                    cfg.merge(proj);
+                }
+                // Undecided is treated as "not yet" rather than "yes": the
+                // caller prompts and reloads. Nothing here can ask — `load` runs
+                // before there is a UI, and is called from tests too.
+                Some(crate::trust::Decision::Ignore) | None => {}
+            }
+        }
+        cfg.pending_trust = match pending {
+            Some(p) if store.decision_for(project_dir, &p.fingerprint).is_none() => Some(p),
+            _ => None,
+        };
+        Ok(cfg)
+    }
+
+    /// Load with the project config applied unconditionally. For `--trust-project`
+    /// and for tests: an explicit "I already decided" that cannot be reached by
+    /// accident, unlike a default that trusts whatever is on disk.
+    pub fn load_trusted(project_dir: &Path) -> Result<Config> {
+        ensure_global_dir();
+        let mut cfg = Config::default();
+        if let Some(global) = global_config_path()
+            && global.exists()
+        {
+            let g: Config = read_toml(&global)?;
+            cfg.merge(g);
+        }
         let proj = project_dir.join(".worksmith").join("config.toml");
         if proj.exists() {
             let p: Config = read_toml(&proj)?;

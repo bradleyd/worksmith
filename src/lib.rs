@@ -17,6 +17,7 @@ pub mod session;
 pub mod skill;
 pub mod supervisor;
 pub mod tools;
+pub mod trust;
 pub mod tui;
 pub mod validation;
 pub mod worker;

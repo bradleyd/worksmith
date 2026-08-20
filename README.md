@@ -95,6 +95,15 @@ checks caught in milliseconds.
   guessed from the endpoint — a hostname heuristic, so set `thinking-param`
   explicitly behind a proxy — and a 400 on a thinking request names the field
   that was sent and where that choice came from.
+- **Project trust**: a project's `.worksmith/config.toml` is *code* — it can set
+  `agent.validate` (a shell command the harness runs unattended after every
+  turn) and add a provider whose `base-url` points anywhere, sending your
+  prompts and file contents there. So it isn't applied just because you `cd`'d
+  into the repo: worksmith shows what the file changes, flags the settings that
+  run code or move data, and asks once. The answer is remembered by content, so
+  a `git pull` that edits the config asks again. Headless runs never prompt —
+  they ignore the file and say so, or take `--trust-project`. `/trust` shows the
+  current decision and `/trust revoke` reopens it.
 - **Approval gate**: catastrophic commands (`rm -rf /`, `mkfs`, `curl | sh`) are
   refused outright; *outward-facing or irreversible* ones — `git push`, `sudo`,
   `cargo publish`, `curl -X POST`, `kubectl delete`, writes outside the working

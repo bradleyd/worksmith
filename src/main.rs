@@ -68,6 +68,12 @@ struct Args {
     #[arg(long, global = true)]
     fast: bool,
 
+    /// Trust this project's `.worksmith/config.toml` without asking. A project
+    /// config can run shell commands and redirect model traffic, so it is
+    /// otherwise ignored until you say yes once.
+    #[arg(long, global = true)]
+    trust_project: bool,
+
     /// Approve every command without asking. Outward-facing actions (git push,
     /// sudo, publishing, sending data) otherwise prompt in the TUI and are
     /// refused when nothing can prompt. Use for unattended runs you trust.
@@ -141,7 +147,7 @@ async fn main() -> Result<()> {
 
 async fn run(args: Args) -> Result<()> {
     let cwd = std::env::current_dir().context("getting current directory")?;
-    let config = Config::load(&cwd)?;
+    let config = resolve_project_trust(Config::load(&cwd)?, &cwd, &args)?;
     let resolved = config.resolve_model(args.model.as_deref())?;
 
     let client = worksmith::llm::client_for(&resolved)?;
@@ -1307,4 +1313,79 @@ fn resolve_thinking(
         .filter(|n| *n > 0)
         .ok_or_else(|| anyhow::anyhow!("--think expects on, off, or a token budget (got `{v}`)"))?;
     Ok(Some(Thinking::Budget(budget)))
+}
+
+/// Ask about a project's own config the first time worksmith sees it.
+///
+/// A project config can run shell commands (`agent.validate`) and redirect model
+/// traffic (`providers.*.base-url`), so it is not applied just because you `cd`'d
+/// into the repo. This runs before the TUI exists, on plain stdin — once per
+/// project, and again if the file changes.
+fn resolve_project_trust(config: Config, cwd: &Path, args: &Args) -> Result<Config> {
+    use std::io::Write;
+    use worksmith::trust::{Decision, TrustStore};
+
+    let Some(prompt) = config.pending_trust.clone() else {
+        return Ok(config); // no project config, or already decided
+    };
+
+    // Explicitly pre-decided.
+    if args.trust_project {
+        let mut store = TrustStore::load();
+        store.record(cwd, &prompt.fingerprint, Decision::Trust);
+        return Config::load_trusted(cwd);
+    }
+
+    // Nobody to ask: skip the project config and say so. Failing the run would
+    // be worse — the global config is a perfectly good way to work.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!(
+            "note: ignoring {} — this project's config has not been trusted.\n\
+             Run worksmith here interactively to decide, or pass --trust-project.",
+            prompt.config_path.display()
+        );
+        return Ok(config);
+    }
+
+    if prompt.changed_since_trusted {
+        println!("\nThis project's worksmith config has CHANGED since you trusted it:");
+    } else {
+        println!("\nThis project has its own worksmith config:");
+    }
+    println!("  {}", prompt.config_path.display());
+    println!();
+    for (key, value, consequence) in &prompt.settings {
+        match consequence {
+            Some(why) => println!("  ! {key} = {value}\n      {why}"),
+            None => println!("    {key} = {value}"),
+        }
+    }
+    println!();
+
+    loop {
+        print!("Use it? [y] yes  [n] no, ignore it  [v] view the file: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return Ok(config); // treat an unreadable answer as "no"
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => {
+                let mut store = TrustStore::load();
+                store.record(cwd, &prompt.fingerprint, Decision::Trust);
+                return Config::load_trusted(cwd);
+            }
+            "n" | "no" | "" => {
+                let mut store = TrustStore::load();
+                store.record(cwd, &prompt.fingerprint, Decision::Ignore);
+                println!("Ignoring it. Using your global config for this project.");
+                return Ok(config);
+            }
+            "v" | "view" => match std::fs::read_to_string(&prompt.config_path) {
+                Ok(body) => println!("\n----- {} -----\n{body}-----", prompt.config_path.display()),
+                Err(e) => println!("(could not read it: {e})"),
+            },
+            other => println!("(didn't understand `{other}`)"),
+        }
+    }
 }
