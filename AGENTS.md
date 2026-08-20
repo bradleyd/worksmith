@@ -1,57 +1,62 @@
-# AGENTS.md — Worksmith
+# AGENTS.md: Worksmith
 
-Instructions for AI agents working on this repository. (Loaded into the system
-prompt automatically; keep it tight — it costs tokens every turn.)
+Instructions for AI agents working on this repository. Loaded into the system
+prompt automatically, so keep it tight. It costs tokens every turn.
 
 ## What this is
 
-Worksmith is a minimal terminal coding-agent harness in Rust. The bet (the
-differentiator) is the **guidance layer** — keeping weaker/cheaper models on
-task and driving them to a validation — not the tool list. Keep the core
-minimal; richness comes from the loop, not features. See `PLAN.md` for the
-roadmap and `worksmith-memory-v1.md` for the memory design.
+Worksmith is a minimal terminal coding-agent harness in Rust. The bet is the
+**guidance layer**: keeping weaker and cheaper models on task, driving them to a
+validation. Not the tool list. Keep the core minimal. Richness comes from the
+loop, not from features. See `PLAN.md` for the roadmap (§10a is the working
+order and why) and `worksmith-memory-v1.md` for the memory design.
 
 ## Build / test / lint
 
-- `cargo build` — build.
-- `cargo test` — unit + integration tests. **Run before considering work done.**
-- `cargo clippy` — **must be warning-clean** (this repo keeps 0 warnings).
-- `cargo run -- [ARGS]` — run it. Note: the cargo target dir is customized
+- `cargo build`: build.
+- `cargo test`: unit + integration tests. **Run before considering work done.**
+- `cargo clippy`: **must be warning-clean** (this repo keeps 0 warnings).
+- `cargo run -- [ARGS]`: run it. Note: the cargo target dir is customized
   (`~/.cargo/target`), so there is no `./target/debug/worksmith`; use
   `cargo run` or read `cargo metadata` for the path.
 
 ## Layout (single crate)
 
 `src/`: `main.rs` (CLI/entry), `tui.rs` (ratatui frontend, default UI),
-`agent.rs` (the model↔tool loop + validation/stuck/compaction), `llm/`
-(streaming OpenAI-compat client), `event.rs` (typed event bus — the keystone),
-`session.rs` (JSONL sessions), `config.rs`, `prompt.rs`, `tools/`
-(read/write/edit/bash/grep/find/ls + `doc` + safety guard), `memory.rs`
-(SQLite + FTS5), `knowledge.rs` (project text, chunked + indexed),
-`validation.rs`, `worker.rs` (spawned sub-agents), `supervisor.rs` (rules-based
-worker watchdog), `fanout.rs` (one `/spawn` → N workers), `report.rs` (worker
-results formatted for the parent), `skill.rs` (Agent Skills discovery — the
-published format, not ours). Front-end-agnostic logic lives outside
-`tui.rs` so the plain REPL (`main.rs`) shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
+`agent.rs` (the model/tool loop plus validation, stuck detection, compaction),
+`llm/` (streaming OpenAI-compat client), `event.rs` (typed event bus, the
+keystone), `session.rs` (JSONL sessions, and replaying compaction),
+`config.rs`, `trust.rs` (is a project's own config allowed to apply?),
+`prompt.rs`, `tools/` (read/write/edit/bash/grep/find/ls, plus `doc`, `web`,
+`memory`, `knowledge` and `skill`, with `policy.rs` classifying commands and
+`approval.rs` asking about the risky ones),
+`memory.rs` (SQLite + FTS5), `mining.rs` (past sessions into memory proposals),
+`knowledge.rs` (project text, chunked and indexed), `validation.rs`, `worker.rs`
+(spawned sub-agents), `supervisor.rs` (rules-based worker watchdog), `fanout.rs`
+(one `/spawn` into N workers), `report.rs` (worker results formatted for the
+parent), `skill.rs` (Agent Skills discovery, the published format, not ours).
+Front-end-agnostic logic lives outside `tui.rs` so the plain REPL (`main.rs`)
+shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
 
 ## Conventions
 
 - Match the surrounding code's style, naming, and comment density. Comments are
   terse and explain *why*, not *what*.
 - Every change: add/extend tests, then `cargo test` + `cargo clippy` clean.
-- Tests use a scripted mock `LlmClient` (see `tests/agent_loop.rs`) — no network.
+- Tests use a scripted mock `LlmClient` (see `tests/agent_loop.rs`). No network.
   Any test that creates a session or opens global memory must call
   `common::isolate_home()` first (`tests/common/mod.rs`), which points
   `WORKSMITH_HOME` at a per-process scratch dir. Without it the test writes into
   the developer's real `~/.worksmith/sessions/`.
   The TUI is smoke-tested under a PTY (`script -q /dev/null …`), since it needs a
   real terminal.
-- Don't edit `reference/` — those are gitignored TypeScript design clones (pi,
-  gemini-cli) for reference only.
-- Sessions are JSONL by design; memory/knowledge are SQLite. Durable *memory* is
-  distilled decisions/constraints/preferences/facts/lessons — NOT things
-  derivable from the code. Those are *knowledge* (`knowledge.rs`): the repo's own
-  text, chunked and FTS5-indexed, rebuildable and never prompt-injected wholesale.
+- Don't edit `reference/`. Those are gitignored TypeScript design clones (pi,
+  gemini-cli) for reading only.
+- Sessions are JSONL by design; memory and knowledge are SQLite. Durable
+  *memory* is distilled decisions, constraints, preferences, facts and lessons.
+  NOT things derivable from the code. Those are *knowledge* (`knowledge.rs`):
+  the repo's own text, chunked and FTS5-indexed, rebuildable, and never
+  prompt-injected wholesale.
 
 ## Runtime notes
 
@@ -67,7 +72,7 @@ published format, not ours). Front-end-agnostic logic lives outside
   and is what tests and `--trust-project` use. Decisions are keyed by file
   content, so an edit re-asks.
 - Command safety is two tiers in `tools::policy`. **Refuse** (catastrophic and
-  local) hard-stops the turn — `tools::dangerous_command` is the same list under
+  local) hard-stops the turn; `tools::dangerous_command` is the same list under
   its older name. **Ask** (outward-facing or irreversible: push, sudo, publish,
   send data, write outside the cwd) goes to `tools::approval::Approver`; the TUI
   prompts, headless refuses, `--approve-all` allows. Denial is an error the model
