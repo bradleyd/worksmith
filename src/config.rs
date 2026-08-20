@@ -25,6 +25,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub agents: AgentsConfig,
     pub web: WebConfig,
+    pub tui: TuiConfig,
     /// Set when this project has a config that has not been decided about. The
     /// caller asks and reloads; nothing was applied from it.
     #[serde(skip)]
@@ -157,6 +158,16 @@ pub struct ToolsConfig {
     pub bash_timeout_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct TuiConfig {
+    /// Two characters that, typed in quick succession, leave the composer for
+    /// normal mode — the `inoremap jj <Esc>` habit. Empty string disables it.
+    pub insert_escape: Option<String>,
+    /// How quickly the two must follow each other, in milliseconds.
+    pub insert_escape_ms: Option<u64>,
+}
+
 /// A resolved provider + model, ready to build a client.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
@@ -267,6 +278,8 @@ impl Config {
         take(&mut self.web.provider, other.web.provider);
         take(&mut self.web.api_key_env, other.web.api_key_env);
         take(&mut self.web.base_url, other.web.base_url);
+        take(&mut self.tui.insert_escape, other.tui.insert_escape);
+        take(&mut self.tui.insert_escape_ms, other.tui.insert_escape_ms);
     }
 
     pub fn max_steps(&self) -> usize {
@@ -279,6 +292,19 @@ impl Config {
 
     pub fn stuck_threshold(&self) -> u32 {
         self.agent.stuck_threshold.unwrap_or(3)
+    }
+
+    /// The two-key sequence that leaves the composer, and how fast it must be
+    /// typed. `None` when disabled.
+    pub fn insert_escape(&self) -> Option<(char, char, std::time::Duration)> {
+        let seq = self.tui.insert_escape.clone().unwrap_or_else(|| "jj".to_string());
+        let mut chars = seq.chars();
+        let (a, b) = (chars.next()?, chars.next()?);
+        if chars.next().is_some() {
+            return None; // only a two-key sequence is supported
+        }
+        let ms = self.tui.insert_escape_ms.unwrap_or(300);
+        Some((a, b, std::time::Duration::from_millis(ms)))
     }
 
     /// The check spawned workers must pass, if the config sets one.

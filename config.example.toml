@@ -147,3 +147,14 @@ bash-timeout-secs = 120
 # provider = "brave"
 # api-key-env = "BRAVE_API_KEY"
 # base-url = "https://searx.example.com"   # searxng only
+
+# --- TUI ---------------------------------------------------------------------
+[tui]
+# Two keys typed in quick succession that leave the composer for normal mode —
+# the `inoremap jj <Esc>` habit. Set to "" to disable, or rebind (e.g. "jk").
+#
+# Unlike vim, this composer holds prose rather than code, so the window is short
+# and the first key is inserted immediately: pause after a lone `j` and normal
+# typing is untouched. A false positive costs one keystroke to undo.
+insert-escape = "jj"
+insert-escape-ms = 300

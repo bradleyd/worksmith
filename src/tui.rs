@@ -10,7 +10,7 @@
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -277,6 +277,10 @@ struct App {
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
+    /// The `jj`-style escape: the pair, how fast it must be typed, and the
+    /// pending first key. `None` disables it.
+    insert_escape: Option<(char, char, Duration)>,
+    pending_escape: Option<Instant>,
     /// Insert (typing) or normal (reading). Normal mode exists to reclaim the
     /// alphabet: `j`, `k`, `/`, `y` cannot coexist with a composer that eats
     /// every character. Nothing is mode-*only* — every insert-mode key still
@@ -345,6 +349,8 @@ impl App {
             pending_fanout: None,
             pending_extract: false,
             pending_mine: None,
+            insert_escape: Some(('j', 'j', Duration::from_millis(300))),
+            pending_escape: None,
             mode: Mode::Insert,
             cursor_row: 0,
             search: None,
@@ -363,6 +369,32 @@ impl App {
     }
 
     // ---- normal mode ----
+
+    /// Handle a character against the `jj`-style escape. Returns true when the
+    /// pair completed and the caller should not insert this character.
+    ///
+    /// Unlike vim, this composer holds prose rather than code, so the window is
+    /// short and the first key is still inserted immediately — a pause after a
+    /// lone `j` leaves normal typing untouched, and the only cost of a false
+    /// positive is one keystroke to get back.
+    fn escape_pair(&mut self, c: char) -> bool {
+        let Some((first, second, window)) = self.insert_escape else {
+            return false;
+        };
+        let now = Instant::now();
+        if c == second
+            && let Some(at) = self.pending_escape
+            && now.duration_since(at) <= window
+            && self.input.ends_with(first)
+            && self.cursor == self.char_len()
+        {
+            self.backspace(); // remove the first key, which was already inserted
+            self.pending_escape = None;
+            return true;
+        }
+        self.pending_escape = (c == first).then_some(now);
+        false
+    }
 
     /// Enter reading mode, putting the cursor on the last visible row.
     fn enter_normal(&mut self) {
@@ -869,6 +901,7 @@ async fn run_loop(
         );
 
     let mut app = App::new(model, context_limit, validate_cmd);
+    app.insert_escape = config.insert_escape();
     app.fanout_auto = fanout_auto;
     app.think_label = agent.thinking_mode().label();
     app.synthesize = synthesize;
@@ -1580,7 +1613,15 @@ async fn handle_key(
             start_turn(message, app, agent, session, mem, cwd, bash_timeout, turn, cancel);
         }
         // Ignore control-chords; accept normal (and shifted) chars at the cursor.
-        KeyCode::Char(c) if !ctrl => app.insert_char(c),
+        KeyCode::Char(c) if !ctrl => {
+            if app.escape_pair(c) {
+                app.enter_normal();
+                app.status = "normal · j k /search n N · y yank · i insert".into();
+                app.refresh_hint();
+                return Ok(Flow::Continue);
+            }
+            app.insert_char(c);
+        }
         _ => {}
     }
     // One place, so no edit path can forget it.
@@ -1622,7 +1663,7 @@ async fn handle_command(
                 Kind::Notice,
                 "\
 KEYS
-  Esc            (empty composer) read the transcript — see NORMAL below
+  Esc / jj       (empty composer) read the transcript — see NORMAL below
   Enter          send — or steer the running turn
   Alt+Enter      newline
   Tab            complete             Ctrl+G       edit in $EDITOR
@@ -1630,7 +1671,7 @@ KEYS
   Ctrl+O         show tool output     Ctrl+T       show thinking
   PageUp/Down    scroll               Ctrl+U/D     scroll
 
-NORMAL MODE (Esc on an empty composer)
+NORMAL MODE (Esc on an empty composer, or `jj`)
   j k  ↑ ↓       move            Ctrl+U/D   half page
   g  G           top / bottom    PageUp/Dn  page
   /              search          n  N       next / previous match
@@ -3513,6 +3554,66 @@ mod tests {
         a.ensure_rows(60);
         assert!(a.cached_rows.len() > prefix, "the prefix was kept, not rebuilt");
         assert_eq!(a.item_starts.len(), a.items.len(), "one start per item");
+    }
+
+    #[test]
+    fn jj_in_quick_succession_leaves_the_composer() {
+        let mut a = app();
+        a.insert_escape = Some(('j', 'j', Duration::from_millis(300)));
+
+        // A lone `j` is just a character.
+        assert!(!a.escape_pair('j'));
+        a.insert_char('j');
+        assert_eq!(a.input, "j");
+        assert_eq!(a.mode, Mode::Insert);
+
+        // The second one completes the pair and takes the first `j` back with
+        // it — otherwise you would land in normal mode with a stray character.
+        assert!(a.escape_pair('j'));
+        assert_eq!(a.input, "", "the pending j is removed");
+    }
+
+    #[test]
+    fn a_slow_jj_is_just_two_letters() {
+        let mut a = app();
+        a.insert_escape = Some(('j', 'j', Duration::from_millis(1)));
+        assert!(!a.escape_pair('j'));
+        a.insert_char('j');
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!a.escape_pair('j'), "too slow to be the escape");
+        a.insert_char('j');
+        assert_eq!(a.input, "jj", "prose survives: this composer holds words");
+    }
+
+    #[test]
+    fn jj_only_fires_at_the_end_of_what_you_typed() {
+        let mut a = app();
+        a.insert_escape = Some(('j', 'j', Duration::from_millis(300)));
+
+        // A `j` typed mid-word, then the cursor moved: the pair must not fire
+        // and quietly delete a character somewhere else.
+        a.set_input("hajj".into());
+        a.cursor = 2;
+        assert!(!a.escape_pair('j'));
+        assert!(!a.escape_pair('j'));
+        assert_eq!(a.input, "hajj", "nothing was removed");
+    }
+
+    #[test]
+    fn the_escape_can_be_turned_off_or_rebound() {
+        let mut a = app();
+        a.insert_escape = None;
+        assert!(!a.escape_pair('j'));
+        a.insert_char('j');
+        assert!(!a.escape_pair('j'), "disabled means it is only ever a letter");
+
+        // Rebinding to a different pair works the same way.
+        let mut b = app();
+        b.insert_escape = Some(('j', 'k', Duration::from_millis(300)));
+        assert!(!b.escape_pair('j'));
+        b.insert_char('j');
+        assert!(b.escape_pair('k'));
+        assert_eq!(b.input, "");
     }
 
     #[test]
