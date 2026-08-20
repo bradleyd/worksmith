@@ -755,6 +755,54 @@ models are a user's choice to configure, not something to ship: they trade
 away instruction-following, which is exactly what this harness exists to
 compensate for.
 
+## 10a. Working order (decided 2026-08-20)
+
+Milestones above are the map; this is the route, most valuable first. Written
+down because the ordering is an argument, not a preference, and the argument is
+easy to lose.
+
+1. **Approval gate for irreversible and outward-facing commands.** *(security,
+   in progress)* There is no approval mechanism at all today — the only gate is
+   `dangerous_command`'s six regexes, which cover catastrophic *local*
+   destruction (fork bomb, `dd`, `mkfs`, `curl | sh`, `chmod -R /`, `rm -rf /`)
+   and nothing else. Observed in real use: a 27B ran `git push` and staged files
+   unattended. Nothing blocks `git push`, `gh`, `sudo`, `curl -X POST` with your
+   files in the body, or writes outside the cwd.
+
+   The thesis argues *for* this rather than against it. Codex and Claude Code
+   assume a strong model whose judgment about side effects is usually sound and
+   still prompt; worksmith assumes the opposite kind of model. The eval measured
+   exactly that: on qwen3.5-9b, **10 of 21 raw failures had outcome `done`** —
+   the model declared itself finished and was wrong. That is the model currently
+   holding unattended shell and network access.
+
+   Explicitly *not* solved by M11: a worktree overlay isolates the filesystem,
+   and `git push` escapes it by definition. Two different threats — outward
+   actions need an approval gate, local collisions need a sandbox.
+
+2. **Give workers the validator.** `worker.rs:404` passes `None` where the main
+   loop passes a `CommandValidator`, so a worker stops when the model says it is
+   done — the exact failure the eval measured. Half the product surface has none
+   of the differentiator. This is one argument plus a `/spawn --until` flag, not
+   the workflow file of §8 (that would sit *on top* of this plumbing later).
+   Unmeasured afterwards: `run.py` cannot reach the worker layer, so the honest
+   check is `workers` vs `workers --until` on the 9B rather than assuming the
+   +34 transfers.
+
+3. **M9 metrics, the cost-per-solved-task spine first.** The instrument, not
+   decoration: it is what proves the differentiator to anyone else, and the only
+   way M10 frugal mode can be judged. Pulls in the footer cost figure, which
+   needs M9's price table. The metrics *tab* rides on M8's tabbed layout, which
+   also answers "watch worker w2 work" — let tabs land as part of this rather
+   than as their own goal.
+
+4. **M11 worktree sandbox.** Already evidence-backed by the three-worker
+   `draft-1.md` collision. Collision, security-in-depth, and undo in one.
+
+5. **MCP (§6) last.** It multiplies tool surface with third-party code under a
+   harness that has no permission model. Doing it before (1) means arbitrary
+   tools executing unattended on a weak model's say-so.
+
 ## 11. Open decisions
 
 1. `rig` vs hand-rolled provider layer (M0 decides). Rig's OpenAI-compat
@@ -773,3 +821,14 @@ or gitignored + synced privately? (Recommend: in the repo.)
    one crash takes the whole UI). (Recommend: child processes.)
 8. ~~Name.~~ **Decided: Worksmith** (CLI command `worksmith`, app dir
    `.worksmith/`).
+9. **What is a validation check, exactly?** `--until` takes a shell command
+   today, and that covers `cargo test` / `python3 test.py` — the cases the eval
+   used. It does not obviously cover: "this HTTP endpoint returns 200", "this
+   file matches a schema", "a model judges the draft against a rubric", or a
+   check written in the project's own language rather than as a shell one-liner.
+   Everything can be *forced* into a shell command, which is why the question
+   hides: the tell is `--until "python3 -c '...'"` with an inline program in it.
+   Options: keep shell-only and document it; add typed check kinds
+   (`shell` | `http` | `file-exists` | `judge`); or let a check name a file the
+   project already has. Decide before workflows (§8) fix a per-stage `validate`
+   shape, since that inherits whatever this becomes.
