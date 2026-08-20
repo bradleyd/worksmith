@@ -177,3 +177,63 @@ async fn worker_respects_concurrency_cap() {
     assert_eq!(mgr.drop_queued(), 1, "queued work can be called off");
     assert_eq!(mgr.queued_count(), 0);
 }
+
+/// Until now a worker stopped when the model said it was done — `worker.rs`
+/// passed no validator, so the harness's whole differentiator applied to the
+/// main loop and not to half the product. On a small model that is the measured
+/// failure: 10 of 21 eval failures had outcome `done` and were wrong.
+#[tokio::test]
+async fn a_checked_worker_replans_until_the_check_passes() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+
+    // First attempt writes the wrong content; after the re-plan directive, the
+    // second writes what the check actually wants.
+    let agent = template_agent(
+        vec![
+            tool_call("write", r#"{"path":"out.txt","content":"bad"}"#),
+            done("done (attempt 1)"),
+            tool_call("write", r#"{"path":"out.txt","content":"good"}"#),
+            done("fixed it (attempt 2)"),
+        ],
+        dir.path(),
+    );
+    let mut mgr = WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4);
+
+    let outcome = mgr
+        .spawn_checked(
+            "make out.txt say good".into(),
+            "system".into(),
+            None,
+            Some(r#"test "$(cat out.txt)" = good"#.into()),
+        )
+        .unwrap();
+    let id = match outcome {
+        worksmith::worker::SpawnOutcome::Started(id) => id,
+        other => panic!("expected a started worker, got {other:?}"),
+    };
+
+    assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "good",
+        "the worker should have been sent back until the check passed"
+    );
+}
+
+/// Without a check, "done" is still taken at face value — the old behaviour,
+/// kept deliberately so a fan-out doesn't run N concurrent checks in one tree.
+#[tokio::test]
+async fn an_unchecked_worker_still_stops_when_the_model_says_so() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = template_agent(
+        vec![tool_call("write", r#"{"path":"out.txt","content":"bad"}"#), done("all finished")],
+        dir.path(),
+    );
+    let mut mgr = WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4);
+
+    let id = started(&mut mgr, "make out.txt say good");
+    assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
+    assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "bad");
+}

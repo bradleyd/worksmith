@@ -87,6 +87,12 @@ pub struct AgentsConfig {
     pub fanout: Option<String>,
     /// After a fan-out group finishes, run a turn combining their results.
     pub synthesize: Option<bool>,
+    /// A success check every spawned worker must pass. Workers otherwise stop
+    /// when the model says it is done, which is the failure the harness exists
+    /// to prevent. Off by default: a fan-out validating concurrently in one
+    /// working tree is the collision M11 fixes, so this is a deliberate choice
+    /// rather than an inherited one.
+    pub validate: Option<String>,
     /// Model spawned workers run on (`provider/model`). Unset = the session's
     /// model. This is the cheap half of a cheap-workers/smart-parent split.
     pub model: Option<String>,
@@ -248,6 +254,7 @@ impl Config {
         take(&mut self.agents.token_budget, other.agents.token_budget);
         take(&mut self.agents.fanout, other.agents.fanout);
         take(&mut self.agents.synthesize, other.agents.synthesize);
+        take(&mut self.agents.validate, other.agents.validate);
         take(&mut self.agents.model, other.agents.model);
         take(&mut self.agent.max_steps, other.agent.max_steps);
         take(&mut self.agent.max_retries, other.agent.max_retries);
@@ -272,6 +279,11 @@ impl Config {
 
     pub fn stuck_threshold(&self) -> u32 {
         self.agent.stuck_threshold.unwrap_or(3)
+    }
+
+    /// The check spawned workers must pass, if the config sets one.
+    pub fn agents_validate(&self) -> Option<&str> {
+        self.agents.validate.as_deref()
     }
 
     pub fn validate_command(&self) -> Option<&str> {

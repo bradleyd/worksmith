@@ -122,6 +122,18 @@ fanout = "auto"
 # into a single answer. Set false to just have the results reported.
 synthesize = true
 
+# A success check every spawned worker must pass, same contract as `--until`.
+# Without one a worker stops when the model says it is done, which is exactly
+# the failure the harness exists to prevent — measured on qwen3.5-9b, 10 of 21
+# eval failures had outcome `done` and were wrong.
+#
+# Off by default on purpose, and this is the one to think about before enabling:
+# workers share the session's working tree, so a fan-out of N runs the check N
+# times concurrently in one directory. Safe for a read-only check (`cargo
+# check`, a linter); a poor fit for anything that writes, until each worker gets
+# its own tree (PLAN M11). Per-spawn `/spawn --until "<check>"` overrides it.
+#   validate = "cargo test"
+
 [tools]
 bash-timeout-secs = 120
 

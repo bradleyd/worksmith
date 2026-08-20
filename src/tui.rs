@@ -50,8 +50,15 @@ use crate::worker::WorkerManager;
 /// A planner call in flight: the task producing subtasks, plus everything the
 /// resulting spawn needs — system prompt, the original request, and the model
 /// the workers will run on.
-type PlannedFanOut =
-    (JoinHandle<crate::fanout::FanOutPlan>, String, String, Option<ModelOverride>);
+type PlannedFanOut = (
+    JoinHandle<crate::fanout::FanOutPlan>,
+    String,
+    String,
+    Option<ModelOverride>,
+    // The per-worker check, held across planning so a planned fan-out is
+    // validated the same as an explicit one.
+    Option<String>,
+);
 
 /// Which channel a transcript line belongs to — drives its color/gutter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -563,7 +570,11 @@ async fn run_loop(
     };
     let mut workers = WorkerManager::new(agent.clone(), cwd.clone(), agents_max)
         .with_supervisor(supervisor)
-        .with_default_model(worker_model);
+        .with_default_model(worker_model)
+        .with_default_validate(
+            config.agents_validate().map(str::to_string),
+            bash_timeout,
+        );
 
     let mut app = App::new(model, context_limit, validate_cmd);
     app.fanout_auto = fanout_auto;
@@ -759,6 +770,7 @@ async fn run_loop(
                                 pf.system,
                                 request,
                                 pf.model,
+                                pf.validate,
                             ));
                         }
                     }
@@ -855,7 +867,7 @@ async fn run_loop(
 
             // Fan-out planning finished.
             res = async { (&mut fanout.as_mut().unwrap().0).await }, if fanout.is_some() => {
-                let (_, system, request, over) = fanout.take().unwrap();
+                let (_, system, request, over, validate) = fanout.take().unwrap();
                 app.status = "/help for keys and commands".into();
                 match res {
                     Ok(plan) if plan.tasks.is_empty() => {
@@ -870,7 +882,8 @@ async fn run_loop(
                                 app.push(Kind::Notice, format!("  {}. {}", i + 1, truncate(t, 100)));
                             }
                         }
-                        let report = workers.spawn_many_on(plan.tasks, system, request, over);
+                        let report =
+                            workers.spawn_many_checked(plan.tasks, system, request, over, validate);
                         app.push(Kind::Notice, fanout_notice(&report));
                     }
                     Err(e) => app.push(Kind::Error, format!("fan-out planning failed: {e}")),
@@ -1174,7 +1187,13 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                             };
                             app.status = "planning fan-out…".into();
                             app.pending_fanout =
-                                Some(PendingFanOut { task: req.task, want, system, model: over });
+                                Some(PendingFanOut {
+                                task: req.task,
+                                want,
+                                system,
+                                model: over,
+                                validate: req.validate.clone(),
+                            });
                         }
                         FanOut::Files(pattern) => {
                             match matching_files(cwd, &pattern) {
@@ -1185,15 +1204,19 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                                 Ok(files) => {
                                     let tasks: Vec<String> =
                                         files.iter().map(|f| assign(&req.task, f)).collect();
-                                    let report = workers.spawn_many_on(
-                                        tasks, system, req.task.clone(), over,
+                                    let report = workers.spawn_many_checked(
+                                        tasks,
+                                        system,
+                                        req.task.clone(),
+                                        over,
+                                        req.validate.clone(),
                                     );
                                     app.push(Kind::Notice, fanout_notice(&report));
                                 }
                             }
                         }
                         // -n 1 (or an explicit single): today's path, no planner.
-                        _ => match workers.spawn_on(req.task.clone(), system, over) {
+                        _ => match workers.spawn_checked(req.task.clone(), system, over, req.validate.clone()) {
                             Ok(outcome) => app.push(Kind::Notice, spawn_notice(&outcome, &req.task)),
                             Err(e) => app.push(Kind::Error, format!("spawn failed: {e}")),
                         },

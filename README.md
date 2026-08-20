@@ -104,6 +104,13 @@ checks caught in milliseconds.
   a `git pull` that edits the config asks again. Headless runs never prompt —
   they ignore the file and say so, or take `--trust-project`. `/trust` shows the
   current decision and `/trust revoke` reopens it.
+- **Checked workers** (`/spawn --until "<check>"`, `[agents] validate`): a
+  spawned worker gets the same validation-driven loop as the main agent —
+  re-planning until the check passes instead of stopping when the model says it
+  is done. It is opt-in rather than inherited from the session: workers share one
+  working tree, so a fan-out of N would run the check N times concurrently in the
+  same directory. Fine for a read-only check today; the general answer is a tree
+  per worker (PLAN M11).
 - **Approval gate**: catastrophic commands (`rm -rf /`, `mkfs`, `curl | sh`) are
   refused outright; *outward-facing or irreversible* ones — `git push`, `sudo`,
   `cargo publish`, `curl -X POST`, `kubectl delete`, writes outside the working

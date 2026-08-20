@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -17,6 +18,7 @@ use crate::event::Event;
 use crate::event::EventBus;
 use crate::llm::ModelOverride;
 use crate::session::Session;
+use crate::validation::CommandValidator;
 use crate::supervisor::{Action, Supervisor, SupervisorConfig};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,6 +155,7 @@ struct PendingTask {
     system: String,
     group: Option<u64>,
     model: Option<ModelOverride>,
+    validate: Option<String>,
 }
 
 /// A fan-out: several workers answering one request together.
@@ -196,6 +199,11 @@ pub struct WorkerManager {
     supervisor: SupervisorConfig,
     /// Model every worker runs on unless a spawn overrides it (`agents.model`).
     default_model: Option<ModelOverride>,
+    /// A check every spawned worker must pass, when the session sets one
+    /// (`[agents] validate`). Per-spawn `--until` overrides it.
+    default_validate: Option<String>,
+    /// Timeout for a worker's validation command.
+    bash_timeout: Duration,
     workers: Vec<Worker>,
     queued: VecDeque<PendingTask>,
     groups: HashMap<u64, GroupInfo>,
@@ -211,6 +219,8 @@ impl WorkerManager {
             max,
             supervisor: SupervisorConfig::default(),
             default_model: None,
+            default_validate: None,
+            bash_timeout: Duration::from_secs(120),
             workers: Vec::new(),
             queued: VecDeque::new(),
             groups: HashMap::new(),
@@ -227,6 +237,13 @@ impl WorkerManager {
 
     /// Run workers on this model by default — the cheap half of a
     /// cheap-workers/smart-parent split. `/spawn --model` overrides per spawn.
+    /// The check spawned workers must pass unless `/spawn --until` says otherwise.
+    pub fn with_default_validate(mut self, cmd: Option<String>, timeout: Duration) -> Self {
+        self.default_validate = cmd;
+        self.bash_timeout = timeout;
+        self
+    }
+
     pub fn with_default_model(mut self, model: Option<ModelOverride>) -> Self {
         self.default_model = model;
         self
@@ -244,7 +261,7 @@ impl WorkerManager {
     /// concurrency cap the task is queued instead and started by [`Self::pump`]
     /// when a slot frees.
     pub fn spawn(&mut self, task: String, system: String) -> Result<SpawnOutcome, String> {
-        self.spawn_in(task, system, None, None)
+        self.spawn_in(task, system, None, None, None)
     }
 
     /// Spawn on a specific model instead of the manager's default.
@@ -254,7 +271,21 @@ impl WorkerManager {
         system: String,
         model: Option<ModelOverride>,
     ) -> Result<SpawnOutcome, String> {
-        self.spawn_in(task, system, None, model)
+        self.spawn_in(task, system, None, model, None)
+    }
+
+    /// Spawn with a success check of its own. A worker without one stops when
+    /// the model says it is done — the failure the eval measured on a small
+    /// model, where 10 of 21 failures had outcome `done`. This is the harness's
+    /// whole differentiator, applied to workers instead of only the main loop.
+    pub fn spawn_checked(
+        &mut self,
+        task: String,
+        system: String,
+        model: Option<ModelOverride>,
+        validate: Option<String>,
+    ) -> Result<SpawnOutcome, String> {
+        self.spawn_in(task, system, None, model, validate)
     }
 
     fn spawn_in(
@@ -263,13 +294,15 @@ impl WorkerManager {
         system: String,
         group: Option<u64>,
         model: Option<ModelOverride>,
+        validate: Option<String>,
     ) -> Result<SpawnOutcome, String> {
         let model = model.or_else(|| self.default_model.clone());
+        let validate = validate.or_else(|| self.default_validate.clone());
         if self.running_count() >= self.max {
-            self.queued.push_back(PendingTask { task, system, group, model });
+            self.queued.push_back(PendingTask { task, system, group, model, validate });
             return Ok(SpawnOutcome::Queued(self.queued.len()));
         }
-        self.start(task, system, group, model).map(SpawnOutcome::Started)
+        self.start(task, system, group, model, validate).map(SpawnOutcome::Started)
     }
 
     /// Spawn one worker per task. More than one becomes a *group*: they're
@@ -292,6 +325,18 @@ impl WorkerManager {
         request: String,
         model: Option<ModelOverride>,
     ) -> FanOutReport {
+        self.spawn_many_checked(tasks, system, request, model, None)
+    }
+
+    /// Fan out with a success check each worker must pass.
+    pub fn spawn_many_checked(
+        &mut self,
+        tasks: Vec<String>,
+        system: String,
+        request: String,
+        model: Option<ModelOverride>,
+        validate: Option<String>,
+    ) -> FanOutReport {
         let group = if tasks.len() > 1 {
             self.next_group += 1;
             self.groups.insert(
@@ -305,7 +350,7 @@ impl WorkerManager {
 
         let mut report = FanOutReport { group, ..Default::default() };
         for task in tasks {
-            match self.spawn_in(task, system.clone(), group, model.clone()) {
+            match self.spawn_in(task, system.clone(), group, model.clone(), validate.clone()) {
                 Ok(SpawnOutcome::Started(id)) => report.started.push(id),
                 Ok(SpawnOutcome::Queued(_)) => report.queued += 1,
                 Err(_) => {
@@ -332,7 +377,7 @@ impl WorkerManager {
             let Some(p) = self.queued.pop_front() else {
                 break;
             };
-            match self.start(p.task, p.system, p.group, p.model) {
+            match self.start(p.task, p.system, p.group, p.model, p.validate) {
                 Ok(id) => started.push(id),
                 Err(_) => continue, // couldn't create a session; skip this one
             }
@@ -364,6 +409,7 @@ impl WorkerManager {
         system: String,
         group: Option<u64>,
         model: Option<ModelOverride>,
+        validate: Option<String>,
     ) -> Result<String, String> {
         self.counter += 1;
         let id = format!("w{}", self.counter);
@@ -396,12 +442,26 @@ impl WorkerManager {
         let cancel_task = cancel.clone();
         let cancel_sup = cancel.clone();
         let task_run = task.clone();
+        // A worker validates in the same tree it edits. That is fine for a lone
+        // worker and a known hazard for a fan-out — N workers running the same
+        // check concurrently in one cwd is the collision M11 exists to fix — so
+        // this is opt-in rather than inherited from the session.
+        let validator = validate
+            .as_ref()
+            .map(|c| CommandValidator::new(c.clone(), self.cwd.clone(), self.bash_timeout));
         let mut supervisor = Supervisor::new(self.supervisor.clone());
         let steer_sup = steering.clone();
         let handle = tokio::spawn(async move {
             let mut session = session;
             let agent = agent;
-            let turn = agent.run_turn(&mut session, &task_run, &system, None, cancel_task);
+            let turn =
+                agent.run_turn(
+                    &mut session,
+                    &task_run,
+                    &system,
+                    validator.as_ref().map(|v| v as &dyn crate::validation::Validator),
+                    cancel_task,
+                );
             tokio::pin!(turn);
             // Absolute deadline for the idle rule, pushed out by every event.
             let idle = supervisor.idle_timeout();

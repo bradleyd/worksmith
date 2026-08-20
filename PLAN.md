@@ -780,7 +780,13 @@ easy to lose.
    and `git push` escapes it by definition. Two different threats — outward
    actions need an approval gate, local collisions need a sandbox.
 
-2. **Give workers the validator.** `worker.rs:404` passes `None` where the main
+2. ~~**Give workers the validator.**~~ **Done (2026-08-20)**: `/spawn --until`,
+   `[agents] validate`, and the validator now reaches `run_turn`. Opt-in, not
+   inherited, because N workers share one tree and would run the check N times
+   concurrently — read-only checks are fine now, the general answer is M11.
+   Still unmeasured, as below.
+
+   *(original entry)* **Give workers the validator.** `worker.rs:404` passes `None` where the main
    loop passes a `CommandValidator`, so a worker stops when the model says it is
    done — the exact failure the eval measured. Half the product surface has none
    of the differentiator. This is one argument plus a `/spawn --until` flag, not

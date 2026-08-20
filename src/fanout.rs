@@ -19,6 +19,9 @@ pub struct PendingFanOut {
     /// `Some(n)` = exactly n workers; `None` = let the planner decide.
     pub want: Option<usize>,
     pub system: String,
+    /// The per-worker check, carried through the planner so a planned fan-out
+    /// is validated the same as an explicit one.
+    pub validate: Option<String>,
 }
 
 /// How `/spawn` was asked to divide the work.
@@ -36,10 +39,14 @@ pub struct SpawnRequest {
     pub task: String,
     /// `--model provider/model` — run these workers on something else.
     pub model: Option<String>,
+    /// A success check this worker must pass — the same contract as the
+    /// session's `--until`, applied per worker.
+    pub validate: Option<String>,
 }
 
 pub const SPAWN_USAGE: &str =
-    "usage: /spawn [-n N | --each-files <regex>] [--model <provider/model>] <task>";
+    "usage: /spawn [-n N | --each-files <regex>] [--model <provider/model>] \
+     [--until <check>] <task>";
 
 /// Parse leading flags off a `/spawn` line; everything after them is the task,
 /// verbatim. Flags take a single token, so no quoting rules are needed.
@@ -47,6 +54,7 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
     let mut fanout = if default_auto { FanOut::Auto } else { FanOut::Count(1) };
     let mut explicit = false;
     let mut model: Option<String> = None;
+    let mut validate: Option<String> = None;
     let mut rest = args.trim();
 
     loop {
@@ -90,6 +98,12 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
                 fanout = FanOut::Files(value.to_string());
                 explicit = true;
             }
+            "--until" | "-u" => {
+                if value.is_empty() {
+                    return Err("/spawn: --until wants a shell command".into());
+                }
+                validate = Some(value.to_string());
+            }
             "--model" | "-m" => {
                 if value.is_empty() {
                     return Err("/spawn: --model wants a `provider/model` spec".into());
@@ -104,7 +118,7 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
     if rest.trim().is_empty() {
         return Err(SPAWN_USAGE.to_string());
     }
-    Ok(SpawnRequest { fanout, task: rest.trim().to_string(), model })
+    Ok(SpawnRequest { fanout, task: rest.trim().to_string(), model, validate })
 }
 
 /// Is this a self-contained instruction, or the wreckage of a model that

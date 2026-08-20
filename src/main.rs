@@ -377,6 +377,10 @@ async fn run_spawn(
     }
 
     let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
+        .with_default_validate(
+            config.agents_validate().map(str::to_string),
+            Duration::from_secs(config.bash_timeout_secs()),
+        )
         .with_supervisor(config.supervisor());
     let report = workers.spawn_many_on(tasks, system, task.clone(), over);
     let expected = report.started.len() + report.queued;
@@ -498,6 +502,10 @@ async fn repl(
         None => None,
     };
     let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
+        .with_default_validate(
+            config.agents_validate().map(str::to_string),
+            Duration::from_secs(config.bash_timeout_secs()),
+        )
         .with_supervisor(config.supervisor())
         .with_default_model(worker_model);
 
@@ -777,7 +785,7 @@ async fn handle_spawn(
             }
         },
         FanOut::Count(1) => {
-            match workers.spawn_on(req.task.clone(), system, over) {
+            match workers.spawn_checked(req.task.clone(), system, over, req.validate.clone()) {
                 Ok(outcome) => println!("{}", spawn_notice(&outcome, &req.task)),
                 Err(e) => eprintln!("spawn failed: {e}"),
             }
