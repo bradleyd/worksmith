@@ -151,6 +151,10 @@ struct App {
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
+    /// A command waiting on the user's yes/no. While this is set, keys answer
+    /// the question instead of editing the composer — the agent's task is
+    /// blocked until it gets a reply.
+    pending_approval: Option<crate::tools::approval::ApprovalRequest>,
     /// Is mouse capture on? Off by default so the terminal keeps its own text
     /// selection; `/mouse on` trades that for wheel scrolling.
     mouse: bool,
@@ -195,6 +199,7 @@ impl App {
             pending_fanout: None,
             pending_extract: false,
             pending_mine: None,
+            pending_approval: None,
             mouse: false,
         }
     }
@@ -469,6 +474,9 @@ pub async fn run_tui(
     fanout_auto: bool,
     synthesize: bool,
     config: Config,
+    // Questions from the agent's task: "may I run this?". The agent blocks on
+    // the answer, so this loop must always send one.
+    approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let res = run_loop(
@@ -486,6 +494,7 @@ pub async fn run_tui(
         fanout_auto,
         synthesize,
         config,
+        approvals,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -536,6 +545,7 @@ async fn run_loop(
     fanout_auto: bool,
     synthesize: bool,
     config: Config,
+    mut approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let session = Arc::new(AsyncMutex::new(session));
@@ -812,6 +822,20 @@ async fn run_loop(
                 if app.follow { app.scroll_up = 0; }
             }
 
+            // The agent is asking whether it may do something outward-facing.
+            // It is blocked until this loop answers, so nothing else matters
+            // until the user decides.
+            Some(req) = approvals.recv(), if app.pending_approval.is_none() => {
+                app.push(
+                    Kind::Error,
+                    format!("⚠ approve? {}\n  {}", req.reason, req.command),
+                );
+                app.status = "y = once · a = always this session · n = no".into();
+                app.pending_approval = Some(req);
+                if app.follow { app.scroll_up = 0; }
+                app.dirty = true;
+            }
+
             // Mining finished: file the proposals from here, where the store is.
             res = async { (&mut mine.as_mut().unwrap()).await }, if mine.is_some() => {
                 mine = None;
@@ -921,6 +945,37 @@ async fn handle_key(
     config: &Config,
 ) -> Result<Flow> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // A pending approval owns the keyboard. The agent's task is blocked waiting
+    // for the answer, so typing into the composer here would look like a hang;
+    // and an approval answered by accident is the failure this exists to stop.
+    if let Some(req) = app.pending_approval.take() {
+        use crate::tools::approval::Approval;
+        let (answer, note) = match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => (Approval::Once, "approved once"),
+            KeyCode::Char('a') | KeyCode::Char('A') => (
+                Approval::AlwaysThisSession,
+                "approved — and not asking again this session for this kind of command",
+            ),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => (Approval::Deny, "denied"),
+            KeyCode::Char('c') if ctrl => (Approval::Deny, "denied (quitting)"),
+            // Anything else is not an answer. Put the question back rather than
+            // guessing, because both guesses are bad.
+            _ => {
+                app.pending_approval = Some(req);
+                app.status = "y = once · a = always this session · n = no".into();
+                return Ok(Flow::Continue);
+            }
+        };
+        req.answer(answer);
+        app.push(Kind::Notice, note.to_string());
+        app.status = "/help for keys and commands".into();
+        app.dirty = true;
+        if key.code == KeyCode::Char('c') && ctrl {
+            return Ok(Flow::Quit);
+        }
+        return Ok(Flow::Continue);
+    }
 
     // Any key other than Tab ends an in-progress completion cycle.
     if key.code != KeyCode::Tab {

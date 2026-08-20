@@ -37,6 +37,9 @@ impl Tool for WriteTool {
             return ToolOutput::error("missing required argument: content");
         };
         let full = resolve_path(ctx, path);
+        if let Some(refusal) = super::approve_write_outside_cwd(ctx, &full).await {
+            return ToolOutput::error(refusal);
+        }
         let existed = full.exists();
         let old = if existed { std::fs::read_to_string(&full).unwrap_or_default() } else { String::new() };
 

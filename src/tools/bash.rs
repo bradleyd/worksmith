@@ -4,7 +4,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use regex::Regex;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
@@ -12,36 +11,16 @@ use super::{Tool, ToolContext, ToolOutput};
 
 pub struct BashTool;
 
-/// Best-effort guard against catastrophic commands. This is NOT a sandbox — real
-/// isolation is "run in a container" — but it hard-stops the classic disasters
-/// (recursive rm of /, ~, ., or *; fork bombs; dd/mkfs to devices; piping a
-/// remote script into a shell; recursive chmod/chown of / or home).
+/// Does this command hit the refuse tier? This is NOT a sandbox — real isolation
+/// is "run in a container" (PLAN M11) — but it hard-stops the classic disasters.
 pub fn dangerous_command(cmd: &str) -> Option<String> {
-    let checks: &[(&str, &str)] = &[
-        (r":\s*\(\s*\)\s*\{", "fork bomb"),
-        (r"\bdd\b[^|;&]*\bof=/dev/", "dd writing to a device"),
-        (r"\bmkfs\b", "filesystem format (mkfs)"),
-        (r">\s*/dev/(sd|nvme|disk|hd|mmcblk)", "write to a block device"),
-        (
-            r"(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|fish)\b",
-            "piping a remote script straight into a shell",
-        ),
-        (
-            r"\bch(?:mod|own)\b[^|;&]*-R[^|;&]*\s(?:/|~|\$HOME)(?:\s|$)",
-            "recursive permission change on / or home",
-        ),
-        (
-            r"\brm\b[^|;&]*\s-\S*[rR]\S*[^|;&]*\s(?:-\S+\s+)*(?:/|/\*|~|~/|\$HOME|\.|\.\.|\*|/etc|/usr|/bin|/sbin|/var|/lib|/System|/Library|/boot|/dev)(?:/\s|\s|$)",
-            "recursive rm of a dangerous path (/, ~, ., .., *, or a system dir)",
-        ),
-    ];
-    for (pat, reason) in checks {
-        // Patterns are static and known-valid.
-        if Regex::new(pat).map(|re| re.is_match(cmd)).unwrap_or(false) {
-            return Some((*reason).to_string());
-        }
+    // Kept as the public name this has always had; the patterns themselves live
+    // in `policy`, which also owns the softer ask-tier. Two copies of a security
+    // rule is one copy too many.
+    match crate::tools::policy::classify(cmd) {
+        crate::tools::policy::Decision::Refuse(reason) => Some(reason),
+        _ => None,
     }
-    None
 }
 
 #[async_trait]
@@ -72,11 +51,30 @@ impl Tool for BashTool {
             return ToolOutput::error("missing required argument: command");
         };
 
-        // Hard-stop destructive commands before they run.
-        if let Some(reason) = dangerous_command(command) {
-            return ToolOutput::blocked(format!(
-                "refused to run a destructive command ({reason}): {command}"
-            ));
+        // Two tiers: catastrophic commands are refused outright, outward-facing
+        // ones are put to the user. See `policy` for why the ask-list is short.
+        match crate::tools::policy::classify(command) {
+            crate::tools::policy::Decision::Allow => {}
+            crate::tools::policy::Decision::Refuse(reason) => {
+                return ToolOutput::blocked(format!(
+                    "refused to run a destructive command ({reason}): {command}"
+                ));
+            }
+            crate::tools::policy::Decision::Ask(reason) => {
+                use crate::tools::approval::Approval;
+                match ctx.approver.ask(command, &reason).await {
+                    Approval::Once | Approval::AlwaysThisSession => {}
+                    // Not fatal: the model should be able to take a different
+                    // route (say, leave the commit unpushed and report that)
+                    // rather than have the turn killed under it.
+                    Approval::Deny => {
+                        return ToolOutput::error(format!(
+                            "the user did not approve this command ({reason}): {command}\n\
+                             Do not retry it. Continue without it, and say what was skipped."
+                        ));
+                    }
+                }
+            }
         }
 
         let timeout = args

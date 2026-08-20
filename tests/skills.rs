@@ -96,6 +96,7 @@ async fn the_tool_returns_the_body_and_where_it_lives() {
         session_id: "s".into(),
         bash_timeout: std::time::Duration::from_secs(5),
         is_worker: false,
+        ..Default::default()
     };
 
     let out = registry.run("skill", json!({"name": "newsletter"}), &ctx).await;

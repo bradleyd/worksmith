@@ -68,6 +68,12 @@ struct Args {
     #[arg(long, global = true)]
     fast: bool,
 
+    /// Approve every command without asking. Outward-facing actions (git push,
+    /// sudo, publishing, sending data) otherwise prompt in the TUI and are
+    /// refused when nothing can prompt. Use for unattended runs you trust.
+    #[arg(long, global = true)]
+    approve_all: bool,
+
     /// Force thinking on, overriding `agent.thinking` in config. Takes an
     /// optional token budget (`--think 2000`), which caps the reasoning alone so
     /// it cannot consume all of `max-tokens` and leave nothing for the answer.
@@ -168,11 +174,24 @@ async fn run(args: Args) -> Result<()> {
         return outcome;
     }
 
+    // Who answers "may I push?" depends on whether anyone is watching. The TUI
+    // can put the question on screen; a --print run cannot, and defaults to no.
+    let (approver, approvals): (Arc<dyn worksmith::tools::approval::Approver>, _) =
+        if args.approve_all {
+            (Arc::new(worksmith::tools::approval::AutoApprove), None)
+        } else if mode == OutputMode::Tui {
+            let (a, rx) = worksmith::tools::approval::ChannelApprover::new();
+            (Arc::new(worksmith::tools::approval::RememberingApprover::new(Arc::new(a))), Some(rx))
+        } else {
+            (Arc::new(worksmith::tools::approval::RefuseWhenUnattended), None)
+        };
+
     let tool_ctx = ToolContext {
         cwd: cwd.clone(),
         session_id: session.id.clone(),
         bash_timeout: Duration::from_secs(config.bash_timeout_secs()),
         is_worker: false,
+        approver,
     };
 
     // --fast / --think beat the configured default.
@@ -214,6 +233,7 @@ async fn run(args: Args) -> Result<()> {
             config.fanout_auto(),
             config.synthesize(),
             config.clone(),
+            approvals.expect("the TUI branch always builds an approval channel"),
         )
         .await;
     }
@@ -295,6 +315,7 @@ async fn run_spawn(
         session_id: session.id.clone(),
         bash_timeout: Duration::from_secs(config.bash_timeout_secs()),
         is_worker: false,
+        ..Default::default()
     };
     let agent = Arc::new(Agent::new(
         client,

@@ -95,6 +95,17 @@ checks caught in milliseconds.
   guessed from the endpoint — a hostname heuristic, so set `thinking-param`
   explicitly behind a proxy — and a 400 on a thinking request names the field
   that was sent and where that choice came from.
+- **Approval gate**: catastrophic commands (`rm -rf /`, `mkfs`, `curl | sh`) are
+  refused outright; *outward-facing or irreversible* ones — `git push`, `sudo`,
+  `cargo publish`, `curl -X POST`, `kubectl delete`, writes outside the working
+  directory — prompt before running (`y` once, `a` for the session, `n` to
+  decline). A denial is not fatal: the model is told what was skipped and
+  continues. Where nothing can prompt (`--print`, `--mode json`) the answer is
+  **no**, because a headless agent that pushes because nobody objected is the
+  failure this prevents; `--approve-all` opts out for unattended runs you trust.
+  Ordinary work — `cargo test`, `git commit`, `grep` — never prompts, because a
+  prompt answered reflexively is worse than no prompt. It raises the cost of an
+  accident, not of an attack: real isolation is the sandbox (PLAN M11).
 - **Skills** — the [Agent Skills](https://agentskills.io) format as published, so
   a `SKILL.md` you wrote for Claude Code, Codex, or Cursor works here unchanged
   (and vice versa). Found in `<project>/skills/`, `~/.claude/skills/`,

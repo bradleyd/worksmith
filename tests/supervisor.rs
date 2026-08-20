@@ -69,6 +69,7 @@ fn template_agent(client: Arc<MockClient>, cwd: &std::path::Path) -> Agent {
             session_id: "template".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     )
 }
@@ -147,6 +148,7 @@ async fn repeated_calls_are_nudged_into_the_worker() {
             session_id: "template".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     ));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
@@ -245,6 +247,7 @@ async fn silence_trips_the_idle_rule() {
             session_id: "template".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     ));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(

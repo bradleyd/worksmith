@@ -65,6 +65,9 @@ impl Tool for EditTool {
             return ToolOutput::error("missing required argument: path");
         };
         let full = resolve_path(ctx, path);
+        if let Some(refusal) = super::approve_write_outside_cwd(ctx, &full).await {
+            return ToolOutput::error(refusal);
+        }
 
         let ops = match collect_ops(&args) {
             Ok(ops) if ops.is_empty() => {

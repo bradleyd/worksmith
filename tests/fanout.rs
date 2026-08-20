@@ -75,6 +75,7 @@ fn agent_with(client: Arc<dyn LlmClient>, cwd: &std::path::Path) -> Agent {
             session_id: "template".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     )
 }

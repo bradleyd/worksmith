@@ -12,6 +12,7 @@ fn ctx(dir: &std::path::Path) -> ToolContext {
         session_id: "t".into(),
         bash_timeout: Duration::from_secs(60),
         is_worker: false,
+        ..Default::default()
     }
 }
 

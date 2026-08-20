@@ -58,6 +58,7 @@ async fn bash_tool_refuses_without_executing() {
         session_id: "t".into(),
         bash_timeout: Duration::from_secs(10),
         is_worker: false,
+        ..Default::default()
     };
     let reg = ToolRegistry::with_builtins();
 
@@ -71,4 +72,90 @@ async fn bash_tool_refuses_without_executing() {
     assert!(out.content.contains("refused"), "message: {}", out.content);
     // The command never ran — the canary survives.
     assert!(canary.exists(), "destructive command must not have executed");
+}
+
+/// The observed failure: a model ran `git push` unattended. The guard has to
+/// stop at the tool boundary, not merely classify correctly.
+#[tokio::test]
+async fn an_outward_command_is_not_run_without_approval() {
+    use std::sync::Arc;
+    use worksmith::tools::approval::RefuseWhenUnattended;
+
+    let dir = tempfile::tempdir().unwrap();
+    let canary = dir.path().join("pushed.txt");
+    let reg = ToolRegistry::with_builtins();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        approver: Arc::new(RefuseWhenUnattended),
+        ..Default::default()
+    };
+
+    // Stands in for a real push: if the command runs, the file appears.
+    let out = reg
+        .run(
+            "bash",
+            serde_json::json!({ "command": "git push && touch pushed.txt" }),
+            &ctx,
+        )
+        .await;
+
+    assert!(out.is_error, "a denied command must report as an error: {}", out.content);
+    assert!(!canary.exists(), "the command must not have run");
+    assert!(out.content.contains("did not approve"), "says why: {}", out.content);
+    // The turn continues — the model should route around it, not be killed.
+    assert!(!out.fatal, "denial is not fatal; refusal of a destructive command is");
+}
+
+#[tokio::test]
+async fn approval_lets_the_command_through() {
+    use std::sync::Arc;
+    use worksmith::tools::approval::AutoApprove;
+
+    let dir = tempfile::tempdir().unwrap();
+    let reg = ToolRegistry::with_builtins();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        approver: Arc::new(AutoApprove),
+        ..Default::default()
+    };
+
+    reg.run("bash", serde_json::json!({ "command": "touch approved.txt" }), &ctx).await;
+    assert!(dir.path().join("approved.txt").exists());
+}
+
+/// Writing outside the project is its own surprise: "edit this file" was not
+/// understood to mean ~/.ssh/config.
+#[tokio::test]
+async fn writing_outside_the_project_needs_approval() {
+    use std::sync::Arc;
+    use worksmith::tools::approval::RefuseWhenUnattended;
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("escaped.txt");
+
+    let reg = ToolRegistry::with_builtins();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        approver: Arc::new(RefuseWhenUnattended),
+        ..Default::default()
+    };
+
+    let out = reg
+        .run(
+            "write",
+            serde_json::json!({ "path": target.display().to_string(), "content": "x" }),
+            &ctx,
+        )
+        .await;
+
+    assert!(out.is_error, "should be refused: {}", out.content);
+    assert!(!target.exists(), "the file must not have been written");
+
+    // Inside the project, no prompt and no obstruction.
+    let out = reg
+        .run("write", serde_json::json!({ "path": "inside.txt", "content": "x" }), &ctx)
+        .await;
+    assert!(!out.is_error, "writing inside the project must not prompt: {}", out.content);
+    assert!(dir.path().join("inside.txt").exists());
 }

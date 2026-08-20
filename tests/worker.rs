@@ -65,6 +65,7 @@ fn template_agent(responses: Vec<Completion>, cwd: &std::path::Path) -> Agent {
             session_id: "template".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     )
 }

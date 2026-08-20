@@ -62,5 +62,10 @@ published format, not ours). Front-end-agnostic logic lives outside
   `thinking = <budget>` over raising the cap, and `/fast` when the task doesn't
   need deliberation. The footer's `↻` is the reasoning spend and `⚠cut` means
   the last completion was truncated.
-- Destructive `bash` commands are refused by the safety guard
-  (`tools::dangerous_command`) and hard-stop the turn.
+- Command safety is two tiers in `tools::policy`. **Refuse** (catastrophic and
+  local) hard-stops the turn — `tools::dangerous_command` is the same list under
+  its older name. **Ask** (outward-facing or irreversible: push, sudo, publish,
+  send data, write outside the cwd) goes to `tools::approval::Approver`; the TUI
+  prompts, headless refuses, `--approve-all` allows. Denial is an error the model
+  is expected to route around, not a fatal stop. Keep the ask-list short: a
+  prompt the user answers reflexively is worse than no prompt.

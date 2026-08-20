@@ -94,6 +94,7 @@ fn build_agent_with_client(
             session_id: "test".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     )
 }
@@ -217,6 +218,7 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
             session_id: "test".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     );
 
@@ -473,6 +475,7 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
             session_id: "test".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     );
 
@@ -529,6 +532,7 @@ async fn a_compacted_session_stays_compacted_when_reopened() {
             session_id: "test".into(),
             bash_timeout: Duration::from_secs(10),
             is_worker: false,
+            ..Default::default()
         },
     );
 

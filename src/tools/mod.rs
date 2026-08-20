@@ -2,6 +2,8 @@
 //! advertises a JSON Schema and returns a structured [`ToolOutput`].
 
 mod bash;
+pub mod approval;
+pub mod policy;
 mod doc;
 mod edit;
 mod read;
@@ -13,7 +15,7 @@ pub(crate) use search::{display_rel, walk};
 mod write;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,6 +33,23 @@ pub struct ToolContext {
     pub bash_timeout: Duration,
     /// Spawned workers *propose* memories instead of writing them (§8).
     pub is_worker: bool,
+    /// Who to ask before an outward-facing or irreversible action. Defaults to
+    /// approving everything, which is right for tests and for the eval harness
+    /// and wrong for anything a user is watching — the real front ends install
+    /// their own.
+    pub approver: std::sync::Arc<dyn approval::Approver>,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        Self {
+            cwd: PathBuf::from("."),
+            session_id: String::new(),
+            bash_timeout: Duration::from_secs(120),
+            is_worker: false,
+            approver: std::sync::Arc::new(approval::AutoApprove),
+        }
+    }
 }
 
 /// The structured result of a tool run.
@@ -135,6 +154,28 @@ impl Default for ToolRegistry {
 fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
     let path = PathBuf::from(p);
     if path.is_absolute() { path } else { ctx.cwd.join(path) }
+}
+
+/// Ask before writing outside the working directory. The user pointed the agent
+/// at a project; a path that leaves it — `/etc/hosts`, `~/.ssh/config`, a
+/// sibling repo — is a different kind of act than editing the code in front of
+/// it, and is not what "edit this file" was understood to mean.
+///
+/// Returns the refusal text if the write must not proceed.
+async fn approve_write_outside_cwd(ctx: &ToolContext, full: &Path) -> Option<String> {
+    if !policy::path_escapes_cwd(full, &ctx.cwd) {
+        return None;
+    }
+    let reason = "writes outside the working directory";
+    let what = full.display().to_string();
+    match ctx.approver.ask(&what, reason).await {
+        approval::Approval::Once | approval::Approval::AlwaysThisSession => None,
+        approval::Approval::Deny => Some(format!(
+            "the user did not approve writing outside {} (to {what}).\n\
+             Do not retry it. Work inside the project directory instead.",
+            ctx.cwd.display()
+        )),
+    }
 }
 
 /// A summary line + unified diff of a file change, for `edit`/`write` output.
