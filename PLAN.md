@@ -834,8 +834,8 @@ easy to lose.
    place" while demanding the toolchain live in an image. macOS `sandbox-exec`
    profiles and Linux Landlock (+ optional network namespace) let the real
    toolchain run while restricting paths, and network denial is the only
-   OS-level thing that actually stops push and exfiltration. To be planned
-   before it is built.
+   OS-level thing that actually stops push and exfiltration. **Planned in §10b**
+   (2026-08-20); not built.
 
 5. **M9 metrics, the cost-per-solved-task spine first.** The instrument, not
    decoration: it is what proves the differentiator to anyone else, and the only
@@ -851,6 +851,101 @@ easy to lose.
 7. **MCP (§6) last.** It multiplies tool surface with third-party code under a
    harness that has no permission model. Doing it before (1) means arbitrary
    tools executing unattended on a weak model's say-so.
+
+## 10b. Sandboxing (OS-local), planned 2026-08-20
+
+Not built yet. Written down first because the decisions below are what make it
+protective rather than merely annoying, and because getting them wrong means
+`cargo build` stops working and the sandbox gets turned off forever.
+
+### Why not the obvious two
+
+**WASM is the wrong tool.** wasmtime sandboxes code compiled to wasm. What needs
+containing here is native subprocesses: cargo, rustc, git, pandoc, python. Those
+are not wasm binaries and will not be. (WASM *is* the right answer for a future
+plugin system where third parties ship code we execute in-process. Remember that
+when MCP arrives.)
+
+**Docker costs more than it returns, as the default.** The toolchain has to exist
+in the image, bind-mounting the working tree hands most of the filesystem back,
+uid mapping is a chore, and "edit my repo in place" is the whole workflow.
+Defensible for unattended runs; wrong for the interactive path.
+
+**OS primitives fit.** macOS `sandbox-exec` (seatbelt) profiles, Linux Landlock
+(kernel 5.13+, `landlock` crate) plus optionally a network namespace. The real
+toolchain runs, paths are restricted, and network can be denied. Codex and Claude
+Code both take this route.
+
+### What is inside the boundary
+
+Every `bash` tool invocation, and every validation command. Validation is not
+optional here: `CommandValidator` spawns `bash -lc` directly and re-runs on every
+retry, unattended. A sandbox with a validator-shaped hole is theatre.
+
+Not the harness itself. Worksmith's own writes (sessions, memory, knowledge) are
+in-process and stay outside.
+
+### The decision that breaks everything if wrong: writable paths
+
+A naive "writes only under cwd" policy breaks this very repo on the first build.
+`CARGO_TARGET_DIR` here is `~/.cargo/target`, nowhere near the project. That is
+the shape of the whole problem, so the default write-set is:
+
+- the project directory (cwd), including `.git`
+- `$TMPDIR` and `/tmp`
+- the resolved cargo target dir (`cargo metadata`), `~/.cargo/registry`,
+  `~/.cargo/git`
+- tool caches that are write-or-fail: `~/.npm`, `~/.cache`, and on macOS the
+  LibreOffice profile under `~/Library/Application Support` that `doc` needs
+
+Reads stay broad. A weak model reading `/usr/include` is not the threat; the
+threat is writes leaving the project and data leaving the machine. Narrowing
+reads would break every toolchain lookup for little gain, and the secrets worth
+protecting (`~/.ssh`, `~/.aws`, `.env`) are better handled as an explicit
+read-deny list than as an allow-list nobody can complete.
+
+### Network: allowed by default, deniable
+
+Denying network by default breaks `cargo build` on a cold registry, `npm
+install`, `pip`, and the `web` tool. It would be turned off within a day.
+
+The approval gate already catches the outward-facing *commands* (push, curl with
+a body, publish). So: network on by default, and `sandbox = "strict"` denies it
+for unattended runs where nobody is there to approve anything. Strict is the
+setting for `--print` in CI, not for a person at a terminal.
+
+### Failure modes, which decide whether anyone keeps it on
+
+`[tools] sandbox = "off" | "best-effort" | "required"`, defaulting to
+best-effort.
+
+- **best-effort**: unsupported platform or kernel warns once per session and runs
+  anyway. Silently running unsandboxed while claiming otherwise is worse than
+  either honest option.
+- **required**: refuse to run commands at all rather than run them unconfined.
+  For servers and CI.
+- A command the sandbox denies returns an error the model can route around,
+  naming the path or the operation refused, the same shape as an approval
+  denial. It must not be a fatal turn error, or one stray write kills the run.
+
+### Build order
+
+1. A `Sandbox` trait with a no-op implementation, wired into `bash` and
+   `CommandValidator`. Nothing changes behaviourally; this is the seam.
+2. macOS seatbelt profile generated per invocation from the write-set above.
+   Test: a write outside the project fails, `cargo test` in the project passes.
+3. Linux Landlock. Same tests. Feature-detect the ABI and degrade per the policy
+   above rather than assuming a kernel.
+4. `strict` network denial (netns on Linux, seatbelt rules on macOS).
+
+### Open questions
+
+- Does the write-set need to be user-extendable (`[tools] sandbox-write = [...]`)
+  on day one, or is discovering the gaps in dogfooding the better order?
+- Do workers get a *tighter* profile than the session? They are the least trusted
+  thing in the system, and M11 gives each its own tree anyway.
+- Is `required` on by default for `worksmith spawn` (headless, unattended) even
+  when the interactive default is best-effort?
 
 ## 11. Open decisions
 
