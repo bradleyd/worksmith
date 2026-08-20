@@ -148,6 +148,9 @@ struct App {
     pending_fanout: Option<PendingFanOut>,
     /// Set by `/memory extract`; run_loop runs the classifier off the UI task.
     pending_extract: bool,
+    /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
+    /// Carries the cap on how many sessions to read in this run.
+    pending_mine: Option<usize>,
 }
 
 impl App {
@@ -188,6 +191,7 @@ impl App {
             synthesize: true,
             pending_fanout: None,
             pending_extract: false,
+            pending_mine: None,
         }
     }
 
@@ -577,6 +581,10 @@ async fn run_loop(
     let mut groups: Vec<GroupAcc> = Vec::new();
     // A memory-extraction classifier call in flight.
     let mut extract: Option<JoinHandle<Result<String, String>>> = None;
+    // A mining run in flight: the model half only — the proposals are filed back
+    // on this task, where the memory store lives.
+    type MineResults = (Vec<(String, Result<String, String>)>, crate::mining::MineReport);
+    let mut mine: Option<JoinHandle<MineResults>> = None;
 
     loop {
         // Start queued workers whose slot just freed.
@@ -688,6 +696,37 @@ async fn run_loop(
                             }
                         }
 
+                        // /memory mine: pick the sessions here (the store can't
+                        // cross a task boundary), classify them off the UI task.
+                        if let Some(limit) = app.pending_mine.take() {
+                            if mine.is_some() || extract.is_some() || app.running {
+                                app.push(
+                                    Kind::Notice,
+                                    "busy — try /memory mine once the turn finishes".to_string(),
+                                );
+                            } else {
+                                match crate::mining::plan(&mem, &cwd, limit) {
+                                    Err(e) => app.push(Kind::Error, format!("mine failed: {e}")),
+                                    Ok(p) if p.items.is_empty() => {
+                                        app.push(Kind::Notice, p.report.summary())
+                                    }
+                                    Ok(p) => {
+                                        app.status =
+                                            format!("mining {} sessions…", p.items.len());
+                                        let a = agent.clone();
+                                        let report = p.report.clone();
+                                        let items = p.items;
+                                        mine = Some(tokio::spawn(async move {
+                                            let results =
+                                                crate::mining::classify(&a, &items, |_, _| {})
+                                                    .await;
+                                            (results, report)
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+
                         // /spawn asked for a planned fan-out: run the model call
                         // off this task so the UI keeps drawing.
                         if let Some(pf) = app.pending_fanout.take() {
@@ -760,6 +799,23 @@ async fn run_loop(
                     }
                     Ok(Err(e)) => app.push(Kind::Error, format!("extraction failed: {e}")),
                     Err(e) => app.push(Kind::Error, format!("extraction task failed: {e}")),
+                }
+                if app.follow { app.scroll_up = 0; }
+            }
+
+            // Mining finished: file the proposals from here, where the store is.
+            res = async { (&mut mine.as_mut().unwrap()).await }, if mine.is_some() => {
+                mine = None;
+                app.status = "/help for keys and commands".into();
+                match res {
+                    Ok((results, report)) => {
+                        let report = crate::mining::record(&mem, results, report);
+                        app.push(Kind::Notice, report.summary());
+                        for f in &report.failed {
+                            app.push(Kind::Error, format!("mine: {f}"));
+                        }
+                    }
+                    Err(e) => app.push(Kind::Error, format!("mining task failed: {e}")),
                 }
                 if app.follow { app.scroll_up = 0; }
             }
@@ -958,7 +1014,7 @@ async fn handle_command(
                 Kind::Notice,
                 "keys: Enter=send  Alt+Enter=newline  Ctrl+G=$EDITOR  Esc=abort/clear  \
                  Ctrl+C=quit  Ctrl+O=tools  Ctrl+T=thinking  Tab=complete\n\
-                 commands: /new /compact /memory [search|extract|pending|approve] \
+                 commands: /new /compact /memory [search|extract|mine|pending|approve] \
                  /knowledge [index|search] /skill [name] /validate <cmd|off> \
                  /fast [on|off|auto] \
                  /think [on|off|auto|<tokens>] \
@@ -1184,6 +1240,16 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
         "extract" | "distill" => {
             // Signals the caller to run the classifier off the UI task.
             app.pending_extract = true;
+        }
+        "mine" => {
+            // Default to a small bite: each session read is one model call, and
+            // an archive of a thousand should not be one blocking command.
+            let limit = parts.next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(10);
+            if limit == 0 {
+                app.push(Kind::Error, "usage: /memory mine [sessions]".to_string());
+            } else {
+                app.pending_mine = Some(limit);
+            }
         }
         "pending" | "proposed" => match mem.pending() {
             Ok(rows) if rows.is_empty() => {
@@ -1633,6 +1699,7 @@ fn arg_completions(
         "memory" | "mem" => match prev {
             1 => &[
                 "list", "global", "project", "search", "show", "pending", "approve", "extract",
+                "mine",
                 "forget", "add",
             ],
             2 if tokens.get(1) == Some(&"add") => &["global", "project"],

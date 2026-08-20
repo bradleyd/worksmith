@@ -654,7 +654,8 @@ async fn handle_command(
                  /memory add <scope> <kind> <subject> <content...>\n  \
                  /memory search <query>   search memories\n  \
                  /memory extract          distill this session into memories\n  \
-                 /memory pending | /memory approve <id>   review worker proposals\n  \
+                 /memory mine [n]         mine past sessions of this project\n  \
+                 /memory pending | /memory approve <id>   review proposals\n  \
                  /knowledge [index|search <query>|status]  the project's own text\n  \
                  /skill [name]            list skills, or load one\n  \
                  /spawn [-n N | --each-files <regex>] <task>   background worker(s)\n  \
@@ -923,6 +924,30 @@ async fn handle_memory<'a>(
 ) {
     let sub = parts.next().unwrap_or("list");
     match sub {
+        "mine" => {
+            let limit = parts.next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(10);
+            let cwd = Path::new(session.cwd());
+            let plan = match worksmith::mining::plan(mem, cwd, limit) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("mine failed: {e:#}");
+                    return;
+                }
+            };
+            if plan.items.is_empty() {
+                println!("{}", plan.report.summary());
+                return;
+            }
+            let results = worksmith::mining::classify(agent, &plan.items, |i, n| {
+                println!("({i}/{n}) mining…");
+            })
+            .await;
+            let report = worksmith::mining::record(mem, results, plan.report);
+            println!("{}", report.summary());
+            for f in &report.failed {
+                eprintln!("mine: {f}");
+            }
+        }
         "search" | "find" => {
             let query = parts.collect::<Vec<_>>().join(" ");
             if query.trim().is_empty() {

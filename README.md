@@ -115,6 +115,14 @@ checks caught in milliseconds.
   rather than write — `/memory pending` and `/memory approve <id>` review them.
   `/memory extract` distills the current session into at most a few candidates
   using a classifier biased toward saving nothing.
+- **Memory mining** (`/memory mine [n]`): reads *past* sessions of the current
+  project and files what they taught as proposals. Asking a small model to
+  volunteer memories mid-turn doesn't work — across 1021 recorded sessions the
+  `memory` tool was called seven times, every one a search — so the archive is
+  read afterwards instead, newest first, skipping sessions already mined and
+  ones too slight to be worth a model call. Everything lands in `/memory
+  pending`, scoped to the project the session ran in: a lesson from one repo is
+  not a global fact.
 - **Knowledge** (`.worksmith/knowledge.db`): the project's own docs and source,
   chunked on paragraph boundaries and FTS5-indexed, searched via the `knowledge`
   tool or `/knowledge search`. The index maintains itself — a search indexes on

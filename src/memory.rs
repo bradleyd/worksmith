@@ -93,7 +93,14 @@ fn open_db(path: &Path) -> Result<Connection> {
             status        TEXT NOT NULL DEFAULT 'active'
         );
         CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
-        CREATE INDEX IF NOT EXISTS idx_memories_status  ON memories(status);",
+        CREATE INDEX IF NOT EXISTS idx_memories_status  ON memories(status);
+        -- Which past sessions the miner has already read. Without this every
+        -- run re-reads the whole archive and re-proposes what you rejected.
+        CREATE TABLE IF NOT EXISTS mined_sessions (
+            session_id TEXT PRIMARY KEY,
+            mined_at   INTEGER NOT NULL,
+            candidates INTEGER NOT NULL DEFAULT 0
+        );",
     )
     .context("initializing memory schema")?;
 
@@ -354,6 +361,29 @@ impl MemoryStore {
             [&row.id],
         )?;
         Ok((MemoryRow { status: "proposed".into(), ..row }, true))
+    }
+
+    /// Has the miner already read this session? Recorded in the project store
+    /// when there is one — mining is per-project, and so is its bookkeeping.
+    pub fn was_mined(&self, session_id: &str) -> Result<bool> {
+        let conn = self.project.as_ref().unwrap_or(&self.global);
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mined_sessions WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Record that a session was mined, so a later run skips it.
+    pub fn mark_mined(&self, session_id: &str, candidates: usize) -> Result<()> {
+        let conn = self.project.as_ref().unwrap_or(&self.global);
+        conn.execute(
+            "INSERT OR REPLACE INTO mined_sessions (session_id, mined_at, candidates) \
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id, now(), candidates as i64],
+        )?;
+        Ok(())
     }
 
     /// Proposals awaiting a decision, both scopes.

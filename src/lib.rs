@@ -10,6 +10,7 @@ pub mod fanout;
 pub mod knowledge;
 pub mod llm;
 pub mod memory;
+pub mod mining;
 pub mod prompt;
 pub mod report;
 pub mod session;
