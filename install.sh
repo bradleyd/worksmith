@@ -14,7 +14,12 @@ mode="release"
 [ "${1:-}" = "--debug" ] && mode="debug"
 
 cargo build --${mode}
-bin="target/${mode}/worksmith"
+# target/ may be relocated by a global ~/.cargo/config.toml (target-dir) or
+# CARGO_TARGET_DIR — ask cargo where it actually built.
+target_dir=$(cargo metadata --no-deps --format-version 1 |
+  sed -n 's/.*"target_directory":"\([^"\\]*\)".*/\1/p')
+[ -n "${target_dir}" ] || target_dir="target"
+bin="${target_dir}/${mode}/worksmith"
 
 dest_dir="${HOME}/.local/bin"
 if [ -d "${dest_dir}" ] && [ -w "${dest_dir}" ]; then
