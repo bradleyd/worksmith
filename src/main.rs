@@ -216,6 +216,11 @@ async fn run(args: Args) -> Result<()> {
         config.keep_recent_turns(),
         tool_ctx,
     )
+    .with_sampling(
+        resolved.settings.temperature,
+        resolved.settings.top_p,
+        resolved.settings.top_k,
+    )
     .with_thinking(thinking);
 
     // Validation command: --until overrides the configured default.
@@ -239,6 +244,7 @@ async fn run(args: Args) -> Result<()> {
             config.fanout_auto(),
             config.synthesize(),
             config.clone(),
+            resolved.settings.clone(),
             approvals.expect("the TUI branch always builds an approval channel"),
         )
         .await;
@@ -336,6 +342,11 @@ async fn run_spawn(
         config.context_limit(),
         config.keep_recent_turns(),
         tool_ctx,
+    )
+    .with_sampling(
+        resolved.settings.temperature,
+        resolved.settings.top_p,
+        resolved.settings.top_k,
     )
     .with_thinking(resolve_thinking(args, config)?));
 

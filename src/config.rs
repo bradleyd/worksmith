@@ -26,6 +26,11 @@ pub struct Config {
     pub agents: AgentsConfig,
     pub web: WebConfig,
     pub tui: TuiConfig,
+    /// Per-model settings, keyed by the same `provider/model` spec you put in
+    /// `model`. One table because three things want the same key: what a model
+    /// costs, how it should be sampled, and (later) which models `/model`
+    /// offers. Splitting them would mean writing the same list three times.
+    pub models: HashMap<String, ModelSettings>,
     /// Set when this project has a config that has not been decided about. The
     /// caller asks and reloads; nothing was applied from it.
     #[serde(skip)]
@@ -170,6 +175,33 @@ pub struct ToolsConfig {
     pub bash_timeout_secs: Option<u64>,
 }
 
+/// What one model costs and how it wants to be sampled.
+///
+/// Sampling lives here rather than as a global default because the right
+/// numbers are the model's, not the harness's: Qwen asks for 0.6 with thinking
+/// on and 0.7 with it off, and those are Qwen's numbers, not universal ones.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct ModelSettings {
+    /// USD per million input (prompt) tokens.
+    pub input: Option<f64>,
+    /// USD per million output (completion) tokens.
+    pub output: Option<f64>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+}
+
+impl ModelSettings {
+    /// Cost in USD for a request, or `None` when this model has no prices (a
+    /// local model is free, and guessing a number would be worse than saying
+    /// nothing).
+    pub fn cost(&self, prompt_tokens: u64, completion_tokens: u64) -> Option<f64> {
+        let (i, o) = (self.input?, self.output?);
+        Some((prompt_tokens as f64 * i + completion_tokens as f64 * o) / 1_000_000.0)
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct TuiConfig {
@@ -186,6 +218,8 @@ pub struct ResolvedModel {
     pub provider: ProviderConfig,
     pub model: String,
     pub api_key: Option<String>,
+    /// Prices and sampling for this model, from `[models."provider/model"]`.
+    pub settings: ModelSettings,
     /// Set when `api-key-env` names a variable that is not exported. The request
     /// will go out unauthenticated; the caller should warn.
     pub missing_key_env: Option<String>,
@@ -293,6 +327,9 @@ impl Config {
         take(&mut self.web.provider, other.web.provider);
         take(&mut self.web.api_key_env, other.web.api_key_env);
         take(&mut self.web.base_url, other.web.base_url);
+        for (k, v) in other.models {
+            self.models.insert(k, v);
+        }
         take(&mut self.tui.insert_escape, other.tui.insert_escape);
         take(&mut self.tui.insert_escape_ms, other.tui.insert_escape_ms);
     }
@@ -499,7 +536,8 @@ impl Config {
             .as_ref()
             .and_then(|env| std::env::var(env).ok());
 
-        Ok(ResolvedModel { provider, model, api_key, missing_key_env })
+        let settings = self.models.get(&format!("{provider_name}/{model}")).cloned().unwrap_or_default();
+        Ok(ResolvedModel { provider, model, api_key, missing_key_env, settings })
     }
 }
 

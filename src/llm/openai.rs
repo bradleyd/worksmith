@@ -239,6 +239,12 @@ fn build_request_body(
     if let Some(t) = req.temperature {
         body["temperature"] = serde_json::json!(t);
     }
+    if let Some(p) = req.top_p {
+        body["top_p"] = serde_json::json!(p);
+    }
+    if let Some(k) = req.top_k {
+        body["top_k"] = serde_json::json!(k);
+    }
     if let Some(m) = req.max_tokens {
         body["max_tokens"] = serde_json::json!(m);
     }
@@ -530,6 +536,8 @@ mod thinking_tests {
             messages: vec![],
             tools: vec![],
             temperature: None,
+            top_p: None,
+            top_k: None,
             max_tokens: None,
             thinking,
             sort: None,

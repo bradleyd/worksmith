@@ -231,6 +231,13 @@ struct App {
     /// Reasoning tokens the last completion spent. The number that explains a
     /// long, silent step — without it, "thinking" is just an animation.
     last_reasoning_tokens: u32,
+    /// Every prompt token billed this session. Each request re-sends the
+    /// history, so this is a running total of what was charged, not the size of
+    /// the conversation.
+    total_in_tokens: u64,
+    /// Prices for the session's model, when the config gives them. A local
+    /// model has none, and showing $0.00 would be a claim rather than a fact.
+    prices: crate::config::ModelSettings,
     /// Reasoning streamed so far in the current step, so the count climbs live
     /// instead of only appearing once the step is over.
     step_reasoning_chars: usize,
@@ -328,6 +335,8 @@ impl App {
             context_limit,
             last_prompt_tokens: 0,
             last_reasoning_tokens: 0,
+            total_in_tokens: 0,
+            prices: crate::config::ModelSettings::default(),
             step_reasoning_chars: 0,
             last_finish_reason: None,
             total_out_tokens: 0,
@@ -781,6 +790,7 @@ impl App {
                 ..
             } => {
                 self.last_prompt_tokens = prompt_tokens;
+                self.total_in_tokens += prompt_tokens as u64;
                 self.total_out_tokens += completion_tokens as u64;
                 self.last_reasoning_tokens = reasoning_tokens;
                 self.step_reasoning_chars = 0;
@@ -809,6 +819,8 @@ pub async fn run_tui(
     fanout_auto: bool,
     synthesize: bool,
     config: Config,
+    // Prices and sampling for the session's model, for the footer's cost.
+    model_settings: crate::config::ModelSettings,
     // Questions from the agent's task: "may I run this?". The agent blocks on
     // the answer, so this loop must always send one.
     approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
@@ -829,6 +841,7 @@ pub async fn run_tui(
         fanout_auto,
         synthesize,
         config,
+        model_settings,
         approvals,
     )
     .await;
@@ -880,6 +893,8 @@ async fn run_loop(
     fanout_auto: bool,
     synthesize: bool,
     config: Config,
+    // Prices and sampling for the session's model, for the footer's cost.
+    model_settings: crate::config::ModelSettings,
     mut approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
@@ -906,6 +921,7 @@ async fn run_loop(
 
     let mut app = App::new(model, context_limit, validate_cmd);
     app.insert_escape = config.insert_escape();
+    app.prices = model_settings.clone();
     app.fanout_auto = fanout_auto;
     app.think_label = agent.thinking_mode().label();
     app.synthesize = synthesize;
@@ -3231,6 +3247,13 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let reasoning = if reasoning > 0 { format!("  ↻{}", compact_tokens(reasoning)) } else { String::new() };
     // "length" means the model was cut off rather than finished.
     let cut = if app.last_finish_reason.as_deref() == Some("length") { "  ⚠cut" } else { "" };
+    // Only when the model has prices. A local model is free, and $0.00 would be
+    // a claim rather than a fact.
+    let cost = match app.prices.cost(app.total_in_tokens, app.total_out_tokens) {
+        Some(c) if c >= 0.01 => format!("  ${c:.2}"),
+        Some(c) if c > 0.0 => format!("  ${c:.3}"),
+        _ => String::new(),
+    };
     let fast = match &app.think_label {
         Some(l) => format!("  think:{l}"),
         None => String::new(),
@@ -3242,7 +3265,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
-    let tail = format!("{reasoning}{cut}{fast}{agents}");
+    let tail = format!("{reasoning}{cut}{cost}{fast}{agents}");
     let left = format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail

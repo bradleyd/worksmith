@@ -194,3 +194,29 @@ bash-timeout-secs = 120
 # typing is untouched. A false positive costs one keystroke to undo.
 insert-escape = "jj"
 insert-escape-ms = 300
+
+# --- Models ------------------------------------------------------------------
+# Per-model settings, keyed by the same `provider/model` you put in `model`.
+# One table, because three things want the same key: what a model costs, how it
+# wants to be sampled, and (later) which models `/model` offers and how work is
+# routed between them (PLAN M12).
+#
+# Prices are USD per million tokens, and they are what turns the footer's token
+# counts into a session cost. A model with no entry shows no cost rather than
+# $0.00: unknown is not the same as free.
+#
+# Sampling belongs here rather than as a global default because the right
+# numbers are the model's own. Qwen asks for temperature 0.6 / top_p 0.95 /
+# top_k 20 with thinking on, and 0.7 / 0.8 / 20 with it off. Those are Qwen's
+# numbers, not universal ones. Anything left unset keeps the server's default.
+#
+# [models."openrouter/qwen/qwen3.8-27b"]
+# input = 0.20
+# output = 0.80
+# temperature = 0.6
+# top-p = 0.95
+# top-k = 20
+#
+# [models."omlx/Qwen3.5-9B-OptiQ-4bit"]
+# temperature = 0.6      # local: free, so no prices
+# top-k = 20

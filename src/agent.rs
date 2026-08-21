@@ -160,6 +160,8 @@ pub struct Agent {
     bus: EventBus,
     model: String,
     temperature: Option<f32>,
+    top_p: Option<f32>,
+    top_k: Option<u32>,
     max_tokens: Option<u32>,
     max_steps: usize,
     max_retries: usize,
@@ -198,6 +200,8 @@ impl Agent {
             bus,
             model,
             temperature,
+            top_p: None,
+            top_k: None,
             max_tokens,
             max_steps,
             max_retries,
@@ -215,6 +219,18 @@ impl Agent {
     /// Ask the model to skip its reasoning pass. On a small Qwen this is the
     /// difference between 500 completion tokens and 31 for the same question —
     /// the loop is expected to catch what the model no longer deliberates over.
+    /// Sampling the model asks for (`[models."provider/model"]`). Unset fields
+    /// leave the server's own defaults alone, which is what every request did
+    /// before this table existed.
+    pub fn with_sampling(mut self, temperature: Option<f32>, top_p: Option<f32>, top_k: Option<u32>) -> Self {
+        if temperature.is_some() {
+            self.temperature = temperature;
+        }
+        self.top_p = top_p;
+        self.top_k = top_k;
+        self
+    }
+
     pub fn with_thinking(mut self, thinking: Option<Thinking>) -> Self {
         self.thinking = ThinkingMode::new(thinking);
         self
@@ -270,6 +286,8 @@ impl Agent {
             bus,
             model,
             temperature: self.temperature,
+            top_p: self.top_p,
+            top_k: self.top_k,
             max_tokens: self.max_tokens,
             max_steps: self.max_steps,
             max_retries: self.max_retries,
@@ -416,6 +434,8 @@ impl Agent {
                 messages,
                 tools: self.registry.defs(),
                 temperature: self.temperature,
+                top_p: self.top_p,
+                top_k: self.top_k,
                 max_tokens: self.max_tokens,
                 thinking: self.thinking.get(),
                 sort: self.route.lock().unwrap().clone(),
@@ -636,6 +656,8 @@ impl Agent {
             messages: vec![Message::system(system), Message::user(user)],
             tools: vec![],
             temperature: Some(0.2),
+            top_p: self.top_p,
+            top_k: self.top_k,
             max_tokens: Some(max_tokens),
             thinking: Some(Thinking::Off),
             sort: self.route.lock().unwrap().clone(),

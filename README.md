@@ -202,6 +202,13 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
 - **Web** (`web` tool): `search` via a configured provider (Brave, Tavily, or a
   self-hosted SearXNG, set `[web]` in config) and `fetch`, which pulls a URL and
   reduces it to readable text. Fetch needs no configuration.
+- **Per-model settings** (`[models."provider/model"]`): prices in USD per
+  million tokens, which turn the footer's token counts into a running session
+  cost, plus the sampling that model asks for (`temperature`, `top-p`,
+  `top-k`). Sampling lives here because the right numbers are the model's own:
+  Qwen wants 0.6 with thinking on and 0.7 with it off, and those are Qwen's
+  numbers, not universal. A model with no entry shows no cost rather than
+  $0.00, since unknown is not free.
 - **Provider routing** (`/route`, `[providers.*] sort`): `throughput` for the
   fastest tokens/sec, `latency` for the fastest first token, `price` for the
   cheapest. OpenRouter only; other servers ignore it. Deliberately *not* folded

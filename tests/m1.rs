@@ -357,3 +357,38 @@ fn an_unknown_provider_sort_is_rejected() {
         assert!(c.resolve_model(None).is_ok(), "{ok} should be accepted");
     }
 }
+
+/// One table keyed by `provider/model`, because three things want the same key:
+/// what a model costs, how it wants to be sampled, and (later) which models
+/// `/model` offers.
+#[test]
+fn per_model_settings_carry_prices_and_sampling() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".worksmith");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        "model = \"openrouter/qwen/qwen3.8-27b\"\ntemperature = 0.7\n\
+         [providers.openrouter]\nbase-url = \"https://openrouter.ai/api/v1\"\n\
+         [models.\"openrouter/qwen/qwen3.8-27b\"]\n\
+         input = 0.20\noutput = 0.80\ntemperature = 0.6\ntop-k = 20\n",
+    )
+    .unwrap();
+
+    let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
+    let r = c.resolve_model(None).unwrap();
+    assert_eq!(r.settings.temperature, Some(0.6), "the model's number beats the global one");
+    assert_eq!(r.settings.top_k, Some(20));
+    assert_eq!(r.settings.top_p, None, "unset stays unset, leaving the server's default alone");
+
+    // 1M in + 1M out at 0.20/0.80.
+    assert_eq!(r.settings.cost(1_000_000, 1_000_000), Some(1.0));
+    assert_eq!(r.settings.cost(500_000, 0), Some(0.10));
+
+    // A model with no entry is not free, it is unknown: saying $0.00 would be a
+    // claim rather than a fact.
+    let unknown = c.resolve_model(Some("openrouter/something/else")).unwrap();
+    assert_eq!(unknown.settings, worksmith::config::ModelSettings::default());
+    assert_eq!(unknown.settings.cost(1_000_000, 1_000_000), None);
+}

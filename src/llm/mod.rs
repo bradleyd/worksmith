@@ -115,6 +115,11 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
     pub temperature: Option<f32>,
+    /// Nucleus and top-k sampling, when the model asks for specific values.
+    /// Unset means "whatever the server defaults to", which is what every
+    /// request did before `[models]` existed.
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
     pub max_tokens: Option<u32>,
     /// How much the model may deliberate before answering. `None` sends nothing
     /// at all, which is the default: providers disagree about these fields and a
