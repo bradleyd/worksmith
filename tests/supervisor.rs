@@ -227,7 +227,12 @@ impl LlmClient for SlowClient {
 }
 
 #[tokio::test]
-async fn silence_trips_the_idle_rule() {
+async fn a_slow_request_is_not_mistaken_for_a_stuck_worker() {
+    // The supervisor's idle rule measures time since the last event, and a call
+    // in flight emits nothing while it waits. Nudging then cannot help: steering
+    // is drained at the top of the *next* step, so the message arrives after the
+    // call it meant to interrupt, having spent one of max_nudges. Three workers
+    // sharing one local server hit this on prefill and were all stopped.
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(Agent::new(
@@ -250,19 +255,69 @@ async fn silence_trips_the_idle_rule() {
             ..Default::default()
         },
     ));
+    // The call takes 300ms; the idle deadline is 100ms, so it passes three
+    // times while the model is simply working.
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
         SupervisorConfig {
-            idle_timeout: Duration::from_millis(50),
-            max_nudges: 10, // don't escalate; we're asserting on the nudges
+            idle_timeout: Duration::from_millis(100),
+            max_nudges: 10,
             ..Default::default()
         },
     );
 
     let id = started(&mut mgr, "think hard");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
+    assert_eq!(
+        mgr.get(&id).unwrap().nudges,
+        0,
+        "waiting on the model is not being stuck"
+    );
+}
+
+#[tokio::test]
+async fn a_hung_request_is_stopped_rather_than_nudged() {
+    // A call can genuinely hang, and stopping it is the only action that helps,
+    // so silence far past the timeout still escalates.
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Arc::new(Agent::new(
+        Arc::new(SlowClient),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        1_000,
+        1_000_000,
+        6,
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "template".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            ..Default::default()
+        },
+    ));
+    // 20ms deadline against a 300ms call: well past the multiple that separates
+    // "slow" from "hung".
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
+        SupervisorConfig {
+            idle_timeout: Duration::from_millis(20),
+            max_nudges: 10,
+            ..Default::default()
+        },
+    );
+
+    let id = started(&mut mgr, "think hard");
+    assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Stopped);
+    let w = mgr.get(&id).unwrap();
+    assert_eq!(w.nudges, 0, "escalated directly; a nudge would have been useless");
+    let why = w.escalation.clone().unwrap_or_default();
     assert!(
-        mgr.get(&id).unwrap().nudges >= 1,
-        "a silent worker should have been nudged"
+        why.contains("no response from the model"),
+        "the reason names what happened: {why:?}"
     );
 }
 

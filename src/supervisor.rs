@@ -76,6 +76,11 @@ impl SupervisorConfig {
 }
 
 /// Per-worker watcher state.
+/// How many idle timeouts a single model call may span before it is treated as
+/// hung rather than slow. Generous on purpose: local prefill for a big prompt
+/// is genuinely slow, and stopping real work is worse than waiting.
+const STUCK_REQUEST_MULTIPLE: usize = 6;
+
 pub struct Supervisor {
     cfg: SupervisorConfig,
     /// Identical `name::arguments` call counts, spanning re-plan attempts.
@@ -85,6 +90,11 @@ pub struct Supervisor {
     nudges: usize,
     completion_tokens: u32,
     blocked_flagged: bool,
+    /// Is a model call in flight? While one is, silence means "waiting", not
+    /// "stuck".
+    in_flight: bool,
+    /// Consecutive idle deadlines that passed while a call was in flight.
+    in_flight_idles: usize,
 }
 
 impl Supervisor {
@@ -96,6 +106,8 @@ impl Supervisor {
             nudges: 0,
             completion_tokens: 0,
             blocked_flagged: false,
+            in_flight: false,
+            in_flight_idles: 0,
         }
     }
 
@@ -117,6 +129,16 @@ impl Supervisor {
             return None;
         }
         match event {
+            Event::ModelCallStarted => {
+                self.in_flight = true;
+                self.in_flight_idles = 0;
+                None
+            }
+            Event::ModelCallFinished => {
+                self.in_flight = false;
+                self.in_flight_idles = 0;
+                None
+            }
             Event::Usage { completion_tokens, .. } => {
                 self.completion_tokens += completion_tokens;
                 match self.cfg.token_budget {
@@ -164,6 +186,25 @@ impl Supervisor {
     pub fn on_idle(&mut self) -> Option<Action> {
         if !self.cfg.is_on() {
             return None;
+        }
+        // Waiting on the model is not the same as being stuck. A slow or queued
+        // request emits nothing for its whole duration, and a nudge cannot help
+        // it: steering is drained at the top of the *next* step, so the message
+        // arrives after the call it was meant to interrupt. All a nudge does
+        // here is spend one of `max_nudges`, which is how three workers sharing
+        // one local server died on a 20s timeout during prefill.
+        //
+        // A request can still hang, and stopping it is the one action that
+        // helps, so escalate after a long multiple of the timeout.
+        if self.in_flight {
+            self.in_flight_idles += 1;
+            if self.in_flight_idles < STUCK_REQUEST_MULTIPLE {
+                return None;
+            }
+            let secs = self.cfg.idle_timeout.as_secs() * STUCK_REQUEST_MULTIPLE as u64;
+            return Some(Action::Escalate(format!(
+                "no response from the model for {secs}s"
+            )));
         }
         let secs = self.cfg.idle_timeout.as_secs();
         self.act(format!(

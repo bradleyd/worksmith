@@ -455,8 +455,10 @@ impl Agent {
                 }
             });
 
+            self.bus.emit(Event::ModelCallStarted);
             let completion = self.client.stream(req, tx, cancel.clone()).await;
             let _ = forwarder.await;
+            self.bus.emit(Event::ModelCallFinished);
 
             let completion = match completion {
                 Ok(c) => c,

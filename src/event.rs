@@ -12,6 +12,12 @@ use tokio::sync::broadcast;
 pub enum Event {
     SessionStarted { id: String },
     UserMessage { text: String },
+    /// A model call is in flight. The supervisor's idle rule measures time
+    /// since the last event, and a slow request emits nothing at all while it
+    /// waits — so without these it counts queueing as spinning. Three workers
+    /// sharing one local server is enough to trip a 20s timeout on prefill.
+    ModelCallStarted,
+    ModelCallFinished,
     /// A streamed chunk of model reasoning/thinking (display-only).
     Thinking { text: String },
     /// A streamed chunk of assistant text.

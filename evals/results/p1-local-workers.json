@@ -1,0 +1,19 @@
+[
+  {
+    "task": "newsletter-judge",
+    "mode": "workers",
+    "fast": false,
+    "thinking": "default",
+    "passed": false,
+    "model_calls": 1,
+    "tool_calls": 0,
+    "gen_tokens": 768,
+    "reasoning_tokens": 0,
+    "outcome": null,
+    "elapsed": 135.2,
+    "error": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize (see the reasons above)",
+    "ctx_peak": 0,
+    "stderr": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize (see the reasons above)",
+    "run": 0
+  }
+]

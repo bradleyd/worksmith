@@ -753,6 +753,8 @@ impl App {
                 };
                 self.touch(at);
             }
+            // Bookkeeping for the supervisor's idle rule; nothing to draw.
+            Event::ModelCallStarted | Event::ModelCallFinished => {}
             Event::AssistantMessage { .. } => {} // already streamed via deltas
             Event::ToolCall { name, arguments, .. } => {
                 self.push(Kind::Tool, tool_summary(&name, &arguments));
@@ -3120,7 +3122,13 @@ fn item_rows(
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
-    let title = if app.mode == Mode::Normal {
+    // A pending approval owns the keyboard and blocks the turn, so the composer
+    // has to say that. It used to keep saying "working…" with the elapsed timer
+    // climbing, which reads as "the model is busy" — observed costing 79 minutes
+    // of waiting for a keypress nobody knew was wanted.
+    let title = if app.pending_approval.is_some() {
+        " APPROVE?  y = once · a = always this session · n = no ".to_string()
+    } else if app.mode == Mode::Normal {
         // The single worst modal failure is not knowing which mode you are in.
         match &app.search {
             Some(s) if s.typing => format!(" NORMAL · /{} ", s.pattern),
@@ -3272,7 +3280,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     );
 
     // While a turn runs, show an animated spinner + elapsed seconds.
-    let status = if app.running {
+    let status = if app.pending_approval.is_some() {
+        // No spinner: nothing is happening, and an animation would say it is.
+        format!("⏸ waiting for you  {}", app.status)
+    } else if app.running {
         const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let elapsed = app.turn_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
@@ -3473,6 +3484,44 @@ mod tests {
         assert_eq!(a.last_reasoning_tokens, 2000, "the provider's number replaces the estimate");
         assert_eq!(a.step_reasoning_chars, 0, "the live count resets for the next step");
         assert_eq!(a.last_finish_reason.as_deref(), Some("length"), "cut-off is recorded");
+    }
+
+    #[tokio::test]
+    async fn a_pending_approval_takes_over_the_composer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (approver, mut rx) = crate::tools::approval::ChannelApprover::new();
+        let h = tokio::spawn(async move {
+            use crate::tools::approval::Approver;
+            approver.ask("git push", "pushes commits to a remote").await
+        });
+        let req = rx.recv().await.unwrap();
+
+        let mut a = app();
+        a.running = true; // the turn is blocked on this, not finished
+        a.pending_approval = Some(req);
+        a.ensure_rows(78);
+
+        let mut term = Terminal::new(TestBackend::new(78, 12)).unwrap();
+        term.draw(|f| ui(f, &a)).unwrap();
+        let rows: Vec<String> = {
+            let buf = term.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+                .collect()
+        };
+        let screen = rows.join("\n");
+
+        // The failure this exists for: the composer said "working…" with a
+        // climbing timer while the turn sat waiting for a keypress.
+        assert!(screen.contains("APPROVE?"), "the composer asks: {screen}");
+        assert!(screen.contains("y = once"), "and says which keys: {screen}");
+        assert!(!screen.contains("working…"), "and stops claiming to be busy");
+        assert!(screen.contains("waiting for you"), "no spinner, no elapsed time");
+
+        a.pending_approval.take().unwrap().answer(crate::tools::approval::Approval::Once);
+        assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Once);
     }
 
     #[test]
