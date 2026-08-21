@@ -40,7 +40,15 @@ pub enum Event {
     /// The supervisor/loop nudged the model back on track (stuck detection).
     Nudge { reason: String },
     /// Old history was summarized to stay under the context limit.
-    Compaction { messages_before: usize, messages_after: usize },
+    /// Message counts are for orientation; the token numbers are the point.
+    /// "33 -> 33 messages" was a true statement about a compaction that freed
+    /// nothing, and it read like success.
+    Compaction {
+        messages_before: usize,
+        messages_after: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+    },
     /// Result of running the task's validation check.
     Validation { ok: bool, detail: String },
     /// A setting was not honored, or something is off but not fatal.

@@ -779,10 +779,17 @@ impl App {
                     self.push(Kind::Error, format!("✗ validation failed: {detail}"));
                 }
             }
-            Event::Compaction { messages_before, messages_after } => {
+            Event::Compaction {
+                messages_before,
+                messages_after,
+                tokens_before,
+                tokens_after,
+            } => {
                 self.push(
                     Kind::Notice,
-                    format!("⟲ compacted context: {messages_before} → {messages_after} messages"),
+                    format!(
+                        "⟲ compacted context: ~{tokens_before} → ~{tokens_after} tokens                          ({messages_before} → {messages_after} messages)"
+                    ),
                 );
             }
             Event::Usage {
@@ -2397,8 +2404,8 @@ fn describe(ev: &Event) -> String {
         Event::Validation { ok, detail } => {
             format!("{} validation: {detail}", if *ok { "✓" } else { "✗" })
         }
-        Event::Compaction { messages_before, messages_after } => {
-            format!("⟲ compacted {messages_before} → {messages_after}")
+        Event::Compaction { tokens_before, tokens_after, .. } => {
+            format!("⟲ compacted ~{tokens_before} → ~{tokens_after} tokens")
         }
         Event::Warning { message } => format!("⚠ {}", truncate(message.trim(), 60)),
         Event::Error { message } => format!("error: {}", truncate(message.trim(), 60)),

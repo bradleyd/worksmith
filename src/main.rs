@@ -1295,9 +1295,14 @@ fn render_activity(ev: &Event, print_mode: bool) {
             let line = format!("\x1b[33m↻ {reason}\x1b[0m");
             emit_line(&line, print_mode);
         }
-        Event::Compaction { messages_before, messages_after } => {
+        Event::Compaction {
+            messages_before,
+            messages_after,
+            tokens_before,
+            tokens_after,
+        } => {
             let line = format!(
-                "\x1b[2m⟲ compacted context: {messages_before} → {messages_after} messages\x1b[0m"
+                "\x1b[2m⟲ compacted context: ~{tokens_before} → ~{tokens_after} tokens                  ({messages_before} → {messages_after} messages)\x1b[0m"
             );
             emit_line(&line, print_mode);
         }

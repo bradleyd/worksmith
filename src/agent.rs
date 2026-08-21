@@ -783,7 +783,7 @@ impl Agent {
     /// session JSONL. Public so `/compact` can force it.
     pub async fn compact(&self, session: &mut Session) -> Result<()> {
         // Gather what we need, then drop the borrow before the await.
-        let (before, split, transcript) = {
+        let (before, tokens_before, split, transcript) = {
             let msgs = session.messages();
             // Keep roughly a third of the window verbatim: enough to continue
             // from, little enough that the next few steps fit.
@@ -791,7 +791,7 @@ impl Agent {
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
             }
-            (msgs.len(), split, render_transcript(&msgs[..split]))
+            (msgs.len(), estimate_tokens(msgs), split, render_transcript(&msgs[..split]))
         };
 
         let sys = "You are compacting a coding-agent conversation. Summarize the \
@@ -806,10 +806,24 @@ impl Agent {
 
         session.compact(&summary, split)?;
         let after = session.messages().len();
+        let tokens_after = estimate_tokens(session.messages());
         self.emit(session, Event::Compaction {
             messages_before: before,
             messages_after: after,
+            tokens_before,
+            tokens_after,
         });
+        // A compaction that frees nothing is a failure wearing a success
+        // message. Say so, rather than letting the next request hit a 400 with
+        // "compacted" the last thing on screen.
+        if tokens_after * 10 > tokens_before * 9 {
+            self.emit(session, Event::Warning {
+                message: format!(
+                    "compaction freed almost nothing (~{tokens_before} → ~{tokens_after} \
+                     tokens); a single message may be larger than the window"
+                ),
+            });
+        }
         Ok(())
     }
 }
@@ -834,8 +848,10 @@ fn estimate_tokens(messages: &[Message]) -> usize {
 /// there aren't more turns than we keep (nothing to compact). Splitting on turn
 /// boundaries keeps assistant/tool-call/tool-result groups intact.
 fn compaction_split(messages: &[Message], keep_turns: usize, keep_tokens: usize) -> usize {
-    // Prefer a turn boundary: summarising whole exchanges reads better than
-    // cutting one in half.
+    // Prefer a turn boundary, but only if cutting there actually helps. Keeping
+    // the last N *turns* says nothing about size: with user messages clustered
+    // early (nudges are user messages too), "keep 6 turns" chose index 1 and
+    // compaction reported 33 -> 33 messages while the prompt stayed at 32k.
     if keep_turns > 0 {
         let user_indices: Vec<usize> = messages
             .iter()
@@ -844,7 +860,12 @@ fn compaction_split(messages: &[Message], keep_turns: usize, keep_tokens: usize)
             .map(|(i, _)| i)
             .collect();
         if user_indices.len() > keep_turns {
-            return user_indices[user_indices.len() - keep_turns];
+            let candidate = user_indices[user_indices.len() - keep_turns];
+            let kept: usize = messages[candidate..].iter().map(message_tokens).sum();
+            if keep_tokens == 0 || kept <= keep_tokens {
+                return candidate;
+            }
+            // Otherwise fall through: the boundary is real but useless.
         }
     }
 
@@ -981,6 +1002,40 @@ mod tests {
         assert_eq!(compaction_split(&msgs, 9, 0), 0);
         // Tiny messages, generous budget → still nothing to do.
         assert_eq!(compaction_split(&msgs, 9, 10_000), 0);
+    }
+
+    #[test]
+    fn a_useless_turn_boundary_falls_through_to_the_token_budget() {
+        use crate::llm::{Role, ToolCall};
+        // Nudges are user messages, so a long tool-driven run can hold plenty of
+        // "turns" that all sit near the front. Keeping the last six of them
+        // chose index 1: compaction reported 33 -> 33 messages, freed nothing,
+        // and the next request hit the same 400.
+        let mut msgs = vec![Message::user("write chapter 10")];
+        for i in 0..7 {
+            msgs.push(Message::user(format!("nudge {i}")));
+        }
+        for i in 0..10 {
+            msgs.push(Message::assistant(
+                None,
+                vec![ToolCall {
+                    id: format!("c{i}"),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                }],
+            ));
+            msgs.push(Message::tool_result(format!("c{i}"), "read", "x".repeat(4_000)));
+        }
+
+        let split = compaction_split(&msgs, 6, 2_000);
+        let kept: usize = msgs[split..].iter().map(message_tokens).sum();
+        assert!(kept <= 2_000, "a cut that keeps 10k tokens is not a compaction");
+        assert!(split > 2, "the early nudge boundary was taken anyway: {split}");
+        assert!(split < msgs.len(), "and something is left to continue from");
+        assert!(
+            !matches!(msgs[split].role, Role::Tool),
+            "never resume on an orphaned tool result"
+        );
     }
 
     #[test]
