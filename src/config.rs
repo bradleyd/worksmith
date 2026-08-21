@@ -194,6 +194,12 @@ pub struct ModelSettings {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    /// This model's context window in tokens. A global `agent.context-limit`
+    /// cannot be right for a 32k local model and a 256k one at the same time,
+    /// and being wrong here means compaction never fires: a 128k limit against
+    /// a 32k model waits for a trigger the server rejects the request long
+    /// before reaching.
+    pub context: Option<usize>,
 }
 
 impl ModelSettings {

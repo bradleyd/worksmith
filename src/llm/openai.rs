@@ -126,7 +126,19 @@ impl LlmClient for OpenAiCompatClient {
             // the wrong spelling for this provider — and if the spelling was a
             // guess off the hostname, the fix is one config line the user has no
             // reason to know about. Say which field we sent and where it came from.
-            if status == reqwest::StatusCode::BAD_REQUEST && req.thinking.is_some() {
+            // Only when the complaint is plausibly *about* thinking. Appending
+            // it to every 400 put a paragraph about chat_template_kwargs under a
+            // context-length error, which is noise pretending to be a diagnosis.
+            let about_thinking = {
+                let t = text.to_ascii_lowercase();
+                ["reasoning", "thinking", "chat_template", "effort", "budget"]
+                    .iter()
+                    .any(|k| t.contains(k))
+            };
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && req.thinking.is_some()
+                && about_thinking
+            {
                 // Report what was actually sent, rather than assuming the
                 // dialect field is at fault. A server rejecting the *value* of
                 // `reasoning_effort` was being blamed on `chat_template_kwargs`,

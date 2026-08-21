@@ -221,6 +221,7 @@ insert-escape-ms = 300
 # [models."openrouter/qwen/qwen3.8-27b"]
 # input = 0.20
 # output = 0.80
+# context = 262144
 # temperature = 0.6
 # top-p = 0.95
 # top-k = 20
@@ -228,3 +229,15 @@ insert-escape-ms = 300
 # [models."omlx/Qwen3.5-9B-OptiQ-4bit"]
 # temperature = 0.6      # local: free, so no prices
 # top-k = 20
+# context = 262144
+#
+# `context` is this model's window, and it matters more than it looks. A global
+# agent.context-limit cannot be right for a 32k local model and a 256k hosted
+# one at once, and being wrong means compaction never fires: a 128k limit
+# against a 32k model waits for a trigger the server rejects the request long
+# before reaching. Seen as: "maximum context length is 32768 tokens. However,
+# you requested 8192 output tokens and your prompt contains at least 24577" —
+# over by one token.
+#
+# [models."vllm/Qwen/Qwen3.5-9B"]
+# context = 32768

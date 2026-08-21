@@ -144,6 +144,15 @@ impl ThinkingMode {
 /// it recovers when told to answer; a run of them is not going to.
 const MAX_EMPTY_COMPLETIONS: u32 = 2;
 
+/// Slack between our token estimate and the server's tokenizer. Ours counts
+/// characters; theirs counts tokens, and only one of them decides.
+const CONTEXT_RESERVE: usize = 512;
+
+/// Never clamp output to nothing. If the window is this tight the turn is
+/// already in trouble and the server's own error is more useful than a request
+/// that cannot produce an answer.
+const MIN_OUTPUT_TOKENS: usize = 256;
+
 /// Why the inner loop stopped.
 enum IdleReason {
     ModelDone,
@@ -438,6 +447,19 @@ impl Agent {
             messages.push(Message::system(system_prompt));
             messages.extend(session.messages().iter().cloned());
 
+            // Never ask for more output than the window can hold. The server
+            // adds prompt and max_tokens and rejects the sum, so a request can
+            // fail by a single token: 24577 prompt + 8192 output against a
+            // 32768 model. Compaction is the real defence, but it gates on a
+            // *configured* limit that can be wrong, and this cannot be.
+            let room = self
+                .context_limit
+                .saturating_sub(self.working_tokens(session))
+                .saturating_sub(CONTEXT_RESERVE);
+            let max_tokens = self
+                .max_tokens
+                .map(|m| (m as usize).min(room).max(MIN_OUTPUT_TOKENS) as u32);
+
             let req = ChatRequest {
                 model: self.model.clone(),
                 messages,
@@ -445,7 +467,7 @@ impl Agent {
                 temperature: self.temperature,
                 top_p: self.top_p,
                 top_k: self.top_k,
-                max_tokens: self.max_tokens,
+                max_tokens,
                 thinking: self.thinking.get(),
                 sort: self.route.lock().unwrap().clone(),
             };

@@ -388,8 +388,12 @@ async fn the_reasoning_trace_and_finish_reason_are_persisted() {
 
 /// Records what the client was actually asked for, so a test can assert on the
 /// request rather than the reply.
+/// Records what the client was actually asked for: the thinking setting and the
+/// output budget, both of which the agent decides rather than passes through.
+type Asked = (Option<worksmith::llm::Thinking>, u32);
+
 struct RecordingClient {
-    seen: Arc<Mutex<Vec<Option<worksmith::llm::Thinking>>>>,
+    seen: Arc<Mutex<Vec<Asked>>>,
     reply: String,
     prompt_tokens: u32,
 }
@@ -402,7 +406,7 @@ impl LlmClient for RecordingClient {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        self.seen.lock().unwrap().push(req.thinking);
+        self.seen.lock().unwrap().push((req.thinking, req.max_tokens.unwrap_or(0)));
         Ok(Completion {
             content: Some(self.reply.clone()),
             usage: worksmith::llm::Usage {
@@ -436,8 +440,8 @@ async fn helper_calls_never_inherit_the_session_thinking_budget() {
     agent.ask("system", "user", 512).await.unwrap();
 
     assert_eq!(
-        seen.lock().unwrap().as_slice(),
-        &[Some(worksmith::llm::Thinking::Off)],
+        seen.lock().unwrap().first().map(|(t, _)| *t),
+        Some(Some(worksmith::llm::Thinking::Off)),
         "helper calls are format-following, not reasoning"
     );
 }
@@ -677,4 +681,57 @@ async fn the_session_records_what_the_loop_did() {
     // And the replayable conversation is unaffected by the extra entries.
     let reopened = Session::open(&path).unwrap();
     assert_eq!(reopened.messages().len(), session.messages().len());
+}
+
+#[tokio::test]
+async fn output_tokens_are_clamped_to_what_the_window_can_hold() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let client = RecordingClient {
+        seen: seen.clone(),
+        reply: "ok".into(),
+        // The server reports a prompt that nearly fills a 4k window.
+        prompt_tokens: 3_600,
+    };
+    let agent = Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        Some(8_192), // ask for far more output than the window has left
+        20,
+        3,
+        3,
+        4_096, // context_limit
+        6,
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            ..Default::default()
+        },
+    );
+
+    // First turn establishes the reported prompt size; the second must fit.
+    for _ in 0..2 {
+        agent
+            .run_turn(&mut session, "hi", "system", None, CancellationToken::new())
+            .await
+            .unwrap();
+    }
+
+    // The failure this prevents: 24577 prompt + 8192 output against a 32768
+    // model, rejected by one token.
+    let asked = seen.lock().unwrap().last().unwrap().1;
+    assert!(
+        asked + 3_600 <= 4_096,
+        "prompt {} + output {asked} must fit the window",
+        3_600
+    );
+    assert!(asked >= 256, "but never clamped to nothing: {asked}");
 }

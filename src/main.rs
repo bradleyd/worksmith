@@ -212,7 +212,7 @@ async fn run(args: Args) -> Result<()> {
         config.max_steps(),
         config.max_retries(),
         config.stuck_threshold(),
-        config.context_limit(),
+        resolved.settings.context.unwrap_or_else(|| config.context_limit()),
         config.keep_recent_turns(),
         tool_ctx,
     )
@@ -339,7 +339,7 @@ async fn run_spawn(
         config.max_steps(),
         config.max_retries(),
         config.stuck_threshold(),
-        config.context_limit(),
+        resolved.settings.context.unwrap_or_else(|| config.context_limit()),
         config.keep_recent_turns(),
         tool_ctx,
     )
