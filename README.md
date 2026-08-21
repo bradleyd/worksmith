@@ -56,6 +56,11 @@ brew install bradleyd/worksmith/worksmith
 the [releases](https://github.com/bradleyd/worksmith/releases), untar it, and
 put `worksmith` on your PATH.
 
+Pick one location and stick to it. `install.sh` writes to `~/.local/bin` and
+`cargo install --path .` writes to `~/.cargo/bin`; if both exist, whichever comes
+first on your PATH wins, and you can spend a while debugging a bug you already
+fixed. `which -a worksmith` shows the duplicates.
+
 **From source** (needs a Rust toolchain):
 
 ```sh

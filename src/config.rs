@@ -544,8 +544,25 @@ impl Config {
 fn read_toml(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let cfg: Config =
-        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+    let cfg: Config = toml::from_str(&text).map_err(|e| {
+        // `deny_unknown_fields` catches typos, which is the point. But it reads
+        // identically when the config is *newer than the binary* — a field this
+        // version has never heard of. That happens on every upgrade where the
+        // config moves first (a brew tap lagging main, a stale copy earlier on
+        // PATH), and "unknown field" sends people to edit a config that is
+        // correct. Name the version so the other explanation is visible.
+        let hint = if e.to_string().contains("unknown field") {
+            format!(
+                "\n\nIf that setting is newer than this build, the config is ahead of the \
+                 binary. This is worksmith {}; check `which -a worksmith` for an older copy \
+                 earlier on your PATH.",
+                env!("CARGO_PKG_VERSION")
+            )
+        } else {
+            String::new()
+        };
+        anyhow::anyhow!("parsing config {}: {e}{hint}", path.display())
+    })?;
     Ok(cfg)
 }
 

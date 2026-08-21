@@ -392,3 +392,29 @@ fn per_model_settings_carry_prices_and_sampling() {
     assert_eq!(unknown.settings, worksmith::config::ModelSettings::default());
     assert_eq!(unknown.settings.cost(1_000_000, 1_000_000), None);
 }
+
+/// `deny_unknown_fields` catches typos, and reads identically when the config is
+/// simply newer than the binary. That happens on every upgrade where the config
+/// moves first, and the message must not send people to edit a correct file.
+#[test]
+fn an_unknown_field_suggests_a_stale_binary() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".worksmith");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        "model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\n\
+         [some_future_section]\nwhatever = 1\n",
+    )
+    .unwrap();
+
+    let err = format!("{:#}", worksmith::config::Config::load_trusted(dir.path()).unwrap_err());
+    assert!(err.contains("unknown field"), "still says what TOML said: {err}");
+    assert!(err.contains("ahead of the"), "offers the other explanation: {err}");
+    assert!(
+        err.contains(env!("CARGO_PKG_VERSION")),
+        "names this build's version so the skew is checkable: {err}"
+    );
+    assert!(err.contains("which -a worksmith"), "and how to find the stale copy: {err}");
+}
