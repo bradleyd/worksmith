@@ -154,6 +154,9 @@ repeat-threshold = 4        # identical tool calls (whole run) before a nudge
 # between steps, this is about a server that never answered. Three workers
 # queued on one local model, or a cold RunPod, are slow rather than hung.
 request-timeout = 600
+# Measured, so you can size this: one generation call on a local 4-bit 9B with
+# three workers sharing the machine took 515s. 600 is barely above that; for
+# local fan-out, 900-1200 is safer.
 
 # May a bare `/spawn <task>` be split across several workers? "auto" asks a
 # cheap planner call (it answers "one worker" for most tasks); "off" always

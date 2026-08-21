@@ -11,7 +11,11 @@ workers = 3
 # sized for tasks that write one file; this one gets killed mid-stream at that
 # budget, and a killed run reports gen_tokens=0 because token counts only
 # arrive with the completion.
-timeout = 900
+# Measured on a local 4-bit 9B with three workers sharing one server: the
+# workers finished at 762s and 892s (single generation calls of 334s and 515s),
+# and the parent still needs a synthesis turn after that. 900 killed it
+# mid-synthesis with all three drafts already written.
+timeout = 1800
 
 # The skill is copied into the workdir because worksmith has no skill loader yet
 # (PLAN tier-1). Once it does, this task becomes the skill-loading test too.
