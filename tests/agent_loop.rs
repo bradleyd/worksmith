@@ -809,3 +809,73 @@ async fn a_request_that_cannot_fit_is_retried_with_the_servers_numbers() {
         "the retry fits inside the window: {asks:?}"
     );
 }
+
+#[tokio::test]
+async fn one_long_turn_can_still_be_compacted() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Real work: one instruction, then a great many tool results. Cutting only
+    // at user-message boundaries meant keeping the last 6 *turns* was keeping
+    // everything, so compaction never fired and the context grew until the
+    // server refused the request.
+    session.append_message(Message::user("write chapter 10")).unwrap();
+    for i in 0..40 {
+        session
+            .append_message(Message::assistant(
+                None,
+                vec![ToolCall {
+                    id: format!("c{i}"),
+                    name: "read".into(),
+                    arguments: format!("{{\"path\":\"ch{i}.md\"}}"),
+                }],
+            ))
+            .unwrap();
+        session
+            .append_message(Message::tool_result(format!("c{i}"), "read", "x".repeat(2_000)))
+            .unwrap();
+    }
+    let before = session.messages().len();
+
+    let client = MockClient::new(vec![done("SUMMARY: read forty files"), done("chapter written")]);
+    let agent = Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        4_096, // a small window, so the transcript is far over the trigger
+        6,     // keep_recent_turns: only one user message exists, so unusable
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            ..Default::default()
+        },
+    );
+
+    agent
+        .run_turn(&mut session, "carry on", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        session.messages().len() < before,
+        "it compacted: {} -> {}",
+        before,
+        session.messages().len()
+    );
+    // A kept slice starting at a tool result would be a `tool` message with no
+    // assistant tool_calls before it, which providers reject outright.
+    let first = &session.messages()[1]; // [0] is the summary
+    assert!(
+        !matches!(first.role, worksmith::llm::Role::Tool),
+        "the kept slice must not start with an orphaned tool result"
+    );
+}

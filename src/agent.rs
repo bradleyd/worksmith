@@ -772,7 +772,9 @@ impl Agent {
         // Gather what we need, then drop the borrow before the await.
         let (before, split, transcript) = {
             let msgs = session.messages();
-            let split = compaction_split(msgs, self.keep_recent_turns);
+            // Keep roughly a third of the window verbatim: enough to continue
+            // from, little enough that the next few steps fit.
+            let split = compaction_split(msgs, self.keep_recent_turns, self.context_limit / 3);
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
             }
@@ -818,20 +820,57 @@ fn estimate_tokens(messages: &[Message]) -> usize {
 /// `keep_turns` user-turns (a turn starts at a `User` message). Returns 0 when
 /// there aren't more turns than we keep (nothing to compact). Splitting on turn
 /// boundaries keeps assistant/tool-call/tool-result groups intact.
-fn compaction_split(messages: &[Message], keep_turns: usize) -> usize {
-    if keep_turns == 0 {
+fn compaction_split(messages: &[Message], keep_turns: usize, keep_tokens: usize) -> usize {
+    // Prefer a turn boundary: summarising whole exchanges reads better than
+    // cutting one in half.
+    if keep_turns > 0 {
+        let user_indices: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m.role, crate::llm::Role::User))
+            .map(|(i, _)| i)
+            .collect();
+        if user_indices.len() > keep_turns {
+            return user_indices[user_indices.len() - keep_turns];
+        }
+    }
+
+    // No turn boundary is available, which is the normal case for real work: one
+    // instruction followed by a hundred tool results. Keeping the last N *user*
+    // messages then means keeping everything, so compaction never fired and the
+    // context grew until the server refused the request. Fall back to a token
+    // budget and cut mid-turn.
+    if keep_tokens == 0 {
         return 0;
     }
-    let user_indices: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| matches!(m.role, crate::llm::Role::User))
-        .map(|(i, _)| i)
-        .collect();
-    if user_indices.len() <= keep_turns {
-        return 0;
+    let mut used = 0usize;
+    let mut cut = messages.len();
+    for (i, m) in messages.iter().enumerate().rev() {
+        used += message_tokens(m);
+        if used > keep_tokens {
+            cut = i;
+            break;
+        }
     }
-    user_indices[user_indices.len() - keep_turns]
+    if cut >= messages.len() {
+        return 0; // everything fits; nothing to do
+    }
+    // Never start the kept slice at a tool result: it would be a `tool` message
+    // with no assistant `tool_calls` before it, which providers reject outright.
+    while cut < messages.len() && matches!(messages[cut].role, crate::llm::Role::Tool) {
+        cut += 1;
+    }
+    // Keep at least one message, or there is nothing to continue from.
+    if cut >= messages.len() { 0 } else { cut }
+}
+
+/// Rough token cost of one message, matching `estimate_tokens`.
+fn message_tokens(m: &Message) -> usize {
+    let mut chars = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
+    for tc in &m.tool_calls {
+        chars += tc.name.len() + tc.arguments.len();
+    }
+    chars / 4
 }
 
 /// Pull the real numbers out of a context-length rejection.
@@ -920,12 +959,44 @@ mod tests {
             Message::user("t3"),
             Message::assistant(Some("a3".into()), vec![]),
         ];
-        // Keep last 1 turn → split at index of the 3rd user message (index 4).
-        assert_eq!(compaction_split(&msgs, 1), 4);
-        // Keep 2 turns → split at 2nd user message (index 2).
-        assert_eq!(compaction_split(&msgs, 2), 2);
-        // Keep >= number of turns → nothing to compact.
-        assert_eq!(compaction_split(&msgs, 3), 0);
-        assert_eq!(compaction_split(&msgs, 9), 0);
+        // A turn boundary is preferred when one exists: whole exchanges
+        // summarise better than half of one. (0 token budget = boundaries only.)
+        assert_eq!(compaction_split(&msgs, 1, 0), 4);
+        assert_eq!(compaction_split(&msgs, 2, 0), 2);
+        // More turns kept than exist, and no token budget → nothing to compact.
+        assert_eq!(compaction_split(&msgs, 3, 0), 0);
+        assert_eq!(compaction_split(&msgs, 9, 0), 0);
+        // Tiny messages, generous budget → still nothing to do.
+        assert_eq!(compaction_split(&msgs, 9, 10_000), 0);
+    }
+
+    #[test]
+    fn a_token_budget_cuts_where_no_turn_boundary_exists() {
+        use crate::llm::{Role, ToolCall};
+        // One instruction, then tool traffic: the shape of real work, and the
+        // shape that used to be uncompactable because keeping the last N user
+        // messages kept everything.
+        let mut msgs = vec![Message::user("write chapter 10")];
+        for i in 0..10 {
+            msgs.push(Message::assistant(
+                None,
+                vec![ToolCall {
+                    id: format!("c{i}"),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                }],
+            ));
+            msgs.push(Message::tool_result(format!("c{i}"), "read", "x".repeat(4_000)));
+        }
+
+        assert_eq!(compaction_split(&msgs, 6, 0), 0, "no boundary, no budget: nothing");
+
+        let split = compaction_split(&msgs, 6, 2_000);
+        assert!(split > 0, "a token budget finds a cut where turns cannot");
+        assert!(split < msgs.len(), "and keeps something to continue from");
+        assert!(
+            !matches!(msgs[split].role, Role::Tool),
+            "never starts the kept slice at an orphaned tool result"
+        );
     }
 }
