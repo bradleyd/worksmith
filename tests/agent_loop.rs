@@ -631,3 +631,50 @@ async fn the_session_records_which_model_answered() {
     let log = std::fs::read_to_string(&path).unwrap();
     assert!(log.contains("\"model\":\"mock\""), "and in the session file: {log}");
 }
+
+#[tokio::test]
+async fn the_session_records_what_the_loop_did() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+
+    let agent = build_agent(
+        MockClient::new(vec![tool_call("ls", r#"{"path":"."}"#), done("all set")]),
+        dir.path(),
+        3,
+    );
+    agent
+        .run_turn(&mut session, "look around", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // Messages say what was said. They cannot say when a model call started, why
+    // a nudge fired, or that a stream ended without a finish reason — which is
+    // why diagnosing worker failures meant reading the provider's own logs.
+    let events = worksmith::session::events(&path).unwrap();
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| match e.event {
+            worksmith::event::Event::ModelCallStarted => "call-start",
+            worksmith::event::Event::ModelCallFinished => "call-end",
+            worksmith::event::Event::ToolCall { .. } => "tool",
+            worksmith::event::Event::Usage { .. } => "usage",
+            worksmith::event::Event::TurnComplete { .. } => "turn-complete",
+            _ => "other",
+        })
+        .collect();
+
+    assert!(kinds.contains(&"call-start") && kinds.contains(&"call-end"), "{kinds:?}");
+    assert!(kinds.contains(&"tool"), "tool calls are in the history: {kinds:?}");
+    assert!(kinds.contains(&"turn-complete"), "and how the turn ended: {kinds:?}");
+    assert!(events.iter().all(|e| e.ts > 0), "each event carries when it happened");
+
+    // Per-token deltas would multiply the file by the length of every answer.
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("message_delta"), "streaming deltas are not recorded");
+
+    // And the replayable conversation is unaffected by the extra entries.
+    let reopened = Session::open(&path).unwrap();
+    assert_eq!(reopened.messages().len(), session.messages().len());
+}

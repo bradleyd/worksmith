@@ -2,12 +2,14 @@
 //! is published here; the JSONL session writer, `--mode json` output, and
 //! (later) the TUI and spawned-worker views are all just subscribers.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 /// A single event in the agent's lifecycle. Serialized with a `type` tag so the
 /// `--mode json` stream is self-describing.
-#[derive(Debug, Clone, Serialize)]
+// Deserialize as well as Serialize: events are written into the session file so
+// the loop's history can be read back after the run that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     SessionStarted { id: String },

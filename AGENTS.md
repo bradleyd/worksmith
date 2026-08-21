@@ -80,6 +80,11 @@ shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
   (`trust.rs`); `Config::load` gates it, `Config::load_trusted` skips the gate
   and is what tests and `--trust-project` use. Decisions are keyed by file
   content, so an edit re-asks.
+- Structural events are written into the session JSONL as `{"type":"event"}`
+  entries and read back with `session::events()`; `/history` renders them. Emit
+  through `Agent::emit`, which broadcasts *and* records — a `bus.emit` on its
+  own leaves no trace once the process exits. Per-token deltas are deliberately
+  excluded.
 - Command safety is two tiers in `tools::policy`. **Refuse** (catastrophic and
   local) hard-stops the turn; `tools::dangerous_command` is the same list under
   its older name. **Ask** (outward-facing or irreversible: push, sudo, publish,

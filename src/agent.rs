@@ -237,6 +237,15 @@ impl Agent {
     }
 
     /// Handle to this agent's thinking switch, so a front-end can flip it.
+    /// Broadcast an event *and* write it to the session, so the loop's history
+    /// survives the process. Everything structural goes through here; the two
+    /// destinations drifting apart is how the history came to be missing.
+    fn emit(&self, session: &mut Session, ev: Event) {
+        // Best-effort: a session that cannot be written must not kill a turn.
+        let _ = session.append_event(&ev);
+        self.bus.emit(ev);
+    }
+
     /// Set the provider routing preference for subsequent requests.
     pub fn set_route(&self, sort: Option<String>) {
         *self.route.lock().unwrap() = sort;
@@ -317,7 +326,7 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
         session.append_message(Message::user(user_input))?;
-        self.bus.emit(Event::UserMessage {
+        self.emit(session, Event::UserMessage {
             text: user_input.to_string(),
         });
 
@@ -341,14 +350,14 @@ impl Agent {
 
                     match v.validate().await {
                         Ok(()) => {
-                            self.bus.emit(Event::Validation {
+                            self.emit(session, Event::Validation {
                                 ok: true,
                                 detail: v.describe(),
                             });
                             break TurnOutcome::Done;
                         }
                         Err(reason) => {
-                            self.bus.emit(Event::Validation {
+                            self.emit(session, Event::Validation {
                                 ok: false,
                                 detail: reason.clone(),
                             });
@@ -362,7 +371,7 @@ impl Agent {
                                 v.describe(),
                                 reason
                             );
-                            self.bus.emit(Event::Nudge {
+                            self.emit(session, Event::Nudge {
                                 reason: format!(
                                     "validation failed; re-planning ({retries_left} retries left)"
                                 ),
@@ -374,7 +383,7 @@ impl Agent {
             }
         };
 
-        self.bus.emit(Event::TurnComplete {
+        self.emit(session, Event::TurnComplete {
             outcome: outcome.label(),
         });
         Ok(TurnResult {
@@ -404,7 +413,7 @@ impl Agent {
             // Steering: anything the supervisor (or the user) posted since the
             // last step lands as a user message before the next model call.
             for message in self.steering.take() {
-                self.bus.emit(Event::Nudge {
+                self.emit(session, Event::Nudge {
                     reason: message.clone(),
                 });
                 session.append_message(Message::user(message))?;
@@ -420,7 +429,7 @@ impl Agent {
                 && let Err(e) = self.compact(session).await
             {
                 // Compaction is best-effort; a failure shouldn't kill the turn.
-                self.bus.emit(Event::Error {
+                self.emit(session, Event::Error {
                     message: format!("compaction failed: {e}"),
                 });
             }
@@ -455,15 +464,15 @@ impl Agent {
                 }
             });
 
-            self.bus.emit(Event::ModelCallStarted);
+            self.emit(session, Event::ModelCallStarted);
             let completion = self.client.stream(req, tx, cancel.clone()).await;
             let _ = forwarder.await;
-            self.bus.emit(Event::ModelCallFinished);
+            self.emit(session, Event::ModelCallFinished);
 
             let completion = match completion {
                 Ok(c) => c,
                 Err(e) => {
-                    self.bus.emit(Event::Error {
+                    self.emit(session, Event::Error {
                         message: e.to_string(),
                     });
                     return Err(e);
@@ -471,7 +480,7 @@ impl Agent {
             };
 
             self.last_prompt_tokens.store(completion.usage.prompt_tokens, Ordering::Relaxed);
-            self.bus.emit(Event::Usage {
+            self.emit(session, Event::Usage {
                 prompt_tokens: completion.usage.prompt_tokens,
                 completion_tokens: completion.usage.completion_tokens,
                 total_tokens: completion.usage.total_tokens,
@@ -533,7 +542,7 @@ impl Agent {
                     } else {
                         "Your last response was empty. Make a tool call or give your answer."
                     };
-                    self.bus.emit(Event::Nudge {
+                    self.emit(session, Event::Nudge {
                         reason: nudge.to_string(),
                     });
                     session.append_message(Message::user(nudge))?;
@@ -558,7 +567,7 @@ impl Agent {
             // Execute tool calls and feed results back.
             let mut blocked: Option<String> = None;
             for call in &completion.tool_calls {
-                self.bus.emit(Event::ToolCall {
+                self.emit(session, Event::ToolCall {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
@@ -586,7 +595,7 @@ impl Agent {
                     };
                 let content = cap_tool_output(raw);
 
-                self.bus.emit(Event::ToolResult {
+                self.emit(session, Event::ToolResult {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     ok,
@@ -605,7 +614,7 @@ impl Agent {
                 }
             }
             if let Some(reason) = blocked {
-                self.bus.emit(Event::Error {
+                self.emit(session, Event::Error {
                     message: reason.clone(),
                 });
                 return Ok(IdleReason::Blocked(reason));
@@ -623,7 +632,7 @@ impl Agent {
                          Step back and try a different approach.",
                         call.name
                     );
-                    self.bus.emit(Event::Nudge {
+                    self.emit(session, Event::Nudge {
                         reason: reason.clone(),
                     });
                     session.append_message(Message::user(reason))?;
@@ -713,7 +722,7 @@ impl Agent {
 
         session.compact(&summary, split)?;
         let after = session.messages().len();
-        self.bus.emit(Event::Compaction {
+        self.emit(session, Event::Compaction {
             messages_before: before,
             messages_after: after,
         });

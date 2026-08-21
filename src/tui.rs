@@ -137,6 +137,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/route", "which provider serves you (OpenRouter)"),
     ("/mouse", "wheel scrolling vs. selecting text"),
     ("/trust", "is this project's own config in effect?"),
+    ("/history", "what the loop did, and when"),
     ("/quit", "exit"),
 ];
 
@@ -1830,6 +1831,39 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             }
         }
         "agents" | "workers" => agents_command(app, workers, parts),
+        // What the loop did, and when. Reconstructing this from messages meant
+        // reading the provider's logs and correlating timestamps by hand.
+        "history" | "trace" => {
+            let id = parts.next().map(str::to_string);
+            let path = match &id {
+                Some(id) => crate::session::Session::path_for_id(id).ok(),
+                None => Some(session.lock().await.path().to_path_buf()),
+            };
+            let Some(path) = path else {
+                app.push(Kind::Error, "no such session".to_string());
+                return Ok(true);
+            };
+            match crate::session::events(&path) {
+                Ok(evs) if evs.is_empty() => app.push(
+                    Kind::Notice,
+                    "(no events recorded — a session from before they were kept)".to_string(),
+                ),
+                Ok(evs) => {
+                    let start = evs.first().map(|e| e.ts).unwrap_or(0);
+                    for e in evs.iter().rev().take(60).rev() {
+                        app.push(
+                            Kind::Notice,
+                            format!("  +{:>4}s  {}", e.ts.saturating_sub(start), describe(&e.event)),
+                        );
+                    }
+                    app.push(
+                        Kind::Notice,
+                        format!("{} events · /history <session-id> for a worker", evs.len()),
+                    );
+                }
+                Err(e) => app.push(Kind::Error, format!("history: {e}")),
+            }
+        }
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
         "skill" | "skills" => skill_command(app, cwd, parts),
         "fast" | "lucky" => {
@@ -2339,6 +2373,40 @@ fn render_recent(session: &Session, max_messages: usize) -> String {
 
 /// `/skill [name]` — list installed skills, or load one into the transcript so
 /// it applies to the rest of the session without waiting for the model to ask.
+/// One line for a recorded event: what happened, not how it was rendered.
+fn describe(ev: &Event) -> String {
+    match ev {
+        Event::UserMessage { text } => format!("you: {}", truncate(text.trim(), 60)),
+        Event::AssistantMessage { text } => format!("said: {}", truncate(text.trim(), 60)),
+        Event::ToolCall { name, arguments, .. } => {
+            format!("⚙ {name} {}", truncate(arguments.trim(), 50))
+        }
+        Event::ToolResult { name, ok, output, .. } => format!(
+            "  {} {name}: {}",
+            if *ok { "→" } else { "✗" },
+            truncate(output.trim(), 50)
+        ),
+        Event::ModelCallStarted => "model call →".to_string(),
+        Event::ModelCallFinished => "model call ←".to_string(),
+        Event::Usage { completion_tokens, reasoning_tokens, finish_reason, .. } => format!(
+            "usage: {completion_tokens} tok ({reasoning_tokens} reasoning), finish={}",
+            finish_reason.as_deref().unwrap_or("none")
+        ),
+        Event::Nudge { reason } => format!("↻ nudge: {}", truncate(reason.trim(), 60)),
+        Event::Validation { ok, detail } => {
+            format!("{} validation: {detail}", if *ok { "✓" } else { "✗" })
+        }
+        Event::Compaction { messages_before, messages_after } => {
+            format!("⟲ compacted {messages_before} → {messages_after}")
+        }
+        Event::Warning { message } => format!("⚠ {}", truncate(message.trim(), 60)),
+        Event::Error { message } => format!("error: {}", truncate(message.trim(), 60)),
+        Event::TurnComplete { outcome } => format!("turn complete: {outcome}"),
+        Event::SessionStarted { id } => format!("session {id}"),
+        Event::MessageDelta { .. } | Event::Thinking { .. } => String::new(),
+    }
+}
+
 fn skill_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = &'a str>) {
     let catalog = crate::skill::SkillCatalog::discover(cwd);
     match parts.next() {

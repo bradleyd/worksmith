@@ -269,6 +269,13 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   (not to run it, so you can look at a command before you fire it), Esc to leave
   with whatever you had typed intact. One component, because everything awkward
   here is picking an opaque thing. Models, sessions and worker ids are next. `/help keys` still prints the full reference.
+- **A history you can read afterwards** (`/history`, `/history <session-id>`):
+  the session file records what the loop *did*, not only what was said — tool
+  calls and their results, model-call boundaries, nudges, validations,
+  compactions, warnings, and how the turn ended, each with the time it
+  happened. Diagnosing a worker that died otherwise meant reading the model
+  server's own logs and correlating timestamps by hand. Per-token deltas are
+  left out; they would multiply the file by the length of every answer.
 - **Watching a worker** (`/agents tail <id>`): a worker's events go to its own
   bus and never reach the parent's transcript, so `/agents` could report status
   but never what a worker was doing. Each worker now keeps a bounded log of its

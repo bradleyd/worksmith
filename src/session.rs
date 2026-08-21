@@ -233,6 +233,25 @@ impl Session {
         Ok(())
     }
 
+    /// Record a structural event in the session file, so the loop's history
+    /// outlives the process.
+    ///
+    /// Messages say what was *said*; they cannot say when a model call started,
+    /// why the supervisor nudged, or that a stream ended without a finish
+    /// reason. Answering those meant reading the provider's own logs and
+    /// correlating timestamps by hand, three times in one afternoon.
+    ///
+    /// Per-token deltas are skipped: they would multiply the file by the length
+    /// of every answer and say nothing the assistant message does not.
+    pub fn append_event(&mut self, ev: &crate::event::Event) -> Result<()> {
+        use crate::event::Event;
+        if matches!(ev, Event::MessageDelta { .. } | Event::Thinking { .. }) {
+            return Ok(());
+        }
+        let data = serde_json::to_value(ev).context("serializing event")?;
+        self.write_entry("event", data)
+    }
+
     /// Append a message to both the in-memory history and the JSONL file.
     pub fn append_message(&mut self, msg: Message) -> Result<()> {
         let data = serde_json::to_value(&msg).context("serializing message")?;
@@ -273,3 +292,34 @@ pub fn session_cwd(path: &Path) -> Option<String> {
     }
     None
 }
+
+/// One recorded event, with the time it happened.
+#[derive(Debug, Clone)]
+pub struct TimedEvent {
+    pub ts: u64,
+    pub event: crate::event::Event,
+}
+
+/// The structural history of a session: tool calls, nudges, validations,
+/// escalations, model-call boundaries, and when each happened.
+///
+/// Read from the file rather than the live bus, because the question is always
+/// asked afterwards, about a run that has already ended.
+pub fn events(path: &Path) -> Result<Vec<TimedEvent>> {
+    let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut out = Vec::new();
+    for line in BufReader::new(f).lines() {
+        let line = line?;
+        let Ok(entry) = serde_json::from_str::<SessionEntry>(&line) else {
+            continue;
+        };
+        if entry.kind != "event" {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_value(entry.data) {
+            out.push(TimedEvent { ts: entry.ts, event });
+        }
+    }
+    Ok(out)
+}
+
