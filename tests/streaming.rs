@@ -62,6 +62,7 @@ data: [DONE]\n\n";
         temperature: None,
         max_tokens: None,
         thinking: None,
+        sort: None,
     };
 
     let completion = client.stream(req, tx, CancellationToken::new()).await.unwrap();
@@ -110,6 +111,7 @@ async fn a_mid_stream_error_fails_instead_of_returning_nothing() {
                 temperature: None,
                 max_tokens: None,
                 thinking: None,
+                sort: None,
             },
             tx,
             CancellationToken::new(),

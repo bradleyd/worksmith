@@ -110,7 +110,7 @@ impl LlmClient for OpenAiCompatClient {
             &req,
             self.thinking_dialect,
             self.budget_param.as_deref(),
-            self.sort.as_deref(),
+            req.sort.as_deref().or(self.sort.as_deref()),
         );
 
         let mut builder = self.http.post(self.endpoint()).json(&body);
@@ -251,9 +251,10 @@ fn build_request_body(
                 // reasoning alone, leaving the rest of the request's budget for
                 // an actual answer. OpenRouter converts it to an effort level
                 // for models that only understand effort.
-                body["reasoning"] = match think.budget() {
-                    Some(n) => serde_json::json!({ "max_tokens": n }),
-                    None => serde_json::json!({ "enabled": think.enabled() }),
+                body["reasoning"] = match (think.budget(), think.effort()) {
+                    (Some(n), _) => serde_json::json!({ "max_tokens": n }),
+                    (_, Some(e)) => serde_json::json!({ "effort": e.as_str() }),
+                    _ => serde_json::json!({ "enabled": think.enabled() }),
                 };
             }
             crate::llm::ThinkingDialect::ChatTemplate => {
@@ -265,6 +266,11 @@ fn build_request_body(
                 // says it has the field, since llama.cpp and friends do not.
                 if let (Some(n), Some(key)) = (think.budget(), budget_param) {
                     body[key] = serde_json::json!(n);
+                }
+                // vLLM takes reasoning_effort directly and injects
+                // enable_thinking from it.
+                if let Some(e) = think.effort() {
+                    body["reasoning_effort"] = serde_json::json!(e.as_str());
                 }
             }
         }
@@ -526,6 +532,7 @@ mod thinking_tests {
             temperature: None,
             max_tokens: None,
             thinking,
+            sort: None,
         }
     }
 
@@ -580,6 +587,29 @@ mod thinking_tests {
             None,
         );
         assert!(b.get("thinking_token_budget").is_none());
+    }
+
+    #[test]
+    fn an_effort_level_goes_to_each_provider_in_its_own_words() {
+        // OpenRouter takes it inside `reasoning`; vLLM takes it top-level and
+        // derives enable_thinking from it. Asking directly skips the conversion
+        // OpenRouter would otherwise do from a budget.
+        let b = build_request_body(
+            &req(Some(Thinking::Effort(crate::llm::Effort::High))),
+            ThinkingDialect::Reasoning,
+            None,
+            None,
+        );
+        assert_eq!(b["reasoning"], serde_json::json!({"effort": "high"}));
+
+        let b = build_request_body(
+            &req(Some(Thinking::Effort(crate::llm::Effort::Low))),
+            ThinkingDialect::ChatTemplate,
+            None,
+            None,
+        );
+        assert_eq!(b["reasoning_effort"], serde_json::json!("low"));
+        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
     }
 
     #[test]

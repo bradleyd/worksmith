@@ -186,12 +186,21 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
 - **Web** (`web` tool): `search` via a configured provider (Brave, Tavily, or a
   self-hosted SearXNG, set `[web]` in config) and `fetch`, which pulls a URL and
   reduces it to readable text. Fetch needs no configuration.
+- **Provider routing** (`/route`, `[providers.*] sort`): `throughput` for the
+  fastest tokens/sec, `latency` for the fastest first token, `price` for the
+  cheapest. OpenRouter only; other servers ignore it. Deliberately *not* folded
+  into `--fast`: `sort` changes which provider serves you, and their endpoints
+  differ in quantization and price, so a speed button that silently swaps your
+  backend would be a surprise rather than a feature.
 - **Thinking control** (`--fast` / `--think [budget]`, `/fast` and `/think`,
   `agent.thinking`): fast mode answers without a reasoning pass. The
   feeling-lucky button. Measured on qwen3.5-9b, same question: 101 completion
   tokens thinking vs 13 without. The bet is that the validation loop catches
   what deliberation would have, which makes it the biggest single cost lever in
   the harness.
+
+  `--think low|medium|high` (or `thinking = "low"`) asks in the providers' own
+  vocabulary, which OpenRouter and vLLM both take natively.
 
   `thinking = 2000` is the setting in between. Small models have no sense of a
   budget: given `max-tokens = 8192` and no cap on reasoning, one will spend all

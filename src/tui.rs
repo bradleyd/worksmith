@@ -133,7 +133,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/agents", "list workers, or tail one live"),
     ("/validate", "the check a turn must pass"),
     ("/fast", "answer without thinking first"),
-    ("/think", "thinking, optionally capped to a budget"),
+    ("/think", "how hard to think: a level or a token budget"),
+    ("/route", "which provider serves you (OpenRouter)"),
     ("/mouse", "wheel scrolling vs. selecting text"),
     ("/trust", "is this project's own config in effect?"),
     ("/quit", "exit"),
@@ -303,6 +304,8 @@ struct App {
     /// the question instead of editing the composer — the agent's task is
     /// blocked until it gets a reply.
     pending_approval: Option<crate::tools::approval::ApprovalRequest>,
+    /// OpenRouter provider routing, when set live with `/route`.
+    route: Option<String>,
     /// Is mouse capture on? Off by default so the terminal keeps its own text
     /// selection; `/mouse on` trades that for wheel scrolling.
     mouse: bool,
@@ -358,6 +361,7 @@ impl App {
             hint: None,
             tail: None,
             pending_approval: None,
+            route: None,
             mouse: false,
         }
     }
@@ -1686,7 +1690,8 @@ SESSION
 
 MODEL
   /fast [on|off|auto]                 answer without thinking first
-  /think [on|off|auto|<tokens>]       thinking, optionally capped to a budget
+  /think [on|off|auto|low|high|<n>]   how hard to think: a level or a token budget
+  /route [throughput|latency|price]   which provider serves you (OpenRouter)
 
 MEMORY
   /memory                             list what is remembered
@@ -1829,6 +1834,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 Some(Thinking::Off) => "fast mode on — answering without thinking first".to_string(),
                 Some(Thinking::On) => "fast mode off — thinking before answering".to_string(),
                 Some(Thinking::Budget(n)) => format!("thinking capped at {n} tokens"),
+                Some(Thinking::Effort(e)) => format!("thinking effort: {}", e.as_str()),
                 None => "thinking left to the provider's default".to_string(),
             };
             app.push(Kind::Notice, msg);
@@ -1843,12 +1849,18 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 None | Some("on") => Some(Thinking::On),
                 Some("off") => Some(Thinking::Off),
                 Some("auto") => None,
+                Some(n) if crate::llm::Effort::parse(n).is_some() => {
+                    Some(Thinking::Effort(crate::llm::Effort::parse(n).unwrap()))
+                }
                 Some(n) => match parse_budget(n) {
                     Some(n) => Some(Thinking::Budget(n)),
                     None => {
                         app.push(
                             Kind::Error,
-                            format!("usage: /think [on|off|auto|<tokens>] (got {n})"),
+                            format!(
+                                "usage: /think [on|off|auto|minimal|low|medium|high|<tokens>] \
+                                 (got {n})"
+                            ),
                         );
                         return Ok(true);
                     }
@@ -1860,8 +1872,11 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 Some(Thinking::Off) => "thinking off — answering directly".to_string(),
                 Some(Thinking::On) => "thinking on, uncapped".to_string(),
                 Some(Thinking::Budget(n)) => format!(
-                    "thinking capped at {n} tokens — the rest of max-tokens is left for the answer"
+                    "thinking capped at {n} tokens, leaving the rest of max-tokens for the answer"
                 ),
+                Some(Thinking::Effort(e)) => {
+                    format!("thinking effort: {} (the provider's own scale)", e.as_str())
+                }
                 None => "thinking left to the provider's default".to_string(),
             };
             app.push(Kind::Notice, msg);
@@ -1913,6 +1928,40 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                         "/trust revoke to decide again on the next start".to_string(),
                     );
                 }
+            }
+        }
+        "route" => {
+            // Deliberately not folded into /fast. `sort` changes *which
+            // provider* serves the request, and OpenRouter endpoints differ in
+            // quantization and price. A speed button that silently swaps your
+            // backend is a surprise, not a feature.
+            let cur = app.route.clone();
+            match parts.next() {
+                None => app.push(
+                    Kind::Notice,
+                    match &cur {
+                        Some(s) => format!("routing: {s} (OpenRouter only)"),
+                        None => "routing: the provider's default (OpenRouter sorts on price)"
+                            .to_string(),
+                    },
+                ),
+                Some("auto") | Some("default") => {
+                    app.route = None;
+                    agent.set_route(None);
+                    app.push(Kind::Notice, "routing left to the provider".to_string());
+                }
+                Some(v @ ("throughput" | "latency" | "price")) => {
+                    app.route = Some(v.to_string());
+                    agent.set_route(Some(v.to_string()));
+                    app.push(
+                        Kind::Notice,
+                        format!("routing on {v} — takes effect on the next turn"),
+                    );
+                }
+                Some(other) => app.push(
+                    Kind::Error,
+                    format!("usage: /route [throughput|latency|price|auto] (got {other})"),
+                ),
             }
         }
         "mouse" => {
@@ -2612,8 +2661,9 @@ fn arg_completions(
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
-        "think" if prev == 1 => &["on", "off", "auto", "2000"],
+        "think" if prev == 1 => &["on", "off", "auto", "low", "medium", "high", "2000"],
         "mouse" if prev == 1 => &["on", "off"],
+        "route" if prev == 1 => &["throughput", "latency", "price", "auto"],
         "trust" if prev == 1 => &["revoke"],
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {

@@ -134,6 +134,7 @@ impl ThinkingMode {
             Thinking::On => Some("on".to_string()),
             Thinking::Budget(n) if n >= 1000 => Some(format!("{}k", n / 1000)),
             Thinking::Budget(n) => Some(n.to_string()),
+            Thinking::Effort(e) => Some(e.as_str().to_string()),
         }
     }
 }
@@ -168,6 +169,8 @@ pub struct Agent {
     tool_ctx: ToolContext,
     steering: Steering,
     thinking: ThinkingMode,
+    /// Provider routing preference, changeable mid-session with `/route`.
+    route: Arc<Mutex<Option<String>>>,
     /// The provider's prompt-token count for the most recent completion — what
     /// the next request will cost, as opposed to what we estimate it costs.
     last_prompt_tokens: AtomicU32,
@@ -204,6 +207,7 @@ impl Agent {
             tool_ctx,
             steering: Steering::new(),
             thinking: ThinkingMode::default(),
+            route: Arc::new(Mutex::new(None)),
             last_prompt_tokens: AtomicU32::new(0),
         }
     }
@@ -217,6 +221,11 @@ impl Agent {
     }
 
     /// Handle to this agent's thinking switch, so a front-end can flip it.
+    /// Set the provider routing preference for subsequent requests.
+    pub fn set_route(&self, sort: Option<String>) {
+        *self.route.lock().unwrap() = sort;
+    }
+
     pub fn thinking_mode(&self) -> ThinkingMode {
         self.thinking.clone()
     }
@@ -273,6 +282,7 @@ impl Agent {
             // A worker takes the parent's setting as it stands now; flipping
             // the parent later shouldn't retroactively change a running worker.
             thinking: ThinkingMode::new(self.thinking.get()),
+            route: self.route.clone(),
             // Its own context, so its own accounting.
             last_prompt_tokens: AtomicU32::new(0),
         }
@@ -408,6 +418,7 @@ impl Agent {
                 temperature: self.temperature,
                 max_tokens: self.max_tokens,
                 thinking: self.thinking.get(),
+                sort: self.route.lock().unwrap().clone(),
             };
 
             // Forward streamed text + reasoning deltas to the bus.
@@ -627,6 +638,7 @@ impl Agent {
             temperature: Some(0.2),
             max_tokens: Some(max_tokens),
             thinking: Some(Thinking::Off),
+            sort: self.route.lock().unwrap().clone(),
         };
         // Drain the stream sink; we only want the assembled text.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);

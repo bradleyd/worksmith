@@ -351,6 +351,8 @@ impl Config {
                     Some(Thinking::Off)
                 } else if v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true") {
                     Some(Thinking::On)
+                } else if let Some(e) = crate::llm::Effort::parse(v) {
+                    Some(Thinking::Effort(e))
                 } else {
                     // A bare number in quotes is still a budget.
                     v.parse::<u32>().ok().filter(|n| *n > 0).map(Thinking::Budget)

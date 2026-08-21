@@ -120,6 +120,10 @@ pub struct ChatRequest {
     /// at all, which is the default: providers disagree about these fields and a
     /// strict one rejects the request outright.
     pub thinking: Option<Thinking>,
+    /// Per-request provider routing, overriding the provider's configured
+    /// `sort`. Live-settable (`/route`) for the same reason thinking is: you
+    /// learn which lever you want while the work is in front of you.
+    pub sort: Option<String>,
 }
 
 /// How much deliberation to ask for. `Budget` is the middle setting between
@@ -131,6 +135,42 @@ pub enum Thinking {
     On,
     /// At most this many reasoning tokens before answering.
     Budget(u32),
+    /// How hard to think, in the providers' own vocabulary. Both OpenRouter and
+    /// vLLM expose this natively, and for models that only understand effort a
+    /// budget is converted into one anyway — so asking for it directly skips a
+    /// translation we were paying for.
+    Effort(Effort),
+}
+
+/// Reasoning effort levels, lowest to highest. `minimal` and `none` are not the
+/// same thing: `none` is [`Thinking::Off`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    pub fn parse(s: &str) -> Option<Effort> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "minimal" => Some(Effort::Minimal),
+            "low" => Some(Effort::Low),
+            "medium" | "med" => Some(Effort::Medium),
+            "high" => Some(Effort::High),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Minimal => "minimal",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
 }
 
 impl Thinking {
@@ -142,6 +182,13 @@ impl Thinking {
     pub fn budget(self) -> Option<u32> {
         match self {
             Thinking::Budget(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    pub fn effort(self) -> Option<Effort> {
+        match self {
+            Thinking::Effort(e) => Some(e),
             _ => None,
         }
     }

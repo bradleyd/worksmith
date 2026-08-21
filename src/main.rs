@@ -1333,12 +1333,20 @@ fn resolve_thinking(
     if v.eq_ignore_ascii_case("off") {
         return Ok(Some(Thinking::Off));
     }
+    if let Some(e) = worksmith::llm::Effort::parse(v) {
+        return Ok(Some(Thinking::Effort(e)));
+    }
     let budget = v
         .strip_suffix(['k', 'K'])
         .map(|h| h.trim().parse::<f32>().ok().map(|f| (f * 1000.0) as u32))
         .unwrap_or_else(|| v.parse::<u32>().ok())
         .filter(|n| *n > 0)
-        .ok_or_else(|| anyhow::anyhow!("--think expects on, off, or a token budget (got `{v}`)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--think expects on, off, an effort (minimal|low|medium|high), \
+                 or a token budget (got `{v}`)"
+            )
+        })?;
     Ok(Some(Thinking::Budget(budget)))
 }
 
