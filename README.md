@@ -227,8 +227,11 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   what deliberation would have, which makes it the biggest single cost lever in
   the harness.
 
-  `--think low|medium|high` (or `thinking = "low"`) asks in the providers' own
-  vocabulary, which OpenRouter and vLLM both take natively.
+  `--think low|medium|high` (also `minimal`, `xhigh`, `max`, or
+  `thinking = "low"`) asks in the providers' own vocabulary, which OpenRouter
+  and vLLM both take natively. Servers disagree about which levels exist — one
+  vLLM build accepts only `xhigh`, `medium` and `low` — so the word is passed
+  through and the provider objects if it does not know it.
 
   `thinking = 2000` is the setting in between. Small models have no sense of a
   budget: given `max-tokens = 8192` and no cap on reasoning, one will spend all

@@ -127,16 +127,23 @@ impl LlmClient for OpenAiCompatClient {
             // guess off the hostname, the fix is one config line the user has no
             // reason to know about. Say which field we sent and where it came from.
             if status == reqwest::StatusCode::BAD_REQUEST && req.thinking.is_some() {
+                // Report what was actually sent, rather than assuming the
+                // dialect field is at fault. A server rejecting the *value* of
+                // `reasoning_effort` was being blamed on `chat_template_kwargs`,
+                // which sends the reader to change a setting that is correct.
+                let sent: Vec<String> = ["reasoning", "chat_template_kwargs", "reasoning_effort"]
+                    .iter()
+                    .chain(self.budget_param.as_deref().iter())
+                    .filter_map(|k| body.get(*k).map(|v| format!("{k}={v}")))
+                    .collect();
                 bail!(
-                    "LLM HTTP {status}: {text}\n\nworksmith sent a `{}` field ({}). If this \
-                     provider wants the other spelling, set `thinking-param` to \"{}\" under \
-                     its [providers.*] section.",
+                    "LLM HTTP {status}: {text}\n\nworksmith sent: {}. The dialect ({}) came \
+                     {}. If the server rejected a *value*, its message above lists what it \
+                     accepts; if it wants a different spelling, set `thinking-param` under its \
+                     [providers.*] section.",
+                    if sent.is_empty() { "no thinking fields".to_string() } else { sent.join(", ") },
                     self.thinking_dialect.field(),
                     self.dialect_source.describe(),
-                    match self.thinking_dialect {
-                        crate::llm::ThinkingDialect::Reasoning => "chat-template",
-                        crate::llm::ThinkingDialect::ChatTemplate => "reasoning",
-                    },
                 );
             }
             bail!("LLM HTTP {status}: {text}");
@@ -618,6 +625,25 @@ mod thinking_tests {
         );
         assert_eq!(b["reasoning_effort"], serde_json::json!("low"));
         assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
+    }
+
+    #[test]
+    fn effort_words_pass_through_rather_than_being_normalised() {
+        // A vLLM build answered "Unexpected reasoning effort high. Supported
+        // types are xhigh (default), medium, and low." Servers disagree about
+        // which levels exist, so the word is passed through and the provider
+        // gets to object.
+        for (word, expected) in [("xhigh", "xhigh"), ("max", "max"), ("minimal", "minimal")] {
+            let e = crate::llm::Effort::parse(word).expect(word);
+            let b = build_request_body(
+                &req(Some(Thinking::Effort(e))),
+                ThinkingDialect::ChatTemplate,
+                None,
+                None,
+            );
+            assert_eq!(b["reasoning_effort"], serde_json::json!(expected));
+        }
+        assert!(crate::llm::Effort::parse("enormous").is_none());
     }
 
     #[test]

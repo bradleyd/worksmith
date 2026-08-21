@@ -1910,8 +1910,9 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                         app.push(
                             Kind::Error,
                             format!(
-                                "usage: /think [on|off|auto|minimal|low|medium|high|<tokens>] \
-                                 (got {n})"
+                                "usage: /think [on|off|auto|<effort>|<tokens>] (got {n}). \
+                                 Efforts: minimal, low, medium, high, xhigh, max — though \
+                                 servers differ on which they accept."
                             ),
                         );
                         return Ok(true);
@@ -2747,7 +2748,11 @@ fn arg_completions(
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
-        "think" if prev == 1 => &["on", "off", "auto", "low", "medium", "high", "2000"],
+        "think" if prev == 1 => {
+            // Servers disagree about which levels exist: OpenRouter documents
+            // minimal..max, and some vLLM builds accept only xhigh/medium/low.
+            &["on", "off", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "2000"]
+        }
         "mouse" if prev == 1 => &["on", "off"],
         "route" if prev == 1 => &["throughput", "latency", "price", "auto"],
         "trust" if prev == 1 => &["revoke"],

@@ -168,6 +168,11 @@ pub enum Effort {
     Low,
     Medium,
     High,
+    /// Above `high`. OpenRouter documents it, and some vLLM builds accept only
+    /// `xhigh`, `medium` and `low` — servers disagree about which levels exist,
+    /// so worksmith passes the word through and lets the provider object.
+    Xhigh,
+    Max,
 }
 
 impl Effort {
@@ -177,6 +182,8 @@ impl Effort {
             "low" => Some(Effort::Low),
             "medium" | "med" => Some(Effort::Medium),
             "high" => Some(Effort::High),
+            "xhigh" | "x-high" => Some(Effort::Xhigh),
+            "max" => Some(Effort::Max),
             _ => None,
         }
     }
@@ -187,6 +194,8 @@ impl Effort {
             Effort::Low => "low",
             Effort::Medium => "medium",
             Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
         }
     }
 }
