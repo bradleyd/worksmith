@@ -89,6 +89,10 @@ pub struct AgentsConfig {
     pub repeat_threshold: Option<u32>,
     /// Completion tokens a worker may spend before it's stopped.
     pub token_budget: Option<u32>,
+    /// Seconds a single model call may take before the worker is stopped as
+    /// hung. Separate from `stuck-timeout`, which is about the loop spinning
+    /// between steps.
+    pub request_timeout: Option<u64>,
     /// `auto` | `off` — may a bare `/spawn` fan out into several workers?
     pub fanout: Option<String>,
     /// After a fan-out group finishes, run a turn combining their results.
@@ -312,6 +316,7 @@ impl Config {
         take(&mut self.agents.max_nudges, other.agents.max_nudges);
         take(&mut self.agents.repeat_threshold, other.agents.repeat_threshold);
         take(&mut self.agents.token_budget, other.agents.token_budget);
+        take(&mut self.agents.request_timeout, other.agents.request_timeout);
         take(&mut self.agents.fanout, other.agents.fanout);
         take(&mut self.agents.synthesize, other.agents.synthesize);
         take(&mut self.agents.validate, other.agents.validate);
@@ -415,6 +420,11 @@ impl Config {
             max_nudges: self.agents.max_nudges.unwrap_or(d.max_nudges),
             repeat_threshold: self.agents.repeat_threshold.unwrap_or(d.repeat_threshold),
             token_budget: self.agents.token_budget,
+            request_timeout: self
+                .agents
+                .request_timeout
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(600)),
         }
     }
 

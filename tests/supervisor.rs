@@ -275,6 +275,19 @@ async fn a_slow_request_is_not_mistaken_for_a_stuck_worker() {
 }
 
 #[tokio::test]
+async fn the_request_cap_is_not_derived_from_the_idle_timeout() {
+    // Deriving it (6 x idle) killed three local workers whose only crime was
+    // queueing behind each other: a 20s idle timeout made any call over 120s a
+    // "hang", which is ordinary for three workers sharing one 9B.
+    let cfg = SupervisorConfig { idle_timeout: Duration::from_secs(20), ..Default::default() };
+    assert_eq!(
+        cfg.request_timeout,
+        Duration::from_secs(600),
+        "a short idle timeout must not shorten how long a call may take"
+    );
+}
+
+#[tokio::test]
 async fn a_hung_request_is_stopped_rather_than_nudged() {
     // A call can genuinely hang, and stopping it is the only action that helps,
     // so silence far past the timeout still escalates.
@@ -306,6 +319,9 @@ async fn a_hung_request_is_stopped_rather_than_nudged() {
         SupervisorConfig {
             idle_timeout: Duration::from_millis(20),
             max_nudges: 10,
+            // A call may take this long before it counts as hung; the 300ms
+            // mock is well past it.
+            request_timeout: Duration::from_millis(100),
             ..Default::default()
         },
     );

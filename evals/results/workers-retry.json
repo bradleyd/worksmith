@@ -7,13 +7,13 @@
     "passed": false,
     "model_calls": 1,
     "tool_calls": 0,
-    "gen_tokens": 1908,
+    "gen_tokens": 1255,
     "reasoning_tokens": 0,
     "outcome": null,
-    "elapsed": 376.6,
-    "error": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize (see the reasons above)",
+    "elapsed": 354.3,
+    "error": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize:\n  w1 [stopped] no response from the model for 120s\n  w3 [stopped] no response from the model for 120s",
     "ctx_peak": 0,
-    "stderr": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize (see the reasons above)",
+    "stderr": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize:\n  w1 [stopped] no response from the model for 120s\n  w3 [stopped] no response from the model for 120s\n  w2 [stopped] no response from the model for 120s",
     "run": 0
   }
 ]

@@ -55,6 +55,12 @@ pub struct SupervisorConfig {
     pub repeat_threshold: u32,
     /// Cumulative completion tokens before escalating. `None` = unlimited.
     pub token_budget: Option<u32>,
+    /// How long a *single model call* may take before it is treated as hung.
+    /// Deliberately not derived from `idle_timeout`: that one is about the loop
+    /// spinning between steps, while this is about a server that never
+    /// answered. Tying them together killed three local workers whose only
+    /// crime was queueing behind each other on one machine.
+    pub request_timeout: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -65,6 +71,9 @@ impl Default for SupervisorConfig {
             max_nudges: 3,
             repeat_threshold: 4,
             token_budget: None,
+            // Generous: a cold pod, a queued local server, or a long prefill
+            // are all normal and none of them are a hang.
+            request_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -76,11 +85,6 @@ impl SupervisorConfig {
 }
 
 /// Per-worker watcher state.
-/// How many idle timeouts a single model call may span before it is treated as
-/// hung rather than slow. Generous on purpose: local prefill for a big prompt
-/// is genuinely slow, and stopping real work is worse than waiting.
-const STUCK_REQUEST_MULTIPLE: usize = 6;
-
 pub struct Supervisor {
     cfg: SupervisorConfig,
     /// Identical `name::arguments` call counts, spanning re-plan attempts.
@@ -198,12 +202,13 @@ impl Supervisor {
         // helps, so escalate after a long multiple of the timeout.
         if self.in_flight {
             self.in_flight_idles += 1;
-            if self.in_flight_idles < STUCK_REQUEST_MULTIPLE {
+            let waited = self.cfg.idle_timeout * self.in_flight_idles as u32;
+            if waited < self.cfg.request_timeout {
                 return None;
             }
-            let secs = self.cfg.idle_timeout.as_secs() * STUCK_REQUEST_MULTIPLE as u64;
             return Some(Action::Escalate(format!(
-                "no response from the model for {secs}s"
+                "no response from the model for {}s",
+                waited.as_secs()
             )));
         }
         let secs = self.cfg.idle_timeout.as_secs();
