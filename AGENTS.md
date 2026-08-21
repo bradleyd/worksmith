@@ -71,6 +71,11 @@ shares it. Tests live in `tests/` plus in-module `#[cfg(test)]`.
   `thinking = <budget>` over raising the cap, and `/fast` when the task doesn't
   need deliberation. The footer's `↻` is the reasoning spend and `⚠cut` means
   the last completion was truncated.
+- Don't guess a provider's parameters. Local servers publish them at
+  `/openapi.json` (`components.schemas.ChatCompletionRequest.properties`), and
+  they disagree on names: oMLX takes `thinking_budget`, vLLM
+  `thinking_token_budget`. Fields absent from the schema are accepted and
+  ignored, not rejected, so probing cannot tell you what is honored.
 - A project's `.worksmith/config.toml` is not applied until trusted
   (`trust.rs`); `Config::load` gates it, `Config::load_trusted` skips the gate
   and is what tests and `--trust-project` use. Decisions are keyed by file

@@ -103,6 +103,22 @@ worksmith --model openrouter/moonshotai/kimi-k3
 That exact shape produced three complete newsletters and a reasoned decision,
 all passing a written rubric, for about $0.05.
 
+**Finding out what a local server accepts.** Most are FastAPI-based and publish
+their request schema, which settles the question better than trying a field and
+watching what happens (a server that ignores a field looks the same as one that
+honors it):
+
+```sh
+curl -s http://127.0.0.1:8000/openapi.json \
+  | python3 -c "import json,sys; \
+    print(*json.load(sys.stdin)['components']['schemas']['ChatCompletionRequest']['properties'])"
+```
+
+Servers disagree about names as well as support: oMLX calls the reasoning budget
+`thinking_budget`, vLLM calls it `thinking_token_budget`. That is why
+`reasoning-budget-param` is something you set rather than something worksmith
+guesses.
+
 **Self-hosted vLLM.** Serve with tool-calling on, or the agent has no hands:
 
 ```sh

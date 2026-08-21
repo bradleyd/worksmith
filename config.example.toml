@@ -63,11 +63,35 @@ base-url = "http://localhost:8000/v1"
 # base-url = "https://<your-pod-id>-8000.proxy.runpod.net/v1"
 # api-key-env = "RUNPOD_API_KEY"
 
+# Which parameters does a local server actually accept? Ask it. Most are
+# FastAPI-based and publish their exact request schema:
+#
+#   curl -s http://127.0.0.1:8000/openapi.json \
+#     | python3 -c "import json,sys; \
+#       print(*json.load(sys.stdin)['components']['schemas']['ChatCompletionRequest']['properties'])"
+#
+# (or open /docs in a browser). This beats guessing, and it beats probing: a
+# field the server ignores looks exactly like one it honors. Real example, oMLX
+# spells the reasoning budget `thinking_budget` while vLLM spells it
+# `thinking_token_budget`, which is why the field name is configurable below
+# rather than assumed. Presence in the schema is reliable; absence means the
+# server will accept the field and quietly do nothing with it.
+
 # Any other OpenAI-compatible server — llama.cpp, LM Studio, oMLX, Ollama:
 # [providers.local]
 # type = "openai-compat"
 # base-url = "http://127.0.0.1:8000/v1"
 # api-key-env = "LOCAL_API_KEY"
+
+# oMLX (macOS, Apple silicon). Serves both its own model directory and your
+# HuggingFace cache; `curl /v1/models` lists what it will answer to. It takes
+# tools, reasoning_effort, and a server-enforced budget under its own name:
+# [providers.omlx]
+# type = "openai-compat"
+# base-url = "http://127.0.0.1:8000/v1"
+# api-key-env = "OMLX_API_KEY"
+# thinking-param = "chat-template"
+# reasoning-budget-param = "thinking_budget"
 
 # --- Agent -----------------------------------------------------------------
 [agent]
