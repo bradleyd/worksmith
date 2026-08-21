@@ -949,7 +949,37 @@ easy to lose.
    check is `workers` vs `workers --until` on the 9B rather than assuming the
    +34 transfers.
 
-3. **UX pass (in progress).** Steering, `/agents tail`, and the picker overlay
+**Where things stand (2026-08-21).** Steps 1 and 2 are done. The UX pass is
+mostly done. A day of dogfooding against local models surfaced four harness
+bugs, all fixed, and one theme worth naming: *the harness could not explain
+itself*. Diagnosing a worker that died meant reading the model server's logs and
+correlating timestamps by hand, three times. The fixes for that — per-worker
+failure reasons, the answering model recorded on each message, and structural
+events in the session file (`/history`) — are worth more than any of the
+individual bugs.
+
+Open, in rough order of value:
+
+- **Phase 2 of the local comparison**: is a 4-bit local 27B a daily driver
+  against the hosted build? Blocked only on freeing ~4 GB. This is the question
+  the whole eval scaffolding was built to answer and it is still unanswered.
+- **`/model` switching**, now that `[models]` exists. Needs `Agent`'s model and
+  client behind a lock; the picker overlay is already built.
+- **M9 metrics on top of `[models]`**: prices are configured, `run.py` still
+  cannot report dollars per solved task. That number is what makes the +34
+  result publishable rather than a token count.
+- **Memory and knowledge are still unmeasured.** The store now fills (mining
+  works, ids are usable), but nothing shows whether injecting memory improves
+  anything. Needs the paired teach/test eval task type.
+- **Open decision #9** (what a check *is*) still blocks workflows (§8a).
+- **v0.2.2**: 17 commits since the tag, including three fixes to bugs v0.2.1
+  shipped.
+
+Deliberately not next: sandboxing (planned in §10b, its marginal value over the
+approval gate is modest), the terminal tab (`!cmd` covers the real need for a
+fraction of the work), and more eval runs of things already answered.
+
+3. **UX pass (mostly done).** Steering, `/agents tail`, and the picker overlay
    are done. Remaining: the `/model` picker — which needs a `[models]` config
    section, and that is the same table M9 wants for prices, so the two want
    doing together — and `@path` fuzzy picking.
