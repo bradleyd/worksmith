@@ -25,6 +25,19 @@ mkdir -p "$OUT"
 : "${OMLX_API_KEY:?export OMLX_API_KEY first (oMLX requires it, even for /v1/models)}"
 auth=(-H "Authorization: Bearer $OMLX_API_KEY")
 
+# /admin/api/* answers "Admin authentication required" to the inference key.
+# oMLX keeps two credentials in ~/.oMLX/settings.json: auth.api_key (inference)
+# and auth.secret_key. Export the latter as OMLX_ADMIN_KEY to let this script
+# unload models for you:
+#
+#   export OMLX_ADMIN_KEY="$(python3 -c "import json,pathlib; \
+#     print(json.loads((pathlib.Path.home()/'.oMLX/settings.json').read_text())['auth']['secret_key'])")"
+#
+# Without it the phases still run, but you have to unload in the oMLX app
+# between them, and this script will stop and say so rather than let the second
+# model load on top of the first.
+admin_auth=(-H "Authorization: Bearer ${OMLX_ADMIN_KEY:-$OMLX_API_KEY}")
+
 free_gb() {
   # Pages free + inactive + speculative, which is what is actually available.
   vm_stat | awk '
@@ -44,20 +57,31 @@ unload_all() {
   # nothing, which is the failure mode this whole codebase keeps hitting.
   for m in "$LOCAL_SMALL" "$LOCAL_BIG"; do
     local code body
-    body=$(curl -s -m 30 -w '\n%{http_code}' -X POST "${auth[@]}" \
+    body=$(curl -s -m 30 -w '\n%{http_code}' -X POST "${admin_auth[@]}" \
       "$OMLX/admin/api/models/$(printf %s "$m" | sed 's|/|%2F|g')/unload" 2>&1)
     code=${body##*$'\n'}
     case "$code" in
       2*) echo "unloaded $m" ;;
       404) echo "unload $m: 404 (not loaded, or the id differs from /v1/models)" ;;
+      401) echo "unload $m: 401 — admin calls need OMLX_ADMIN_KEY (see the top of this script)" ;;
       *)   echo "unload $m: HTTP $code ${body%$'\n'*}" ;;
     esac
   done
   sleep 2
 }
 
+# Is oMLX holding a model right now? Cheaper and more direct than inferring it
+# from free memory, and it is the thing that breaks phase 2.
+omlx_rss_gb() {
+  ps -Ao rss,comm | awk '/omlx-server/ { printf "%.1f", $1/1048576; exit }'
+}
+
 require_free() { # require_free <gb> <what>
-  local need=$1 what=$2 have
+  local need=$1 what=$2 have resident
+  resident=$(omlx_rss_gb)
+  if [ -n "$resident" ] && awk -v r="$resident" 'BEGIN { exit !(r > 3) }'; then
+    echo "note: oMLX is holding ~${resident} GB (a model is still loaded)"
+  fi
   have=$(free_gb)
   echo "free memory: ${have} GB (need ~${need} GB for ${what})"
   if awk -v h="$have" -v n="$need" 'BEGIN { exit !(h < n) }'; then
