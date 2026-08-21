@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Two questions, run in the only order that fits in memory.
+#
+#   Phase 1 (regression): hosted 27B drives the loop, the local 9B does the
+#                         worker jobs. Only the 9B is resident: ~7.7 GB.
+#   Phase 2 (daily driver): the local 27B does everything. ~19 GB resident.
+#
+# oMLX has `idle_timeout_seconds: null`, so it never unloads a model on its
+# own. Run these back to back without unloading and you hold ~27 GB of weights
+# plus KV cache on a 36 GB machine, which is the exhaustion this guards against.
+# Every phase therefore unloads first and checks free memory before starting.
+#
+# Needs OMLX_API_KEY in the environment.
+set -uo pipefail
+
+OMLX=${OMLX:-http://127.0.0.1:8000}
+HOSTED=${HOSTED:-openrouter/qwen/qwen3.8-27b}
+LOCAL_SMALL=${LOCAL_SMALL:-Qwen3.5-9B-OptiQ-4bit}
+LOCAL_BIG=${LOCAL_BIG:-Qwen3.8-27B-OptiQ-4bit}
+REPEAT=${REPEAT:-1}
+OUT=${OUT:-$(cd "$(dirname "$0")" && pwd)/results}
+cd "$(dirname "$0")"
+mkdir -p "$OUT"
+
+: "${OMLX_API_KEY:?export OMLX_API_KEY first (oMLX requires it, even for /v1/models)}"
+auth=(-H "Authorization: Bearer $OMLX_API_KEY")
+
+free_gb() {
+  # Pages free + inactive + speculative, which is what is actually available.
+  vm_stat | awk '
+    /page size of/ { ps = $8 }
+    /Pages free/ { f = $3 }
+    /Pages inactive/ { i = $3 }
+    /Pages speculative/ { s = $3 }
+    END { gsub(/\./, "", f); gsub(/\./, "", i); gsub(/\./, "", s);
+          printf "%.1f", (f + i + s) * ps / 1073741824 }'
+}
+
+loaded() { curl -s -m 10 "${auth[@]}" "$OMLX/admin/api/stats" 2>/dev/null; }
+
+unload_all() {
+  for m in "$LOCAL_SMALL" "$LOCAL_BIG"; do
+    curl -s -m 30 -X POST "${auth[@]}" "$OMLX/admin/api/models/$m/unload" >/dev/null 2>&1
+  done
+  sleep 2
+}
+
+require_free() { # require_free <gb> <what>
+  local need=$1 what=$2 have
+  have=$(free_gb)
+  echo "free memory: ${have} GB (need ~${need} GB for ${what})"
+  if awk -v h="$have" -v n="$need" 'BEGIN { exit !(h < n) }'; then
+    echo "REFUSING: not enough free memory. Close something, or run the phases separately." >&2
+    return 1
+  fi
+}
+
+banner() { printf '\n=== %s ===\n' "$1"; }
+
+banner "binary"
+# The stale-binary trap: a config newer than the binary fails confusingly.
+command -v worksmith >/dev/null && worksmith --version
+which -a worksmith
+
+banner "phase 1: hosted loop + local 9B workers"
+unload_all
+require_free 10 "the 9B" || exit 1
+# The main loop, hosted. This is the regression check: does the harness still
+# drive a turn end to end after a day of changes?
+python3 run.py --model "$HOSTED" --modes raw,guided --repeat "$REPEAT" \
+  --json "$OUT/p1-hosted-loop.json"
+# The worker path, with the small local model doing the drafting. Only
+# 08-newsletter-judge declares `workers`, so this is one task by design.
+python3 run.py --model "$HOSTED" --worker-model "omlx/$LOCAL_SMALL" \
+  --modes workers --repeat "$REPEAT" --json "$OUT/p1-local-workers.json"
+
+banner "phase 2: local 27B for everything"
+unload_all
+require_free 22 "the 27B" || exit 1
+python3 run.py --model "omlx/$LOCAL_BIG" --modes raw,guided --repeat "$REPEAT" \
+  --json "$OUT/p2-local-27b.json"
+
+banner "results"
+ls -1 "$OUT"/*.json
+echo "compare pass rates and tokens-per-solved between p1-hosted-loop and p2-local-27b:"
+echo "  that is the daily-driver question — 4-bit local against the hosted build."
