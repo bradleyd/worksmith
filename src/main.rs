@@ -446,9 +446,25 @@ async fn run_spawn(
     let succeeded = group.done.iter().filter(|w| w.status == WorkerStatus::Done).count();
     if succeeded == 0 {
         let _ = writeln!(stdout(), "{body}");
+        // Name the reasons here rather than pointing at output above: worker
+        // headlines are only printed when *not* in --mode json, so in the mode
+        // an eval harness uses there was nothing above at all. Three separate
+        // investigations went to the session files for want of this line.
+        let why: Vec<String> = group
+            .done
+            .iter()
+            .map(|w| {
+                let reason = w
+                    .escalation
+                    .clone()
+                    .unwrap_or_else(|| w.last.lines().next().unwrap_or("").to_string());
+                format!("{} [{}] {}", w.id, w.status.label(), reason)
+            })
+            .collect();
         bail!(
-            "all {} workers failed; nothing to synthesize (see the reasons above)",
-            group.done.len()
+            "all {} workers failed; nothing to synthesize:\n  {}",
+            group.done.len(),
+            why.join("\n  ")
         );
     }
 
