@@ -61,6 +61,20 @@ class ModelSize(unittest.TestCase):
         for body in ["", "null", "[]", "{}", '{"models": "nope"}', "not json", '[1, 2, 3]']:
             self.assertIsNone(parse_model_size_gb(body, "A"), body)
 
+    def test_finds_a_size_however_it_is_named_or_nested(self):
+        # Guessing exact key names returned None against the real server, and
+        # the shape is undocumented, so match on what a key means.
+        cases = [
+            '[{"id": "A", "model_size_bytes": 20401094656}]',
+            '[{"id": "A", "sizeGB": 19.0}]',
+            '[{"id": "A", "size_str": "19.00GB"}]',
+            '[{"id": "A", "info": {"memory_required_gb": 19.0}}]',
+        ]
+        for body in cases:
+            got = parse_model_size_gb(body, "A")
+            self.assertIsNotNone(got, body)
+            self.assertAlmostEqual(got, 19.0, places=1, msg=body)
+
     def test_a_bool_is_not_a_size(self):
         self.assertIsNone(parse_model_size_gb('[{"id": "A", "size": true}]', "A"))
 

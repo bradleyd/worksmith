@@ -75,14 +75,53 @@ def parse_model_size_gb(models_json: str, model_id: str) -> float | None:
             continue
         if entry.get("id") != model_id and entry.get("name") != model_id:
             continue
-        for key in ("size_gb", "memory_gb", "estimated_memory_gb", "size", "size_bytes"):
-            value = entry.get(key)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            if value <= 0:
-                continue
-            # A "size" of 19 is gigabytes; 20401094656 is bytes.
-            return value / GIB if value > 10_000 else float(value)
+        found = _find_size(entry)
+        if found is not None:
+            return found
+    return None
+
+
+def _find_size(entry: dict, depth: int = 0) -> float | None:
+    """Any field that plausibly states a size, however it is nested.
+
+    Guessing exact key names failed against the real response, and the shape is
+    undocumented, so match on what a key *means* and recurse one level for
+    servers that nest details under `info` or `metadata`.
+    """
+    for key, value in entry.items():
+        k = key.lower()
+        if not any(t in k for t in ("size", "memory", "mem_", "bytes", "gb")):
+            continue
+        number = _as_number(value)
+        if number is None:
+            continue
+        # "19.00GB" as a string, or a bare number whose unit the name implies.
+        if isinstance(value, str) and "gb" in value.lower():
+            return number
+        if "bytes" in k or number > 10_000:
+            return number / GIB
+        return number
+    if depth == 0:
+        for value in entry.values():
+            if isinstance(value, dict):
+                nested = _find_size(value, depth + 1)
+                if nested is not None:
+                    return nested
+    return None
+
+
+def _as_number(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    if isinstance(value, str):
+        digits = "".join(c for c in value if c.isdigit() or c == ".")
+        try:
+            n = float(digits)
+            return n if n > 0 else None
+        except ValueError:
+            return None
     return None
 
 
