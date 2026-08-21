@@ -248,7 +248,12 @@ def main() -> int:
                     print(f"  {tag}: {' '.join(cmd)}", file=sys.stderr)
                     continue
                 print(f"running {tag} …", file=sys.stderr)
-                row = run_one(binp, task, mode, args.model, args.timeout, args.keep,
+                # A task may declare its own budget. newsletter-judge writes
+                # three full drafts plus a review in one turn; 240s kills it
+                # mid-stream and reports it as a failure of the harness rather
+                # than of the clock.
+                budget = int(task.get("timeout") or args.timeout)
+                row = run_one(binp, task, mode, args.model, budget, args.keep,
                               args.worker_model, args.fast)
                 row["run"] = i
                 rows.append(row)

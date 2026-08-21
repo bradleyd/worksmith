@@ -237,5 +237,20 @@
     "elapsed": 240.0,
     "error": "timeout after 240s",
     "run": 0
+  },
+  {
+    "task": "newsletter-judge",
+    "mode": "guided",
+    "fast": false,
+    "thinking": "default",
+    "passed": false,
+    "model_calls": 0,
+    "tool_calls": 0,
+    "gen_tokens": 0,
+    "reasoning_tokens": 0,
+    "outcome": null,
+    "elapsed": 240.0,
+    "error": "timeout after 240s",
+    "run": 0
   }
 ]

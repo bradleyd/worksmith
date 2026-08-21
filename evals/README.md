@@ -46,6 +46,17 @@ Runs pass `--approve-all` and `--trust-project`, because nobody is there to
 answer either prompt and the project config in the workdir is one this harness
 wrote itself. Real interactive runs prompt for both.
 
+## Timeouts
+
+`--timeout` (default 240s) is per run, and a task may raise it with `timeout =`
+in its `.toml`. `newsletter-judge` sets 900 because it writes three full drafts
+plus a review in a single turn.
+
+A killed run reports `gen_tokens=0` even though the model generated plenty:
+token counts arrive with the completion, so a run cut off mid-stream loses its
+accounting. Zero tokens with a timeout means "we never found out", not "nothing
+happened".
+
 ## Comparing thinking levels
 
 `--think LEVEL` runs the suite at a thinking setting: `minimal|low|medium|high`,

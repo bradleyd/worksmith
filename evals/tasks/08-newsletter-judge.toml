@@ -7,6 +7,12 @@ description = "Long-form generation + self-judgment against a real editorial rub
 # arrangement of this work, and that's what raw/guided measure.
 workers = 3
 
+# Three full drafts plus a review in a single turn. The suite default (240s) is
+# sized for tasks that write one file; this one gets killed mid-stream at that
+# budget, and a killed run reports gen_tokens=0 because token counts only
+# arrive with the completion.
+timeout = 900
+
 # The skill is copied into the workdir because worksmith has no skill loader yet
 # (PLAN tier-1). Once it does, this task becomes the skill-loading test too.
 fixtures = [

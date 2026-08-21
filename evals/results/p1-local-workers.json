@@ -5,15 +5,13 @@
     "fast": false,
     "thinking": "default",
     "passed": false,
-    "model_calls": 1,
+    "model_calls": 0,
     "tool_calls": 0,
-    "gen_tokens": 768,
+    "gen_tokens": 0,
     "reasoning_tokens": 0,
     "outcome": null,
-    "elapsed": 135.2,
-    "error": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize (see the reasons above)",
-    "ctx_peak": 0,
-    "stderr": "planner split the work into 3 task(s)\n\u001b[31merror:\u001b[0m all 3 workers failed; nothing to synthesize (see the reasons above)",
+    "elapsed": 240.0,
+    "error": "timeout after 240s",
     "run": 0
   }
 ]
