@@ -436,13 +436,22 @@ impl Agent {
             // every real request. It therefore reads low, by a margin that grows
             // with the toolset, so trust the provider's own count once we have
             // one and keep the estimate only for the first step of a session.
-            if self.working_tokens(session) > self.compaction_trigger()
-                && let Err(e) = self.compact(session).await
-            {
-                // Compaction is best-effort; a failure shouldn't kill the turn.
-                self.emit(session, Event::Error {
-                    message: format!("compaction failed: {e}"),
-                });
+            if self.working_tokens(session) > self.compaction_trigger() {
+                let before = session.messages().len();
+                if let Err(e) = self.compact(session).await {
+                    // Compaction is best-effort; a failure shouldn't kill the turn.
+                    self.emit(session, Event::Error {
+                        message: format!("compaction failed: {e}"),
+                    });
+                } else if session.messages().len() != before {
+                    // Stuck detection counts repeated calls as evidence the model
+                    // is spinning. After a compaction that reasoning is unfair: we
+                    // deleted the tool result it was working from, so reading the
+                    // same file again is the correct response to what it can now
+                    // see, not a loop. Start counting from here.
+                    call_counts.clear();
+                    nudged.clear();
+                }
             }
 
             let mut messages = Vec::with_capacity(session.messages().len() + 1);
