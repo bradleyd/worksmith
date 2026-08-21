@@ -55,17 +55,23 @@ pub struct Message {
     /// was done" and "the model was cut off mid-thought".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// Which model answered. A worker override or a role switch means the
+    /// session model is not the answer, and "which model actually served this?"
+    /// was otherwise unanswerable from our own artifacts — it took reading the
+    /// provider's log files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None }
+        Self { role: Role::System, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None, model: None }
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None }
+        Self { role: Role::User, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None, model: None }
     }
     pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, content, tool_calls, tool_call_id: None, name: None, reasoning: None, finish_reason: None }
+        Self { role: Role::Assistant, content, tool_calls, tool_call_id: None, name: None, reasoning: None, finish_reason: None, model: None }
     }
     pub fn tool_result(call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -76,14 +82,21 @@ impl Message {
             name: Some(name.into()),
             reasoning: None,
             finish_reason: None,
+            model: None,
         }
     }
 
     /// Attach the provider's reasoning trace and finish reason. Transcript-only
     /// metadata; it does not change what is sent back to the model.
-    pub fn with_trace(mut self, reasoning: Option<String>, finish_reason: Option<String>) -> Self {
+    pub fn with_trace(
+        mut self,
+        reasoning: Option<String>,
+        finish_reason: Option<String>,
+        model: Option<String>,
+    ) -> Self {
         self.reasoning = reasoning;
         self.finish_reason = finish_reason;
+        self.model = model;
         self
     }
 }

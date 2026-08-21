@@ -492,7 +492,11 @@ impl Agent {
                 }
             }
             let assistant = Message::assistant(completion.content.clone(), stored_calls)
-                .with_trace(completion.reasoning.clone(), completion.finish_reason.clone());
+                .with_trace(
+                    completion.reasoning.clone(),
+                    completion.finish_reason.clone(),
+                    Some(self.model.clone()),
+                );
             session.append_message(assistant)?;
 
             if let Some(text) = &completion.content

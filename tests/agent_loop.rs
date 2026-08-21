@@ -604,3 +604,30 @@ async fn steering_the_agent_consumed_is_not_offered_again() {
         .any(|m| m.content.as_deref().is_some_and(|c| c.contains("look in src/ instead")));
     assert!(delivered, "and it should have reached the conversation");
 }
+
+#[tokio::test]
+async fn the_session_records_which_model_answered() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+
+    let agent = build_agent(MockClient::new(vec![done("hi")]), dir.path(), 3);
+    agent
+        .run_turn(&mut session, "hello", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    // "Which model actually served this?" was unanswerable from our own
+    // artifacts: a worker override or a role switch means the session's model
+    // is not the answer, and confirming it took reading the provider's logs.
+    let answered = session
+        .messages()
+        .iter()
+        .filter_map(|m| m.model.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(answered, vec!["mock"], "the answering model is on the message");
+
+    let log = std::fs::read_to_string(&path).unwrap();
+    assert!(log.contains("\"model\":\"mock\""), "and in the session file: {log}");
+}
