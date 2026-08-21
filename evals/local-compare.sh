@@ -39,8 +39,19 @@ free_gb() {
 loaded() { curl -s -m 10 "${auth[@]}" "$OMLX/admin/api/stats" 2>/dev/null; }
 
 unload_all() {
+  # Report what happened. The first version swallowed output, and phase 2 then
+  # refused with the 9B still holding 7.2 GB — the unload had failed and said
+  # nothing, which is the failure mode this whole codebase keeps hitting.
   for m in "$LOCAL_SMALL" "$LOCAL_BIG"; do
-    curl -s -m 30 -X POST "${auth[@]}" "$OMLX/admin/api/models/$m/unload" >/dev/null 2>&1
+    local code body
+    body=$(curl -s -m 30 -w '\n%{http_code}' -X POST "${auth[@]}" \
+      "$OMLX/admin/api/models/$(printf %s "$m" | sed 's|/|%2F|g')/unload" 2>&1)
+    code=${body##*$'\n'}
+    case "$code" in
+      2*) echo "unloaded $m" ;;
+      404) echo "unload $m: 404 (not loaded, or the id differs from /v1/models)" ;;
+      *)   echo "unload $m: HTTP $code ${body%$'\n'*}" ;;
+    esac
   done
   sleep 2
 }
