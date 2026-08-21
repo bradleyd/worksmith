@@ -306,6 +306,9 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
             {
                 c = c.with_thinking_dialect(d, DialectSource::Explicit);
             }
+            c = c
+                .with_budget_param(resolved.provider.reasoning_budget_param.clone())
+                .with_sort(resolved.provider.sort.clone());
             Ok(std::sync::Arc::new(c))
         }
         other => bail!("provider type `{other}` is not supported (use `openai-compat`)"),

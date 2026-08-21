@@ -327,3 +327,33 @@ fn a_named_but_unset_api_key_env_is_reported() {
     let resolved = c.resolve_model(None).unwrap();
     assert!(resolved.missing_key_env.is_none());
 }
+
+/// `sort` is OpenRouter's provider routing. A typo there would silently route
+/// on price forever, so it fails at config time instead.
+#[test]
+fn an_unknown_provider_sort_is_rejected() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".worksmith");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let write = |sort: &str| {
+        std::fs::write(
+            cfg.join("config.toml"),
+            format!(
+                "model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\nsort = \"{sort}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+
+    write("fastest");
+    let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
+    let err = format!("{:#}", c.resolve_model(None).unwrap_err());
+    assert!(err.contains("throughput"), "names the valid values: {err}");
+
+    for ok in ["throughput", "latency", "price"] {
+        write(ok);
+        let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
+        assert!(c.resolve_model(None).is_ok(), "{ok} should be accepted");
+    }
+}

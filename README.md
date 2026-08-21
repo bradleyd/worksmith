@@ -196,9 +196,12 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   `thinking = 2000` is the setting in between. Small models have no sense of a
   budget: given `max-tokens = 8192` and no cap on reasoning, one will spend all
   8192 deliberating and return nothing at all. A budget caps the reasoning
-  alone, so the rest is still there for an answer. Only the `reasoning` dialect
-  can express it; on a chat-template provider it degrades to plain "on" and
-  says so rather than pretending.
+  alone, so the rest is still there for an answer. OpenRouter and OpenAI take it
+  as `reasoning.max_tokens`. vLLM has its own, `thinking_token_budget`, which it
+  enforces server-side by forcing the reasoning to end, and you opt in with
+  `reasoning-budget-param` because the other chat-template servers (llama.cpp,
+  LM Studio, Ollama) have no such field. Where a budget genuinely cannot be
+  expressed it degrades to plain "on" and says so rather than pretending.
 
   Nothing is sent unless you ask: providers disagree on the field (`reasoning`
   vs `chat_template_kwargs`) and an unrecognized one is a 400. The dialect is

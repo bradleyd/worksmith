@@ -113,6 +113,18 @@ pub struct ProviderConfig {
     /// or `chat-template` (vLLM/oMLX/llama.cpp). Guessed from the URL if unset.
     #[serde(default)]
     pub thinking_param: Option<String>,
+    /// The request field this provider uses for a *reasoning token budget*,
+    /// when it has one. vLLM calls it `thinking_token_budget` and enforces it
+    /// server-side. Opt-in per provider rather than inferred, because the other
+    /// chat-template servers (llama.cpp, LM Studio, Ollama) have no such field
+    /// and a strict one answers 400 for an unknown key.
+    #[serde(default)]
+    pub reasoning_budget_param: Option<String>,
+    /// OpenRouter provider routing: `throughput` (fastest tokens/sec),
+    /// `latency` (fastest to first token), or `price`. Sent as
+    /// `provider: {"sort": …}`. Ignored by servers that don't route.
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 fn default_provider_kind() -> String {
@@ -466,6 +478,15 @@ impl Config {
         // it sends the request with no Authorization header at all. The server
         // answers 401 and the cause looks like anything but "you forgot to
         // export it". Carry the fact so the caller can say so.
+        if let Some(sort) = &provider.sort
+            && !matches!(sort.as_str(), "throughput" | "latency" | "price")
+        {
+            bail!(
+                "provider `{provider_name}`: sort = \"{sort}\" is not one of \
+                 throughput, latency, price"
+            );
+        }
+
         let missing_key_env = provider
             .api_key_env
             .as_ref()

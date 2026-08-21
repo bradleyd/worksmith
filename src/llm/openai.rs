@@ -20,6 +20,10 @@ pub struct OpenAiCompatClient {
     api_key: Option<String>,
     thinking_dialect: crate::llm::ThinkingDialect,
     dialect_source: DialectSource,
+    /// Request field for a reasoning budget, when this provider has one.
+    budget_param: Option<String>,
+    /// OpenRouter provider routing preference.
+    sort: Option<String>,
     /// A dropped reasoning budget is worth saying once, not once per step.
     warned_no_budget: std::sync::atomic::AtomicBool,
 }
@@ -36,6 +40,8 @@ impl OpenAiCompatClient {
             api_key,
             thinking_dialect,
             dialect_source: DialectSource::Guessed,
+            budget_param: None,
+            sort: None,
             warned_no_budget: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -48,6 +54,19 @@ impl OpenAiCompatClient {
     ) -> Self {
         self.thinking_dialect = d;
         self.dialect_source = source;
+        self
+    }
+
+    /// The field this provider uses for a reasoning token budget (vLLM's
+    /// `thinking_token_budget`), when it has one.
+    pub fn with_budget_param(mut self, param: Option<String>) -> Self {
+        self.budget_param = param;
+        self
+    }
+
+    /// OpenRouter provider routing (`throughput` | `latency` | `price`).
+    pub fn with_sort(mut self, sort: Option<String>) -> Self {
+        self.sort = sort;
         self
     }
 
@@ -74,6 +93,7 @@ impl LlmClient for OpenAiCompatClient {
         // so the setting isn't trusted to be doing something it isn't.
         if let Some(Thinking::Budget(n)) = req.thinking
             && !self.thinking_dialect.supports_budget()
+            && self.budget_param.is_none()
             && !self.warned_no_budget.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             let _ = sink
@@ -86,7 +106,12 @@ impl LlmClient for OpenAiCompatClient {
                 .await;
         }
 
-        let body = build_request_body(&req, self.thinking_dialect);
+        let body = build_request_body(
+            &req,
+            self.thinking_dialect,
+            self.budget_param.as_deref(),
+            self.sort.as_deref(),
+        );
 
         let mut builder = self.http.post(self.endpoint()).json(&body);
         if let Some(key) = &self.api_key {
@@ -174,7 +199,12 @@ impl LlmClient for OpenAiCompatClient {
 /// Build the JSON request body by hand — this gives us exact control over the
 /// assistant `tool_calls` / tool-result shapes that OpenAI-compat servers are
 /// picky about.
-fn build_request_body(req: &ChatRequest, dialect: crate::llm::ThinkingDialect) -> serde_json::Value {
+fn build_request_body(
+    req: &ChatRequest,
+    dialect: crate::llm::ThinkingDialect,
+    budget_param: Option<&str>,
+    sort: Option<&str>,
+) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages.iter().map(message_to_json).collect();
 
     let mut body = serde_json::json!({
@@ -201,6 +231,11 @@ fn build_request_body(req: &ChatRequest, dialect: crate::llm::ThinkingDialect) -
             .collect();
         body["tools"] = serde_json::Value::Array(tools);
     }
+    // OpenRouter provider routing. Other servers ignore an unknown field, and
+    // it is only sent when asked for.
+    if let Some(sort) = sort {
+        body["provider"] = serde_json::json!({ "sort": sort });
+    }
     if let Some(t) = req.temperature {
         body["temperature"] = serde_json::json!(t);
     }
@@ -222,9 +257,15 @@ fn build_request_body(req: &ChatRequest, dialect: crate::llm::ThinkingDialect) -
                 };
             }
             crate::llm::ThinkingDialect::ChatTemplate => {
-                // Bool only: a budget degrades to plain on (and `stream` warns).
                 body["chat_template_kwargs"] =
                     serde_json::json!({ "enable_thinking": think.enabled() });
+                // vLLM enforces `thinking_token_budget` server-side: it forces
+                // the reasoning to end when the budget is spent, rather than
+                // asking the model to be brief. Sent only when the provider
+                // says it has the field, since llama.cpp and friends do not.
+                if let (Some(n), Some(key)) = (think.budget(), budget_param) {
+                    body[key] = serde_json::json!(n);
+                }
             }
         }
     }
@@ -491,18 +532,18 @@ mod thinking_tests {
     #[test]
     fn silence_by_default() {
         // Sending nothing is what keeps every provider working; only opt-in.
-        let b = build_request_body(&req(None), ThinkingDialect::Reasoning);
+        let b = build_request_body(&req(None), ThinkingDialect::Reasoning, None, None);
         assert!(b.get("reasoning").is_none());
         assert!(b.get("chat_template_kwargs").is_none());
     }
 
     #[test]
     fn each_provider_gets_its_own_spelling() {
-        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::Reasoning);
+        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::Reasoning, None, None);
         assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}));
         assert!(b.get("chat_template_kwargs").is_none(), "OpenRouter rejects this field");
 
-        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::ChatTemplate);
+        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::ChatTemplate, None, None);
         assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": false}));
         assert!(b.get("reasoning").is_none());
     }
@@ -511,15 +552,50 @@ mod thinking_tests {
     fn a_budget_caps_reasoning_where_the_dialect_supports_it() {
         // The point of a budget: reasoning gets its own ceiling, so it cannot
         // eat all of max_tokens and leave nothing for the answer.
-        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::Reasoning);
+        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::Reasoning, None, None);
         assert_eq!(b["reasoning"], serde_json::json!({"max_tokens": 2000}));
+    }
+
+    #[test]
+    fn vllm_gets_a_server_enforced_reasoning_budget() {
+        // vLLM has `thinking_token_budget` and enforces it: when the budget is
+        // spent it forces the reasoning to end, rather than asking the model to
+        // be brief. Opt-in per provider, since llama.cpp and LM Studio share the
+        // chat-template dialect and have no such field.
+        let b = build_request_body(
+            &req(Some(Thinking::Budget(2000))),
+            ThinkingDialect::ChatTemplate,
+            Some("thinking_token_budget"),
+            None,
+        );
+        assert_eq!(b["thinking_token_budget"], serde_json::json!(2000));
+        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
+
+        // Without the opt-in the field must not appear at all: an unknown key
+        // is a 400 on a strict server.
+        let b = build_request_body(
+            &req(Some(Thinking::Budget(2000))),
+            ThinkingDialect::ChatTemplate,
+            None,
+            None,
+        );
+        assert!(b.get("thinking_token_budget").is_none());
+    }
+
+    #[test]
+    fn provider_routing_is_only_sent_when_asked_for() {
+        let b = build_request_body(&req(None), ThinkingDialect::Reasoning, None, None);
+        assert!(b.get("provider").is_none(), "no routing preference by default");
+
+        let b = build_request_body(&req(None), ThinkingDialect::Reasoning, None, Some("throughput"));
+        assert_eq!(b["provider"], serde_json::json!({"sort": "throughput"}));
     }
 
     #[test]
     fn a_budget_degrades_to_plain_on_where_it_cannot_be_expressed() {
         // enable_thinking is a bool; there is nowhere to put a number. The
         // client warns rather than letting the setting look effective.
-        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::ChatTemplate);
+        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::ChatTemplate, None, None);
         assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
         assert!(!ThinkingDialect::ChatTemplate.supports_budget());
         assert!(ThinkingDialect::Reasoning.supports_budget());

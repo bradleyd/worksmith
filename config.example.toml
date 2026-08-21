@@ -34,6 +34,12 @@ api-key-env = "OPENROUTER_API_KEY"
 # explicitly for anything behind a proxy or a vanity domain; an HTTP 400 on a
 # thinking request names the field that was sent and where that choice came from.
 # thinking-param = "reasoning"
+#
+# Provider routing (OpenRouter only): which endpoint behind a model to prefer.
+#   throughput  fastest tokens/sec        latency  fastest first token
+#   price       cheapest (the default)
+# Other servers ignore it.
+# sort = "throughput"
 
 # Self-hosted vLLM. Start it with tool-calling enabled or nothing works:
 #   vllm serve Qwen/Qwen3.5-9B \
@@ -44,6 +50,12 @@ type = "openai-compat"
 base-url = "http://localhost:8000/v1"
 # api-key-env = "VLLM_API_KEY"   # omit entirely if the endpoint needs no key
 # thinking-param = "chat-template"
+#
+# vLLM enforces a reasoning budget server-side: when the budget is spent it
+# forces the reasoning to end, rather than asking the model to stop. Opt in by
+# naming the field, because llama.cpp, LM Studio and Ollama share the
+# chat-template dialect and have no such field (an unknown key is a 400).
+# reasoning-budget-param = "thinking_token_budget"
 
 # A remote vLLM (RunPod and friends) is the same thing with a different URL:
 # [providers.runpod]
