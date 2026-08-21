@@ -35,6 +35,17 @@ a local server: two resident models can exhaust unified memory. Straddling
 (local workers, remote judge) avoids it, as does `--no-synthesis` plus a
 second command with the models swapped.
 
+## What config a run uses
+
+Each task runs in a fresh temp directory. Global `~/.worksmith/config.toml`
+applies as the base, and the repo's own `.worksmith/config.toml` is copied in as
+the project config so the eval uses the same model and provider you develop
+against. Set `--model` to override.
+
+Runs pass `--approve-all` and `--trust-project`, because nobody is there to
+answer either prompt and the project config in the workdir is one this harness
+wrote itself. Real interactive runs prompt for both.
+
 ## Comparing thinking levels
 
 `--think LEVEL` runs the suite at a thinking setting: `minimal|low|medium|high`,

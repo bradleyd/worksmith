@@ -123,7 +123,10 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
     # is. Real interactive runs prompt instead.
-    cmd = [binp, "--mode", "json", "--approve-all"]
+    # --trust-project: the workdir is a fresh temp dir each run, and trust is
+    # keyed by path, so the config this harness just wrote there would be
+    # untrusted and silently ignored. It is our own file.
+    cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
     if model:
         cmd += ["--model", model]
     if fast:
@@ -220,10 +223,14 @@ def main() -> int:
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
                 if args.dry_run:
                     wd = setup_workdir(task)
-                    # Unattended and trusted: the approval gate has nobody
-                    # to ask here, and a refusal would score as a task failure
-                    # rather than the safety behaviour it is.
-                    cmd = [binp, "--mode", "json", "--approve-all"]
+                    # Unattended and trusted: nobody is here to approve, and
+                    # a refusal would score as a task failure rather than the
+                    # safety behaviour it is. --trust-project because the
+                    # workdir is a fresh temp dir each run and trust is keyed
+                    # by path, so the config this harness just wrote there
+                    # would be untrusted and silently ignored. It is our file.
+                    cmd = [binp, "--mode", "json", "--approve-all",
+                           "--trust-project"]
                     if args.model:
                         cmd += ["--model", args.model]
                     if args.fast:
