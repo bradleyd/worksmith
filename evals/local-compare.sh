@@ -36,7 +36,34 @@ auth=(-H "Authorization: Bearer $OMLX_API_KEY")
 # Without it the phases still run, but you have to unload in the oMLX app
 # between them, and this script will stop and say so rather than let the second
 # model load on top of the first.
-admin_auth=(-H "Authorization: Bearer ${OMLX_ADMIN_KEY:-$OMLX_API_KEY}")
+# Admin auth is a *login*, not a bearer token: POST /admin/api/login with
+# {"api_key": …} sets a session cookie, and /admin/api/* wants that cookie.
+# Sending either key as a Bearer just gets "Admin authentication required".
+COOKIES=$(mktemp -t omlx-admin)
+trap 'rm -f "$COOKIES"' EXIT
+
+admin_login() {
+  # Which credential the login wants is not documented, and this machine has
+  # two (auth.api_key and auth.secret_key), so try both and say which worked.
+  local key label
+  for key in "${OMLX_ADMIN_KEY:-}" "${OMLX_API_KEY:-}"; do
+    [ -z "$key" ] && continue
+    label="${#key}-char key"
+    if curl -s -m 10 -c "$COOKIES" -o /dev/null -X POST \
+         -H 'Content-Type: application/json' \
+         -d "{\"api_key\":\"$key\",\"remember\":true}" \
+         "$OMLX/admin/api/login" &&
+       [ "$(curl -s -m 10 -b "$COOKIES" -o /dev/null -w '%{http_code}' \
+            "$OMLX/admin/api/models")" = "200" ]; then
+      echo "admin session established ($label)"
+      return 0
+    fi
+  done
+  echo "admin login failed: cannot unload models automatically." >&2
+  echo "Unload in the oMLX app between phases, or set OMLX_ADMIN_KEY to the" >&2
+  echo "credential its admin UI accepts (auth.* in ~/.oMLX/settings.json)." >&2
+  return 1
+}
 
 free_gb() {
   # Pages free + inactive + speculative, which is what is actually available.
@@ -57,13 +84,13 @@ unload_all() {
   # nothing, which is the failure mode this whole codebase keeps hitting.
   for m in "$LOCAL_SMALL" "$LOCAL_BIG"; do
     local code body
-    body=$(curl -s -m 30 -w '\n%{http_code}' -X POST "${admin_auth[@]}" \
+    body=$(curl -s -m 30 -w '\n%{http_code}' -X POST -b "$COOKIES" \
       "$OMLX/admin/api/models/$(printf %s "$m" | sed 's|/|%2F|g')/unload" 2>&1)
     code=${body##*$'\n'}
     case "$code" in
       2*) echo "unloaded $m" ;;
       404) echo "unload $m: 404 (not loaded, or the id differs from /v1/models)" ;;
-      401) echo "unload $m: 401 — admin calls need OMLX_ADMIN_KEY (see the top of this script)" ;;
+      401) echo "unload $m: 401 — the admin session was not accepted" ;;
       *)   echo "unload $m: HTTP $code ${body%$'\n'*}" ;;
     esac
   done
@@ -100,6 +127,11 @@ banner "binary"
 # The stale-binary trap: a config newer than the binary fails confusingly.
 command -v worksmith >/dev/null && worksmith --version
 which -a worksmith
+
+banner "admin session"
+if ! admin_login; then
+  echo "continuing without automatic unloads; watch memory yourself." >&2
+fi
 
 banner "phase 1: hosted loop + local 9B workers"
 unload_all
