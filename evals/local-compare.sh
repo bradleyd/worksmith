@@ -108,6 +108,41 @@ omlx_rss_gb() {
   ps -Ao rss,comm | awk '/omlx-server/ { printf "%.1f", $1/1048576; exit }'
 }
 
+# What oMLX says a model needs, in GB. Disk size overstates it: the 9B is 7.7 GB
+# on disk and loaded at 6.70 GB actual. Guessing from the tarball cost a refusal
+# at 19.7 GB free for a model that probably wanted ~17, so ask instead.
+model_need_gb() { # model_need_gb <model_id> <fallback_gb>
+  local id=$1 fallback=$2 out
+  out=$(curl -s -m 10 -b "$COOKIES" "$OMLX/admin/api/models" 2>/dev/null |
+    python3 -c "
+import json,sys
+want = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+items = d if isinstance(d, list) else d.get('models') or d.get('data') or []
+for m in items:
+    if not isinstance(m, dict):
+        continue
+    if m.get('id') == want or m.get('name') == want:
+        for k in ('size_gb', 'size', 'size_bytes', 'memory_gb', 'estimated_memory_gb'):
+            v = m.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                # Heuristic: bytes if it is implausibly large for GB.
+                gb = v / 1073741824 if v > 10000 else float(v)
+                print(f'{gb:.1f}')
+                sys.exit(0)
+sys.exit(1)
+" "$id" 2>/dev/null)
+  if [ -n "$out" ]; then
+    # A fifth on top for KV cache and headroom.
+    awk -v g="$out" 'BEGIN { printf "%.1f", g * 1.2 }'
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
 require_free() { # require_free <gb> <what>
   local need=$1 what=$2 have resident
   resident=$(omlx_rss_gb)
@@ -140,7 +175,7 @@ fi
 
 banner "phase 1: hosted loop + local 9B workers"
 unload_all
-require_free 10 "the 9B" || exit 1
+require_free "$(model_need_gb "$LOCAL_SMALL" 9)" "the 9B" || exit 1
 # The main loop, hosted. This is the regression check: does the harness still
 # drive a turn end to end after a day of changes?
 python3 run.py --model "$HOSTED" --modes raw,guided --repeat "$REPEAT" \
@@ -152,7 +187,7 @@ python3 run.py --model "$HOSTED" --worker-model "omlx/$LOCAL_SMALL" \
 
 banner "phase 2: local 27B for everything"
 unload_all
-require_free 21 "the 27B" || exit 1
+require_free "$(model_need_gb "$LOCAL_BIG" 19)" "the 27B" || exit 1
 python3 run.py --model "omlx/$LOCAL_BIG" --modes raw,guided --repeat "$REPEAT" \
   --json "$OUT/p2-local-27b.json"
 
