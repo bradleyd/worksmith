@@ -25,9 +25,10 @@ for m in (os.environ["LOCAL_SMALL"], os.environ["LOCAL_BIG"]):
     _, msg = omlx.unload(base, cookie, m)
     print(f"  {m}: {msg}")
 
-resident = omlx.resident_gb()
-if omlx.holds_a_model(resident):
-    print(f"note: oMLX is still holding ~{resident:.1f} GB")
+still_loaded = omlx.loaded_models(base, cookie)
+if still_loaded:
+    # The server names them; RSS only ever said how much, never which.
+    print(f"note: oMLX still has loaded: {', '.join(still_loaded)}")
 
 need = omlx.required_gb(omlx.model_size_gb(base, cookie, model), fallback)
 have = omlx.free_gb()

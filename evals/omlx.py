@@ -75,10 +75,43 @@ def parse_model_size_gb(models_json: str, model_id: str) -> float | None:
             continue
         if entry.get("id") != model_id and entry.get("name") != model_id:
             continue
+        # oMLX's real shape, confirmed against the server: `actual_size` is the
+        # loaded footprint in bytes and reads 0 while unloaded; `estimated_size`
+        # is what it expects to need. Prefer the measurement, fall back to the
+        # estimate, and only then guess by key name for other servers.
+        for key in ("actual_size", "estimated_size"):
+            value = entry.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return value / GIB if value > 10_000 else float(value)
         found = _find_size(entry)
         if found is not None:
             return found
     return None
+
+
+def parse_loaded_models(models_json: str) -> list[str]:
+    """Ids oMLX currently has in memory.
+
+    Better than inferring from RSS: the server says so directly, and RSS cannot
+    tell you *which* model is resident.
+    """
+    try:
+        payload = json.loads(models_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = payload.get("models") or payload.get("data") or []
+    else:
+        return []  # "null" parses to None, which has no .get
+    if not isinstance(items, list):
+        return []
+    return [
+        e["id"]
+        for e in items
+        if isinstance(e, dict) and e.get("loaded") is True and isinstance(e.get("id"), str)
+    ]
 
 
 def _find_size(entry: dict, depth: int = 0) -> float | None:
@@ -215,6 +248,11 @@ def login(base: str, keys: list[str]) -> str | None:
 def model_size_gb(base: str, cookie: str | None, model_id: str) -> float | None:
     status, body, _ = _request(f"{base}/admin/api/models", cookie)
     return parse_model_size_gb(body, model_id) if status == 200 else None
+
+
+def loaded_models(base: str, cookie: str | None) -> list[str]:
+    status, body, _ = _request(f"{base}/admin/api/models", cookie)
+    return parse_loaded_models(body) if status == 200 else []
 
 
 def unload(base: str, cookie: str | None, model_id: str) -> tuple[bool, str]:

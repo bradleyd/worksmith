@@ -7,6 +7,7 @@ import unittest
 
 from omlx import (
     classify_unload,
+    parse_loaded_models,
     holds_a_model,
     parse_free_gb,
     parse_model_size_gb,
@@ -75,8 +76,40 @@ class ModelSize(unittest.TestCase):
             self.assertIsNotNone(got, body)
             self.assertAlmostEqual(got, 19.0, places=1, msg=body)
 
+    # The shape oMLX actually returns, from /admin/api/models.
+    REAL = """[{"id": "Qwen3.5-9B-OptiQ-4bit", "loaded": false,
+                "estimated_size": 7455747219, "estimated_size_formatted": "6.94 GB",
+                "actual_size": 0, "actual_size_formatted": null},
+               {"id": "Qwen3.8-27B-OptiQ-4bit", "loaded": true,
+                "estimated_size": 20401094656, "actual_size": 18253611008}]"""
+
+    def test_uses_the_estimate_when_a_model_is_not_loaded(self):
+        # actual_size is 0 until something is in memory; reading that as a size
+        # would say a 7 GB model needs nothing.
+        self.assertAlmostEqual(
+            parse_model_size_gb(self.REAL, "Qwen3.5-9B-OptiQ-4bit"), 6.94, places=2
+        )
+
+    def test_prefers_the_measured_size_once_loaded(self):
+        # 17.0 measured against a 19.0 estimate: the measurement is what the
+        # machine actually has to find.
+        self.assertAlmostEqual(
+            parse_model_size_gb(self.REAL, "Qwen3.8-27B-OptiQ-4bit"), 17.0, places=1
+        )
+
     def test_a_bool_is_not_a_size(self):
         self.assertIsNone(parse_model_size_gb('[{"id": "A", "size": true}]', "A"))
+
+
+class LoadedModels(unittest.TestCase):
+    def test_the_server_says_which_models_are_resident(self):
+        # ps RSS says how much is held, never which model holds it.
+        self.assertEqual(parse_loaded_models(ModelSize.REAL), ["Qwen3.8-27B-OptiQ-4bit"])
+
+    def test_nothing_loaded_and_bad_input(self):
+        self.assertEqual(parse_loaded_models('[{"id": "A", "loaded": false}]'), [])
+        for bad in ["", "null", "not json", '{"models": "nope"}']:
+            self.assertEqual(parse_loaded_models(bad), [], bad)
 
 
 class Requirement(unittest.TestCase):
