@@ -745,6 +745,47 @@ is both expensive (a frontier model summarizing a transcript) and, more
 importantly, unmeasurable: there is no way to ask which model is good at which
 internal job.
 
+**Shape (2026-08-21).** Three different questions get conflated here, and only
+two of them are worth building.
+
+*Roles are mechanical.* The harness always knows which job it is doing at the
+call site, so this is a lookup and nothing more:
+
+```toml
+[roles]
+main       = "openrouter/qwen/qwen3.8-27b"
+worker     = "omlx/Qwen3.5-9B-OptiQ-4bit"
+compaction = "omlx/Qwen3.5-2B-4bit"   # mechanical; a 2B can summarize
+extraction = "omlx/Qwen3.5-2B-4bit"
+planner    = "omlx/Qwen3.5-9B-OptiQ-4bit"
+judge      = "openrouter/qwen/qwen3.8-27b"
+```
+
+Values are keys into `[models]` (§ config), which is why that table is keyed by
+the spec rather than being an ordered array: a role points *at* a profile. Two
+of these roles already exist informally as `model` and `agents.model`; M12 is
+naming the rest rather than inventing a mechanism.
+
+*Hard capabilities should be discovered, not declared.* Whether a model accepts
+images, or emits tool calls, is a fact about the model, and hand-maintaining it
+in config guarantees it goes stale. OpenRouter reports
+`architecture.input_modalities` and `supported_parameters` on `/api/v1/models`;
+a local server reports its accepted parameters at `/openapi.json`. Discovery
+belongs there, cached, with config as an override for when the source is wrong.
+Routing an image task to a text-only model should fail with "this model has no
+vision" rather than a confusing provider error.
+
+*Task-kind routing ("use the writing model") is the speculative one.* It needs
+someone to decide a task *is* writing, which is a classifier: another model
+call, or a heuristic that will be wrong in ways nobody can predict. The cheap
+90% is that the user already knows — `/model` for the session, `--worker-model`
+per spawn, and a workflow (§8a) naming a model per stage. Build those first and
+see whether an automatic classifier is still wanted; it probably is not.
+
+Order of work: roles first (mechanical, immediate cost win on compaction and
+extraction), discovery second (needed before any capability check means
+anything), classification last or never.
+
 Routing means naming those roles in config and letting each pick a model:
 
 ```toml
