@@ -413,6 +413,8 @@ impl Agent {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut nudged: HashSet<String> = HashSet::new();
         let mut empty_completions = 0u32;
+        // The fit-retry is routine; announce it once and record the rest.
+        let mut fit_warned = false;
 
         for _step in 0..self.max_steps {
             if cancel.is_cancelled() {
@@ -488,7 +490,11 @@ impl Agent {
                 // The server just told us the real prompt size. Remember it, so
                 // compaction and the clamp stop guessing for the rest of the run.
                 self.last_prompt_tokens.store(prompt as u32, Ordering::Relaxed);
-                let room = limit.saturating_sub(prompt).saturating_sub(64);
+                // Leave the same slack the clamp uses, not a token-thin fit.
+                // A 64-token margin against a prompt that grows by ~65 per step
+                // re-tripped on the very next request, forever: every step paid
+                // for a failed call to buy one step of progress.
+                let room = limit.saturating_sub(prompt).saturating_sub(CONTEXT_RESERVE);
                 if room < MIN_OUTPUT_TOKENS || attempt_tokens.is_some_and(|t| (t as usize) <= room)
                 {
                     // Either there is no room to give back, or we already asked
@@ -496,16 +502,23 @@ impl Agent {
                     // problem. Compaction is the only lever left.
                     break Err(e);
                 }
-                self.emit(
-                    session,
-                    Event::Warning {
-                        message: format!(
-                            "request would not fit ({prompt} prompt + {} output > {limit}); \
-                             retrying with {room} output tokens",
-                            attempt_tokens.unwrap_or(0)
-                        ),
-                    },
-                );
+                // Say it once per turn. It is a self-healing adjustment, and
+                // sixteen near-identical lines pushed the actual work off the
+                // screen. Every occurrence still goes to the session, so
+                // `/history` has the full picture.
+                let notice = Event::Warning {
+                    message: format!(
+                        "request would not fit ({prompt} prompt + {} output > {limit}); \
+                         retrying with {room} output tokens",
+                        attempt_tokens.unwrap_or(0)
+                    ),
+                };
+                if fit_warned {
+                    let _ = session.append_event(&notice);
+                } else {
+                    fit_warned = true;
+                    self.emit(session, notice);
+                }
                 attempt_tokens = Some(room as u32);
             };
 
