@@ -460,36 +460,55 @@ impl Agent {
                 .max_tokens
                 .map(|m| (m as usize).min(room).max(MIN_OUTPUT_TOKENS) as u32);
 
-            let req = ChatRequest {
-                model: self.model.clone(),
-                messages,
-                tools: self.registry.defs(),
-                temperature: self.temperature,
-                top_p: self.top_p,
-                top_k: self.top_k,
-                max_tokens,
-                thinking: self.thinking.get(),
-                sort: self.route.lock().unwrap().clone(),
+            // Ask, and if the server says the request cannot fit, believe *its*
+            // numbers rather than our estimate and try once more. Our estimate
+            // counts message characters; it cannot see the system prompt, the
+            // tool schemas or loaded skills, so on a resumed session it reads
+            // far under the truth and the clamp lets a doomed request through.
+            let mut attempt_tokens = max_tokens;
+            let completion = loop {
+                let req = ChatRequest {
+                    model: self.model.clone(),
+                    messages: messages.clone(),
+                    tools: self.registry.defs(),
+                    temperature: self.temperature,
+                    top_p: self.top_p,
+                    top_k: self.top_k,
+                    max_tokens: attempt_tokens,
+                    thinking: self.thinking.get(),
+                    sort: self.route.lock().unwrap().clone(),
+                };
+                let result = self.call_model(session, req, cancel).await;
+                let Err(e) = result else {
+                    break result;
+                };
+                let Some((limit, prompt)) = parse_context_error(&e.to_string()) else {
+                    break Err(e);
+                };
+                // The server just told us the real prompt size. Remember it, so
+                // compaction and the clamp stop guessing for the rest of the run.
+                self.last_prompt_tokens.store(prompt as u32, Ordering::Relaxed);
+                let room = limit.saturating_sub(prompt).saturating_sub(64);
+                if room < MIN_OUTPUT_TOKENS || attempt_tokens.is_some_and(|t| (t as usize) <= room)
+                {
+                    // Either there is no room to give back, or we already asked
+                    // for less than the room and the prompt itself is the
+                    // problem. Compaction is the only lever left.
+                    break Err(e);
+                }
+                self.emit(
+                    session,
+                    Event::Warning {
+                        message: format!(
+                            "request would not fit ({prompt} prompt + {} output > {limit}); \
+                             retrying with {room} output tokens",
+                            attempt_tokens.unwrap_or(0)
+                        ),
+                    },
+                );
+                attempt_tokens = Some(room as u32);
             };
 
-            // Forward streamed text + reasoning deltas to the bus.
-            let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
-            let bus = self.bus.clone();
-            let forwarder = tokio::spawn(async move {
-                while let Some(ev) = rx.recv().await {
-                    match ev {
-                        StreamEvent::TextDelta(t) => bus.emit(Event::MessageDelta { text: t }),
-                        StreamEvent::ReasoningDelta(t) => bus.emit(Event::Thinking { text: t }),
-                        StreamEvent::Warning(message) => bus.emit(Event::Warning { message }),
-                        _ => {}
-                    }
-                }
-            });
-
-            self.emit(session, Event::ModelCallStarted);
-            let completion = self.client.stream(req, tx, cancel.clone()).await;
-            let _ = forwarder.await;
-            self.emit(session, Event::ModelCallFinished);
 
             let completion = match completion {
                 Ok(c) => c,
@@ -678,6 +697,34 @@ impl Agent {
         self.context_limit * 3 / 4
     }
 
+    /// One model call: forwards stream events to the bus and brackets it with
+    /// the in-flight markers the supervisor reads.
+    async fn call_model(
+        &self,
+        session: &mut Session,
+        req: ChatRequest,
+        cancel: &CancellationToken,
+    ) -> Result<crate::llm::Completion> {
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+        let bus = self.bus.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    StreamEvent::TextDelta(t) => bus.emit(Event::MessageDelta { text: t }),
+                    StreamEvent::ReasoningDelta(t) => bus.emit(Event::Thinking { text: t }),
+                    StreamEvent::Warning(message) => bus.emit(Event::Warning { message }),
+                    _ => {}
+                }
+            }
+        });
+
+        self.emit(session, Event::ModelCallStarted);
+        let completion = self.client.stream(req, tx, cancel.clone()).await;
+        let _ = forwarder.await;
+        self.emit(session, Event::ModelCallFinished);
+        completion
+    }
+
     /// One-shot helper completion: no tools, no session, no streaming to the
     /// bus — just the model's text. Used for the harness's own side calls
     /// (compaction, fan-out planning, memory extraction), not for user turns.
@@ -785,6 +832,37 @@ fn compaction_split(messages: &[Message], keep_turns: usize) -> usize {
         return 0;
     }
     user_indices[user_indices.len() - keep_turns]
+}
+
+/// Pull the real numbers out of a context-length rejection.
+///
+/// Returns `(context_limit, prompt_tokens)`. The server is the only party that
+/// knows both — our own estimate counts message characters and cannot see the
+/// system prompt, the tool schemas or loaded skills, so it reads well under the
+/// truth on a resumed session.
+fn parse_context_error(text: &str) -> Option<(usize, usize)> {
+    let t = text.to_ascii_lowercase();
+    if !t.contains("context length") && !t.contains("context_length") {
+        return None;
+    }
+    // Anchor to the phrases rather than picking the biggest numbers: the message
+    // also states "a total of at least 32769", which is larger than the window
+    // and was being read as the window.
+    let limit = number_after(&t, "context length is")?;
+    let prompt = number_after(&t, "prompt contains at least")
+        .or_else(|| number_after(&t, "prompt contains"))?;
+    (prompt < limit).then_some((limit, prompt))
+}
+
+/// The first integer following `marker`.
+fn number_after(text: &str, marker: &str) -> Option<usize> {
+    let rest = &text[text.find(marker)? + marker.len()..];
+    let digits: String = rest
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// Render messages as a plain transcript for the summarizer.

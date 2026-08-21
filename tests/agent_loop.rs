@@ -735,3 +735,77 @@ async fn output_tokens_are_clamped_to_what_the_window_can_hold() {
     );
     assert!(asked >= 256, "but never clamped to nothing: {asked}");
 }
+
+/// A client that rejects the first request the way vLLM does, then succeeds.
+struct ContextLimitClient {
+    seen: Arc<Mutex<Vec<u32>>>,
+}
+
+#[async_trait]
+impl LlmClient for ContextLimitClient {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+        _sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        let asked = req.max_tokens.unwrap_or(0);
+        self.seen.lock().unwrap().push(asked);
+        if asked as usize + 24_577 > 32_768 {
+            anyhow::bail!(
+                "LLM HTTP 400 Bad Request: {{\"error\":{{\"message\":\"This model's maximum \
+                 context length is 32768 tokens. However, you requested {asked} output tokens \
+                 and your prompt contains at least 24577 input tokens, for a total of at least \
+                 {} tokens.\"}}}}",
+                asked as usize + 24_577
+            );
+        }
+        Ok(Completion { content: Some("fits now".into()), ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn a_request_that_cannot_fit_is_retried_with_the_servers_numbers() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Our own estimate cannot see the system prompt, the tool schemas or loaded
+    // skills, so on a resumed session it reads far under the truth and the
+    // clamp lets a doomed request through. The server knows both numbers.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(ContextLimitClient { seen: seen.clone() }),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        Some(8_192),
+        20,
+        3,
+        3,
+        32_768,
+        6,
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            ..Default::default()
+        },
+    );
+
+    let result = agent
+        .run_turn(&mut session, "write chapter 10", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(result.text, "fits now", "the retry succeeded: {:?}", result.outcome);
+    let asks = seen.lock().unwrap().clone();
+    assert_eq!(asks.len(), 2, "one rejection, one retry: {asks:?}");
+    assert_eq!(asks[0], 8_192, "first ask is what the config wanted");
+    assert!(
+        asks[1] as usize + 24_577 <= 32_768,
+        "the retry fits inside the window: {asks:?}"
+    );
+}
