@@ -35,6 +35,26 @@ a local server: two resident models can exhaust unified memory. Straddling
 (local workers, remote judge) avoids it, as does `--no-synthesis` plus a
 second command with the models swapped.
 
+## Comparing thinking levels
+
+`--think LEVEL` runs the suite at a thinking setting: `minimal|low|medium|high`,
+a token budget, `on`, or `off`. `--fast` is the same as `--think off`.
+
+```sh
+python3 run.py --modes raw --think off  --json off.json
+python3 run.py --modes raw --think low  --json low.json
+```
+
+Each row records `gen_tokens`, the `reasoning_tokens` inside them, and elapsed
+seconds, and the summary prints tokens per *solved* task. That last number is
+the one to compare: totals reward doing nothing, and a level that fails more
+often looks cheap.
+
+Two things to hold steady while comparing. Effort levels on OpenRouter are a
+fraction of `max_tokens` (roughly 20% for `low`, 80% for `high`), so changing
+`max-tokens` between runs changes what `low` means. And OpenRouter routes across
+backends whose defaults differ, so `--think default` is not one setting.
+
 ## Run
 
 ```sh

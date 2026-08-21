@@ -83,7 +83,7 @@ def setup_workdir(task: dict) -> Path:
 
 
 def parse_events(stdout: str) -> dict:
-    model_calls = tool_calls = gen_tokens = ctx_peak = 0
+    model_calls = tool_calls = gen_tokens = ctx_peak = reasoning_tokens = 0
     outcome = None
     for line in stdout.splitlines():
         line = line.strip()
@@ -97,13 +97,17 @@ def parse_events(stdout: str) -> dict:
         if t == "usage":
             model_calls += 1
             gen_tokens += e.get("completion_tokens", 0)
+            # Reasoning is part of completion_tokens; splitting it out is what
+            # tells you whether a thinking level cost anything.
+            reasoning_tokens += e.get("reasoning_tokens", 0)
             ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
         elif t == "tool_call":
             tool_calls += 1
         elif t == "turn_complete":
             outcome = e.get("outcome")
     return {"model_calls": model_calls, "tool_calls": tool_calls,
-            "gen_tokens": gen_tokens, "ctx_peak": ctx_peak, "outcome": outcome}
+            "gen_tokens": gen_tokens, "reasoning_tokens": reasoning_tokens,
+            "ctx_peak": ctx_peak, "outcome": outcome}
 
 
 def validate(workdir: Path, cmd: str) -> bool:
@@ -114,7 +118,7 @@ def validate(workdir: Path, cmd: str) -> bool:
 
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
-            fast: bool = False) -> dict:
+            fast: bool = False, think: str | None = None) -> dict:
     workdir = setup_workdir(task)
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
@@ -124,6 +128,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
         cmd += ["--model", model]
     if fast:
         cmd.append("--fast")
+    elif think:
+        cmd += ["--think", think]
     if mode == "workers":
         # `spawn` is a subcommand, so its args come after it. The task declares
         # how many workers it decomposes into; a task that doesn't decompose
@@ -135,9 +141,11 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
         cmd += ["--until", task["validate"]]
     cmd.append(task["goal"])
 
-    row = {"task": task["name"], "mode": mode, "fast": fast, "passed": False,
-           "model_calls": 0, "tool_calls": 0, "gen_tokens": 0, "outcome": None,
-           "elapsed": 0.0, "error": None}
+    # `thinking` labels the row: "off" (--fast), a level, or "default".
+    thinking = "off" if fast else (think or "default")
+    row = {"task": task["name"], "mode": mode, "fast": fast, "thinking": thinking,
+           "passed": False, "model_calls": 0, "tool_calls": 0, "gen_tokens": 0,
+           "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None}
     t0 = time.time()
     try:
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
@@ -175,6 +183,10 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=1,
                     help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
+    ap.add_argument("--think", metavar="LEVEL",
+                    help="thinking level to test: minimal|low|medium|high, a token "
+                         "budget, on, or off. Mutually exclusive with --fast, which "
+                         "is the same as --think off.")
     ap.add_argument("--fast", action="store_true",
                     help="run with thinking off (--fast); pair with --modes to ask "
                          "whether the loop can substitute for the model's deliberation")
@@ -208,14 +220,16 @@ def main() -> int:
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
                 if args.dry_run:
                     wd = setup_workdir(task)
-                    # Unattended and trusted: the approval gate has nobody to ask here, and a
-    # refusal would score as a task failure rather than the safety behaviour it
-    # is. Real interactive runs prompt instead.
-    cmd = [binp, "--mode", "json", "--approve-all"]
+                    # Unattended and trusted: the approval gate has nobody
+                    # to ask here, and a refusal would score as a task failure
+                    # rather than the safety behaviour it is.
+                    cmd = [binp, "--mode", "json", "--approve-all"]
                     if args.model:
                         cmd += ["--model", args.model]
                     if args.fast:
                         cmd.append("--fast")
+                    elif args.think:
+                        cmd += ["--think", args.think]
                     if mode == "workers":
                         cmd += ["spawn", "-n", str(task["workers"])]
                         if args.worker_model:
@@ -233,8 +247,11 @@ def main() -> int:
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"
                 extra = f" ({row['error']})" if row["error"] else ""
+                reason = (f" reason_tok={row['reasoning_tokens']}"
+                          if row["reasoning_tokens"] else "")
                 print(f"  {mark}  {row['elapsed']}s calls={row['tool_calls']} "
-                      f"gen_tok={row['gen_tokens']} outcome={row['outcome']}{extra}",
+                      f"gen_tok={row['gen_tokens']}{reason} "
+                      f"outcome={row['outcome']}{extra}",
                       file=sys.stderr)
                 # Write partial results after each run so a killed run isn't lost.
                 if args.json:
@@ -271,7 +288,13 @@ def main() -> int:
             continue
         passed = sum(1 for r in mr if r["passed"])
         gen = sum(r["gen_tokens"] for r in mr)
-        print(f"  {mode:<8} {passed}/{len(mr)} passed   total gen_tokens={gen}")
+        reason = sum(r["reasoning_tokens"] for r in mr)
+        secs = sum(r["elapsed"] for r in mr)
+        # Cost per *solved* task is the number that decides whether a thinking
+        # level is worth it; totals reward doing nothing.
+        per = round(gen / passed) if passed else "-"
+        print(f"  {mode:<8} {passed}/{len(mr)} passed   gen_tokens={gen} "
+              f"(reasoning={reason}, {per}/solved)   {round(secs)}s")
 
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=2))
