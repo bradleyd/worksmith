@@ -16,3 +16,6 @@ skills/book-writer/
 
 # local working copy of the bradleyd/homebrew-worksmith tap repo
 .tap/
+
+# Python bytecode from the eval helpers
+evals/__pycache__/

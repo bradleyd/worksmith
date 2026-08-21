@@ -46,6 +46,24 @@ Runs pass `--approve-all` and `--trust-project`, because nobody is there to
 answer either prompt and the project config in the workdir is one this harness
 wrote itself. Real interactive runs prompt for both.
 
+## Local comparison runs
+
+`./local-compare.sh` runs two phases in the only order that fits in memory:
+hosted loop with local workers, then the local 27B doing everything. oMLX never
+unloads a model on its own (`idle_timeout_seconds: null`), so each phase unloads
+first and refuses to start if the model will not fit, listing what to close.
+
+The memory arithmetic and admin calls live in `omlx.py` and are tested:
+
+```sh
+cd evals && python3 -m unittest omlx_test
+```
+
+That split exists because the logic collected three bugs in an afternoon while
+it lived in shell — an unload whose error went to `/dev/null`, bearer auth
+against an endpoint that wants a login session, and a hand-picked threshold that
+refused a run which would have fit. `bash -n` catches none of those.
+
 ## Timeouts
 
 `--timeout` (default 240s) is per run, and a task may raise it with `timeout =`
