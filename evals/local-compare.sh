@@ -89,7 +89,12 @@ unload_all() {
     code=${body##*$'\n'}
     case "$code" in
       2*) echo "unloaded $m" ;;
-      404) echo "unload $m: 404 (not loaded, or the id differs from /v1/models)" ;;
+      # "Model not loaded" is the answer when there is nothing to free, which is
+      # the normal case at the start of a phase. Not a failure.
+      400|404) case "$body" in
+                 *"not loaded"*) echo "$m: already free" ;;
+                 *) echo "unload $m: HTTP $code ${body%$'\n'*}" ;;
+               esac ;;
       401) echo "unload $m: 401 — the admin session was not accepted" ;;
       *)   echo "unload $m: HTTP $code ${body%$'\n'*}" ;;
     esac
