@@ -50,7 +50,11 @@ require_free() { # require_free <gb> <what>
   have=$(free_gb)
   echo "free memory: ${have} GB (need ~${need} GB for ${what})"
   if awk -v h="$have" -v n="$need" 'BEGIN { exit !(h < n) }'; then
-    echo "REFUSING: not enough free memory. Close something, or run the phases separately." >&2
+    echo "REFUSING: not enough free memory for ${what}." >&2
+    echo "Biggest processes right now:" >&2
+    ps -Ao rss,comm | awk '$1 > 400000 { printf "  %.1f GB  %s\n", $1/1048576, $2 }' \
+      | sort -rn | head -6 >&2
+    echo "Close some of those and re-run, or run this phase on its own." >&2
     return 1
   fi
 }
@@ -76,7 +80,7 @@ python3 run.py --model "$HOSTED" --worker-model "omlx/$LOCAL_SMALL" \
 
 banner "phase 2: local 27B for everything"
 unload_all
-require_free 22 "the 27B" || exit 1
+require_free 21 "the 27B" || exit 1
 python3 run.py --model "omlx/$LOCAL_BIG" --modes raw,guided --repeat "$REPEAT" \
   --json "$OUT/p2-local-27b.json"
 
