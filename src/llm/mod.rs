@@ -121,6 +121,34 @@ pub struct Usage {
     pub reasoning_tokens: u32,
 }
 
+/// Marker attached to failures that are worth trying again: a dropped
+/// connection, a timeout, a 429, a 5xx. Carried as the *source* of the error so
+/// the message the user sees stays the real one.
+#[derive(Debug)]
+pub struct Transient;
+
+impl std::fmt::Display for Transient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "temporary failure")
+    }
+}
+
+impl std::error::Error for Transient {}
+
+/// Whether an error carries the [`Transient`] marker, or is a transport failure
+/// reqwest already knows is one. A tunnel that goes away while the agent is
+/// mid-run is the common case and it is entirely recoverable.
+pub fn is_transient(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if cause.downcast_ref::<Transient>().is_some() {
+            return true;
+        }
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
+    })
+}
+
 /// A request for one model completion.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {

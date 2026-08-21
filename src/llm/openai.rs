@@ -158,6 +158,11 @@ impl LlmClient for OpenAiCompatClient {
                     self.dialect_source.describe(),
                 );
             }
+            // 429 and 5xx are the server saying "not now", not "never".
+            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(anyhow::Error::new(crate::llm::Transient)
+                    .context(format!("LLM HTTP {status}: {text}")));
+            }
             bail!("LLM HTTP {status}: {text}");
         }
 

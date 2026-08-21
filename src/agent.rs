@@ -9,8 +9,9 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -147,6 +148,11 @@ const MAX_EMPTY_COMPLETIONS: u32 = 2;
 /// Slack between our token estimate and the server's tokenizer. Ours counts
 /// characters; theirs counts tokens, and only one of them decides.
 const CONTEXT_RESERVE: usize = 512;
+
+/// How many times to send a request that failed for transport reasons. Three
+/// attempts covers a tunnel reconnecting without papering over a server that is
+/// genuinely down.
+const TRANSPORT_ATTEMPTS: usize = 3;
 
 /// Never clamp output to nothing. If the window is this tight the turn is
 /// already in trouble and the server's own error is more useful than a request
@@ -727,24 +733,66 @@ impl Agent {
         req: ChatRequest,
         cancel: &CancellationToken,
     ) -> Result<crate::llm::Completion> {
-        let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
-        let bus = self.bus.clone();
-        let forwarder = tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    StreamEvent::TextDelta(t) => bus.emit(Event::MessageDelta { text: t }),
-                    StreamEvent::ReasoningDelta(t) => bus.emit(Event::Thinking { text: t }),
-                    StreamEvent::Warning(message) => bus.emit(Event::Warning { message }),
-                    _ => {}
+        for attempt in 0..TRANSPORT_ATTEMPTS {
+            let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
+            let bus = self.bus.clone();
+            // Retrying after the model has already put words on the screen would
+            // print the answer twice, so a failure mid-stream is final.
+            let streamed = Arc::new(AtomicBool::new(false));
+            let saw_output = streamed.clone();
+            let forwarder = tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    match ev {
+                        StreamEvent::TextDelta(t) => {
+                            saw_output.store(true, Ordering::Relaxed);
+                            bus.emit(Event::MessageDelta { text: t });
+                        }
+                        StreamEvent::ReasoningDelta(t) => {
+                            saw_output.store(true, Ordering::Relaxed);
+                            bus.emit(Event::Thinking { text: t });
+                        }
+                        StreamEvent::Warning(message) => bus.emit(Event::Warning { message }),
+                        _ => {}
+                    }
                 }
-            }
-        });
+            });
 
-        self.emit(session, Event::ModelCallStarted);
-        let completion = self.client.stream(req, tx, cancel.clone()).await;
-        let _ = forwarder.await;
-        self.emit(session, Event::ModelCallFinished);
-        completion
+            self.emit(session, Event::ModelCallStarted);
+            let completion = self.client.stream(req.clone(), tx, cancel.clone()).await;
+            let _ = forwarder.await;
+            self.emit(session, Event::ModelCallFinished);
+
+            let err = match completion {
+                Ok(c) => return Ok(c),
+                Err(e) => e,
+            };
+
+            let last = attempt + 1 >= TRANSPORT_ATTEMPTS;
+            if last
+                || cancel.is_cancelled()
+                || streamed.load(Ordering::Relaxed)
+                || !crate::llm::is_transient(&err)
+            {
+                return Err(err);
+            }
+
+            // An ssh tunnel that drops after an idle stretch, a server still
+            // loading, a 429: none of these mean the turn is over. Backing off
+            // and asking again is what a person would do.
+            let wait = Duration::from_secs(2u64.pow(attempt as u32));
+            self.emit(session, Event::Warning {
+                message: format!(
+                    "model call failed ({}); retrying in {}s",
+                    truncate_error(&err),
+                    wait.as_secs()
+                ),
+            });
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = cancel.cancelled() => return Err(err),
+            }
+        }
+        unreachable!("the loop returns on its last attempt")
     }
 
     /// One-shot helper completion: no tools, no session, no streaming to the
@@ -834,6 +882,17 @@ impl Agent {
             });
         }
         Ok(())
+    }
+}
+
+/// The first line of an error chain, short enough for one notice.
+fn truncate_error(err: &anyhow::Error) -> String {
+    let text = err.to_string();
+    let line = text.lines().next().unwrap_or("").trim().to_string();
+    if line.chars().count() > 90 {
+        format!("{}…", line.chars().take(89).collect::<String>())
+    } else {
+        line
     }
 }
 

@@ -99,6 +99,84 @@ fn build_agent_with_client(
     )
 }
 
+/// Fails the first `fail_times` calls the way a dropped tunnel does, then
+/// behaves. Counts calls so a test can prove the retry happened.
+struct FlakyClient {
+    fail_times: Mutex<usize>,
+    calls: Arc<Mutex<usize>>,
+    transient: bool,
+}
+
+#[async_trait]
+impl LlmClient for FlakyClient {
+    async fn stream(
+        &self,
+        _req: ChatRequest,
+        _sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        *self.calls.lock().unwrap() += 1;
+        let mut left = self.fail_times.lock().unwrap();
+        if *left > 0 {
+            *left -= 1;
+            return if self.transient {
+                Err(anyhow::Error::new(worksmith::llm::Transient)
+                    .context("connection error: Connection reset by peer (os error 54)"))
+            } else {
+                Err(anyhow::anyhow!("LLM HTTP 401: bad key"))
+            };
+        }
+        Ok(Completion { content: Some("done".into()), ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn a_dropped_connection_is_retried_not_fatal() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // An ssh tunnel that times out mid-run used to end the turn outright.
+    let calls = Arc::new(Mutex::new(0));
+    let client = FlakyClient {
+        fail_times: Mutex::new(2),
+        calls: calls.clone(),
+        transient: true,
+    };
+    let agent = build_agent_with_client(Arc::new(client), dir.path(), 3);
+
+    let result = agent
+        .run_turn(&mut session, "hello", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
+    assert_eq!(*calls.lock().unwrap(), 3, "two failures should cost two retries");
+}
+
+#[tokio::test]
+async fn a_rejected_key_is_not_retried() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Retrying a 401 just spends the user's time three times over.
+    let calls = Arc::new(Mutex::new(0));
+    let client = FlakyClient {
+        fail_times: Mutex::new(2),
+        calls: calls.clone(),
+        transient: false,
+    };
+    let agent = build_agent_with_client(Arc::new(client), dir.path(), 3);
+
+    let result = agent
+        .run_turn(&mut session, "hello", "system", None, CancellationToken::new())
+        .await;
+
+    assert!(result.is_err() || !matches!(result.unwrap().outcome, TurnOutcome::Done));
+    assert_eq!(*calls.lock().unwrap(), 1, "a permanent error should be asked once");
+}
+
 #[tokio::test]
 async fn validation_drives_replan_until_pass() {
     common::isolate_home();
