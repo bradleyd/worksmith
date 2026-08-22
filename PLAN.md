@@ -1103,6 +1103,62 @@ best-effort.
 - Is `required` on by default for `worksmith spawn` (headless, unattended) even
   when the interactive default is best-effort?
 
+## 10c. Skill sections (progressive disclosure, second level) — planned 2026-08-22
+
+The failure that motivates this, from a real chapter-writing session on a 32k
+window: the two reference files under `book-writer` were read whole eight times
+each. Compaction deleted them as conversation, the model (rightly) fetched them
+again, and about a quarter of the window cycled through the same 10kB of text.
+Pinning fixed the SKILL.md body; the references are still fetched by whole-file
+`read`.
+
+**Rejected: an index database (sqlite, embeddings).** It solves retrieval, which
+is not the problem — these are small, structured files the model can already
+grep. It adds a build step, a staleness problem (edit a skill, the index lies),
+and a store the user cannot read or diff. The filesystem is the database;
+markdown headings are the schema. RAG earns its complexity at thousands of
+documents, not three files.
+
+**Design: headings are sections, the TOC is pinned, sections are fetched.**
+
+1. **Loading a skill pins its body plus a generated map.** After the SKILL.md
+   body, the pinned block lists every reference file with its headings:
+
+       references/writing-rules.md
+         # Writing rules: voice, listings, and formatting
+         ### 8. Writing Style Rules
+         ### 9. Handling Special Characters
+         ### 10. Preserving Existing Formatting
+
+   The map is ~40 tokens per file. The model now knows what exists without
+   holding any of it — the same catalog→body split the Skills spec uses,
+   applied one level down. This *is* the "teach the model" step: the map sits
+   in the system prompt next to the instruction to fetch before writing.
+
+2. **`skill` gains a `section` argument.** `skill(name, section: "Writing
+   Style Rules")` returns that heading's slice (to the next heading of equal
+   or shallower depth). Matching is case-insensitive substring over the map;
+   ambiguity returns the candidates, not an error. A section is a few hundred
+   tokens against 6kB for the file.
+
+3. **Sections are NOT pinned, and that is the point.** They land as ordinary
+   tool results, compaction may eat them, and re-fetching is cheap and exact —
+   a 300-token round trip instead of a 6kB read. Pin the map, rent the
+   content. (The body pin stays capped; only standing instruction is pinned.)
+
+4. **The cap message teaches the same habit.** An oversized `read` of a file
+   *with headings* should list them in the truncation notice, so even outside
+   skills the model learns "fetch the section, not the file".
+
+Order of work: (2) is useful alone; (1) makes it discoverable; (4) is polish.
+Fits before workflows (§8a) — workers inherit the same tool, so a worker sent
+to "apply writing rules to ch10 §3" fetches one section instead of the pack.
+
+**Measure before extending:** re-read count per session for skill files is in
+the JSONL trace (yesterday: 8×). If sections drop it to ~1× the design is
+done; embeddings-grade retrieval stays rejected until a real session shows
+grep-over-headings failing to find something.
+
 ## 11. Open decisions
 
 1. `rig` vs hand-rolled provider layer (M0 decides). Rig's OpenAI-compat
