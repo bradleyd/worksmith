@@ -119,10 +119,24 @@ impl Skill {
     /// Find the reference section matching `query`, case-insensitively, with
     /// leading list numbers stripped ("writing style" hits
     /// "## 8. Writing Style Rules").
+    ///
+    /// A query that names a reference *file* is answered with that file's
+    /// headings. The first live run (think:off) did exactly this — the file
+    /// paths are the most prominent lines of the map, so a weak config grabbed
+    /// one — and the miss sent it back to whole-file reads, the exact behavior
+    /// sections exist to replace. Meet the model where it reached.
     pub fn find_section(&self, query: &str) -> SectionMatch {
         let want = query.trim().to_lowercase();
         if want.is_empty() {
             return SectionMatch::None;
+        }
+        for path in self.reference_files() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            if want.ends_with(&*name) || name == want {
+                let rel = path.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(path.clone());
+                let hs = std::fs::read_to_string(&path).map(|t| headings(&t)).unwrap_or_default();
+                return SectionMatch::File { file: rel, headings: hs };
+            }
         }
         let mut hits: Vec<(PathBuf, String, String)> = Vec::new();
         for path in self.reference_files() {
@@ -168,6 +182,9 @@ pub enum SectionMatch {
     /// Ambiguity returns the candidates, not a guess: a model writing
     /// confidently from the wrong section damages the work invisibly.
     Many(Vec<(PathBuf, String)>),
+    /// The query named a whole reference file; answer with its headings so the
+    /// next call can name one.
+    File { file: PathBuf, headings: Vec<(usize, String)> },
 }
 
 /// Markdown headings (level, title) of `text`, `#` through `####`, skipping
@@ -652,6 +669,22 @@ mod tests {
         let (_g, skill) = skill_with_references(&[("notes.md", "just prose, no structure")]);
         assert_eq!(skill.map(), "");
         assert!(matches!(skill.find_section("anything"), SectionMatch::None));
+    }
+
+    #[test]
+    fn a_file_path_query_returns_that_files_headings() {
+        // The first live run (think:off 27B) passed the map's file paths as
+        // `section`. The miss sent it straight back to whole-file reads.
+        let (_g, skill) = skill_with_references(&[("rules.md", DOC)]);
+        match skill.find_section("references/rules.md") {
+            SectionMatch::File { file, headings } => {
+                assert_eq!(file, std::path::PathBuf::from("references/rules.md"));
+                assert!(headings.iter().any(|(_, t)| t.contains("Writing Style Rules")));
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+        // Bare filename works too.
+        assert!(matches!(skill.find_section("rules.md"), SectionMatch::File { .. }));
     }
 
     #[test]

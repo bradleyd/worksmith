@@ -115,6 +115,16 @@ fn fetch_section(skill: &crate::skill::Skill, query: &str) -> ToolOutput {
             }
             ToolOutput::ok(out)
         }
+        SectionMatch::File { file, headings } => {
+            let mut out = format!(
+                "`{}` is a file, not a section. Its sections — fetch one by heading:\n",
+                file.display()
+            );
+            for (level, title) in headings {
+                out.push_str(&format!("{} {title}\n", "#".repeat(level)));
+            }
+            ToolOutput::ok(out)
+        }
         SectionMatch::None => {
             let map = skill.map();
             ToolOutput::error(if map.is_empty() {
