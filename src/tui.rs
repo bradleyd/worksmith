@@ -216,6 +216,10 @@ struct App {
     input: String,
     /// Cursor position as a char index into `input` (0..=char_count).
     cursor: usize,
+    /// Where the current session lives, cached so read-only commands
+    /// (/history) never touch the session lock — the agent holds that lock for
+    /// the whole turn, and awaiting it from the event loop froze the TUI.
+    session_path: std::path::PathBuf,
     /// Submitted-prompt history and the current navigation position.
     history: Vec<String>,
     history_idx: Option<usize>,
@@ -325,6 +329,7 @@ impl App {
             items: Vec::new(),
             input: String::new(),
             cursor: 0,
+            session_path: std::path::PathBuf::new(),
             history: Vec::new(),
             history_idx: None,
             draft: String::new(),
@@ -930,6 +935,7 @@ async fn run_loop(
         );
 
     let mut app = App::new(model, context_limit, validate_cmd);
+    app.session_path = session.lock().await.path().to_path_buf();
     app.insert_escape = config.insert_escape();
     app.prices = model_settings.clone();
     app.fanout_auto = fanout_auto;
@@ -1753,8 +1759,15 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             );
         }
         "new" => {
+            if app.running {
+                // The turn holds the session lock; awaiting it here would hang
+                // the event loop until the turn ends (same freeze /history had).
+                app.status = "can't start a new session while a turn is running".into();
+                return Ok(true);
+            }
             let mut s = session.lock().await;
             *s = Session::create(cwd)?;
+            app.session_path = s.path().to_path_buf();
             app.items.clear();
             app.cur_assistant = None;
             app.cur_thinking = None;
@@ -1842,9 +1855,13 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         // reading the provider's logs and correlating timestamps by hand.
         "history" | "trace" => {
             let id = parts.next().map(str::to_string);
+            // Never take the session lock here: the agent holds it for the
+            // whole turn, and this runs on the event loop. /history froze the
+            // TUI mid-run for exactly that reason. The JSONL is append-only,
+            // so reading the file while the turn writes it is safe.
             let path = match &id {
                 Some(id) => crate::session::Session::path_for_id(id).ok(),
-                None => Some(session.lock().await.path().to_path_buf()),
+                None => Some(app.session_path.clone()),
             };
             let Some(path) = path else {
                 app.push(Kind::Error, "no such session".to_string());
