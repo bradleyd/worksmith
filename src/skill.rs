@@ -49,6 +49,206 @@ impl Skill {
         let text = std::fs::read_to_string(&self.path)?;
         Ok(strip_frontmatter(&text).to_string())
     }
+
+    /// The prose reference files, sorted. `scripts/` and `assets/` are not
+    /// prose and are deliberately not walked.
+    pub fn reference_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.join("references"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "md"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    /// The generated map of this skill's reference headings — the second level
+    /// of progressive disclosure. Nobody authors this; it is read off the
+    /// headings that already exist, so it cannot drift stale. Empty string if
+    /// there is nothing to map.
+    pub fn map(&self) -> String {
+        let per_file: Vec<(PathBuf, Vec<(usize, String)>)> = self
+            .reference_files()
+            .into_iter()
+            .filter_map(|p| {
+                let text = std::fs::read_to_string(&p).ok()?;
+                Some((p, headings(&text)))
+            })
+            .collect();
+        if per_file.iter().all(|(_, h)| h.is_empty()) {
+            return String::new();
+        }
+
+        // Bounded: a skill with two hundred headings gets its deepest level
+        // dropped first, then an explicit "…more" line — never a silent cut.
+        // Depth is measured *per file*, relative to its shallowest heading: a
+        // file that jumps straight from `#` to `###` (writing-rules.md does)
+        // would otherwise lose its entire structure while a sibling file that
+        // uses `##` kept all of its own.
+        for max_depth in (1..=4).rev() {
+            let mut out = format!("<skill-map name=\"{}\">\n", self.name);
+            for (path, hs) in &per_file {
+                let rel = path.strip_prefix(&self.dir).unwrap_or(path);
+                out.push_str(&format!("{}\n", rel.display()));
+                let base = hs.iter().map(|(l, _)| *l).min().unwrap_or(1);
+                let shown: Vec<_> =
+                    hs.iter().filter(|(l, _)| *l - base < max_depth).collect();
+                let dropped = hs.len() - shown.len();
+                for (level, title) in shown {
+                    out.push_str(&format!("  {} {}\n", "#".repeat(*level), title));
+                }
+                if dropped > 0 {
+                    out.push_str(&format!("  …{dropped} more, grep the file\n"));
+                }
+            }
+            out.push_str(&format!(
+                "Fetch one section: skill(name: \"{}\", section: \"<heading>\")\n</skill-map>",
+                self.name
+            ));
+            if out.len() <= MAX_MAP_CHARS || max_depth == 1 {
+                return out;
+            }
+        }
+        unreachable!("the loop returns at max_depth == 1")
+    }
+
+    /// Find the reference section matching `query`, case-insensitively, with
+    /// leading list numbers stripped ("writing style" hits
+    /// "## 8. Writing Style Rules").
+    pub fn find_section(&self, query: &str) -> SectionMatch {
+        let want = query.trim().to_lowercase();
+        if want.is_empty() {
+            return SectionMatch::None;
+        }
+        let mut hits: Vec<(PathBuf, String, String)> = Vec::new();
+        for path in self.reference_files() {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (level, title) in headings(&text) {
+                if normalize_heading(&title).contains(&want) {
+                    hits.push((path.clone(), title.clone(), section_slice(&text, level, &title)));
+                }
+            }
+        }
+        match hits.len() {
+            0 => SectionMatch::None,
+            1 => {
+                let (path, heading, content) = hits.remove(0);
+                let rel = path.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(path);
+                SectionMatch::One { file: rel, heading, content }
+            }
+            _ => SectionMatch::Many(
+                hits.into_iter()
+                    .map(|(p, h, _)| {
+                        (p.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(p), h)
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Cap on a generated skill map. It rides in the pinned prompt for the rest of
+/// the session, so it obeys the same rule as the catalog: a per-turn tax.
+/// Sized against the two real installed skills: at 1kB the map cut
+/// "Writing Style Rules" — the heading whose 8× re-read motivated the feature.
+/// 2kB (~500 tokens) shows both skills whole.
+pub const MAX_MAP_CHARS: usize = 2_048;
+
+/// Result of a section lookup.
+#[derive(Debug)]
+pub enum SectionMatch {
+    None,
+    One { file: PathBuf, heading: String, content: String },
+    /// Ambiguity returns the candidates, not a guess: a model writing
+    /// confidently from the wrong section damages the work invisibly.
+    Many(Vec<(PathBuf, String)>),
+}
+
+/// Markdown headings (level, title) of `text`, `#` through `####`, skipping
+/// fenced code blocks — a `# comment` inside a ```bash fence is not a heading.
+pub fn headings(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("```") {
+            fence = Some("```");
+            continue;
+        }
+        if trimmed.starts_with("~~~") {
+            fence = Some("~~~");
+            continue;
+        }
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        if (1..=4).contains(&hashes)
+            && let Some(title) = line[hashes..].strip_prefix(' ')
+        {
+            out.push((hashes, title.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// Lowercased, with a leading list number dropped: "8. Writing Style Rules" →
+/// "writing style rules".
+fn normalize_heading(title: &str) -> String {
+    let t = title.trim();
+    let rest = t
+        .split_once(". ")
+        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .map(|(_, rest)| rest)
+        .unwrap_or(t);
+    rest.to_lowercase()
+}
+
+/// The slice from the heading `title` (at `level`) to the next heading of equal
+/// or shallower depth, fence-aware for the same reason [`headings`] is.
+fn section_slice(text: &str, level: usize, title: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut fence: Option<&str> = None;
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let in_fence = fence.is_some();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+        } else if trimmed.starts_with("```") {
+            fence = Some("```");
+        } else if trimmed.starts_with("~~~") {
+            fence = Some("~~~");
+        }
+        if !in_fence && fence.is_none() {
+            let hashes = line.chars().take_while(|c| *c == '#').count();
+            if (1..=4).contains(&hashes)
+                && let Some(t) = line[hashes..].strip_prefix(' ')
+            {
+                if inside && hashes <= level {
+                    break;
+                }
+                if !inside && hashes == level && t.trim() == title {
+                    inside = true;
+                }
+            }
+        }
+        if inside {
+            out.push(line);
+        }
+    }
+    out.join("\n")
 }
 
 /// Every skill visible from a project, nearest definition winning.
@@ -363,6 +563,113 @@ fn unquote(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DOC: &str = "# Writing rules\n\nintro\n\n```bash\n# not a heading\necho hi\n```\n\n## 8. Writing Style Rules\nshort sentences\n\n### Detail\nnested detail\n\n## 9. Handling Special Characters\nescape them\n";
+
+    #[test]
+    fn headings_skip_code_fences() {
+        let hs = headings(DOC);
+        let titles: Vec<&str> = hs.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Writing rules",
+                "8. Writing Style Rules",
+                "Detail",
+                "9. Handling Special Characters"
+            ],
+            "the # inside the bash fence must not appear"
+        );
+        assert_eq!(hs[0].0, 1);
+        assert_eq!(hs[2].0, 3);
+    }
+
+    #[test]
+    fn a_section_slice_keeps_its_subsections_and_stops_at_a_peer() {
+        let slice = section_slice(DOC, 2, "8. Writing Style Rules");
+        assert!(slice.contains("short sentences"));
+        assert!(slice.contains("### Detail"), "nested stays inside its parent");
+        assert!(!slice.contains("escape them"), "the next peer heading ends it");
+    }
+
+    #[test]
+    fn the_last_section_runs_to_end_of_file() {
+        let slice = section_slice(DOC, 2, "9. Handling Special Characters");
+        assert!(slice.contains("escape them"));
+    }
+
+    #[test]
+    fn numbered_headings_match_without_their_numbers() {
+        assert_eq!(normalize_heading("8. Writing Style Rules"), "writing style rules");
+        assert_eq!(normalize_heading("Plain Title"), "plain title");
+        // "v2. something" is not a list number; leave it alone.
+        assert_eq!(normalize_heading("v2. Something"), "v2. something");
+    }
+
+    fn skill_with_references(files: &[(&str, &str)]) -> (tempfile::TempDir, Skill) {
+        let dir = tempfile::tempdir().unwrap();
+        let refs = dir.path().join("references");
+        std::fs::create_dir_all(&refs).unwrap();
+        for (name, content) in files {
+            std::fs::write(refs.join(name), content).unwrap();
+        }
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "---\nname: t\ndescription: d\n---\nbody").unwrap();
+        let skill = Skill {
+            name: "t".into(),
+            description: "d".into(),
+            dir: dir.path().to_path_buf(),
+            path,
+            allowed_tools: None,
+        };
+        (dir, skill)
+    }
+
+    #[test]
+    fn the_map_lists_files_and_headings_and_teaches_the_fetch() {
+        let (_g, skill) = skill_with_references(&[("rules.md", DOC)]);
+        let map = skill.map();
+        assert!(map.contains("references/rules.md"), "{map}");
+        assert!(map.contains("## 8. Writing Style Rules"));
+        assert!(map.contains("skill(name: \"t\", section:"), "the usage line is the teaching");
+    }
+
+    #[test]
+    fn a_bloated_map_drops_depth_before_width() {
+        let mut big = String::from("# Top\n");
+        for i in 0..120 {
+            big.push_str(&format!("### Deep section number {i} with a long title\n"));
+        }
+        let (_g, skill) = skill_with_references(&[("big.md", &big)]);
+        let map = skill.map();
+        assert!(map.len() <= MAX_MAP_CHARS + 200, "bounded: {} chars", map.len());
+        assert!(map.contains("# Top"), "shallow survives");
+        assert!(map.contains("more, grep the file"), "the cut is named, never silent");
+    }
+
+    #[test]
+    fn headingless_references_mean_no_map_not_an_error() {
+        let (_g, skill) = skill_with_references(&[("notes.md", "just prose, no structure")]);
+        assert_eq!(skill.map(), "");
+        assert!(matches!(skill.find_section("anything"), SectionMatch::None));
+    }
+
+    #[test]
+    fn an_ambiguous_query_returns_candidates_not_a_guess() {
+        let (_g, skill) = skill_with_references(&[
+            ("a.md", "## Style Rules\nfrom a\n"),
+            ("b.md", "## Style Rules for Tables\nfrom b\n"),
+        ]);
+        match skill.find_section("style rules") {
+            SectionMatch::Many(c) => assert_eq!(c.len(), 2),
+            other => panic!("expected Many, got {other:?}"),
+        }
+        // A narrower query resolves.
+        match skill.find_section("for tables") {
+            SectionMatch::One { content, .. } => assert!(content.contains("from b")),
+            other => panic!("expected One, got {other:?}"),
+        }
+    }
 
     fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
         let d = dir.join(name);

@@ -127,3 +127,24 @@ async fn an_oversized_result_is_capped_and_says_so() {
     assert!(out.content.contains("not shown"), "{}", &out.content[out.content.len() - 200..]);
     assert!(out.content.contains("offset"), "and points at the way to get the rest");
 }
+
+/// When capped content has headings, the notice names them — turning "read it
+/// again" into "fetch the one section you need".
+#[tokio::test]
+async fn a_capped_read_of_structured_content_lists_its_headings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = String::new();
+    for i in 0..30 {
+        doc.push_str(&format!("## Rule {i}\n{}\n", "prose ".repeat(120)));
+    }
+    std::fs::write(dir.path().join("rules.md"), &doc).unwrap();
+
+    let registry = worksmith::tools::ToolRegistry::with_builtins();
+    let out = registry
+        .run("read", serde_json::json!({"path": "rules.md"}), &ctx(dir.path()))
+        .await;
+
+    assert!(out.content.contains("not shown"));
+    assert!(out.content.contains("organized under these headings"), "{}", &out.content[out.content.len().saturating_sub(400)..]);
+    assert!(out.content.contains("## Rule 0"));
+}
