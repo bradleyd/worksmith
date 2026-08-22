@@ -23,7 +23,11 @@ use worksmith::validation::CommandValidator;
 use worksmith::worker::{WorkerManager, WorkerStatus};
 
 #[derive(Parser, Debug)]
-#[command(name = "worksmith", version, about = "A minimal terminal coding-agent harness")]
+#[command(
+    name = "worksmith",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("WS_GIT_HASH"), ")"),
+    about = "A minimal terminal coding-agent harness"
+)]
 struct Args {
     #[command(subcommand)]
     cmd: Option<Cmd>,
