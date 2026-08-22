@@ -102,3 +102,28 @@ async fn doc_pandoc_round_trip_md_to_docx_and_back() {
     assert!(!back.is_error, "read failed: {}", back.content);
     assert!(back.content.contains("Hello from pandoc"), "round-trip lost text: {}", back.content);
 }
+
+/// No single tool result may take a fifth of the context window. A 25kB read
+/// was 6300 tokens, five of them filled a 32k window, and compaction can only
+/// drop such a message whole — after which the model reads it again.
+#[tokio::test]
+async fn an_oversized_result_is_capped_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = "x".repeat(40_000);
+    std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+
+    let registry = worksmith::tools::ToolRegistry::with_builtins();
+    let out = registry
+        .run("read", serde_json::json!({"path": "big.txt"}), &ctx(dir.path()))
+        .await;
+
+    assert!(!out.is_error, "a big file is readable, just not all at once");
+    assert!(
+        out.content.len() < worksmith::tools::MAX_TOOL_RESULT_BYTES + 500,
+        "capped: {} bytes",
+        out.content.len()
+    );
+    // Silence would leave the model reasoning as if it had seen the end.
+    assert!(out.content.contains("not shown"), "{}", &out.content[out.content.len() - 200..]);
+    assert!(out.content.contains("offset"), "and points at the way to get the rest");
+}

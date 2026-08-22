@@ -58,6 +58,38 @@ impl Default for ToolContext {
     }
 }
 
+/// The most one tool result may put into the conversation, in bytes.
+///
+/// A single 25kB `read` was 6300 tokens — a fifth of a 32k window in one
+/// message. Five of them left no room for anything else, and compaction cannot
+/// help with a message that big: it can only drop it whole, after which the
+/// model reads it again. Roughly 2000 tokens is enough to be useful and small
+/// enough that the window belongs to the work.
+pub const MAX_TOOL_RESULT_BYTES: usize = 8_000;
+
+/// Trim an oversized result and say so, in words that point at the fix.
+///
+/// Truncating silently is worse than the size: the model reasons about a file
+/// as if it had seen the end of it.
+fn cap(mut out: ToolOutput) -> ToolOutput {
+    if out.content.len() <= MAX_TOOL_RESULT_BYTES {
+        return out;
+    }
+    let omitted = out.content.len() - MAX_TOOL_RESULT_BYTES;
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while end > 0 && !out.content.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.content.truncate(end);
+    out.content.push_str(&format!(
+        "\n\n[…{omitted} more bytes not shown. This is a cap on how much one result may take \
+         from the context window, not the end of the content. Read the rest in slices with \
+         `offset`/`limit`, or narrow the command — searching for what you need beats pulling \
+         the whole thing in.]"
+    ));
+    out
+}
+
 /// The structured result of a tool run.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
@@ -144,7 +176,7 @@ impl ToolRegistry {
     /// model rather than crashing the turn).
     pub async fn run(&self, name: &str, args: Value, ctx: &ToolContext) -> ToolOutput {
         match self.tools.get(name) {
-            Some(tool) => tool.run(args, ctx).await,
+            Some(tool) => cap(tool.run(args, ctx).await),
             None => ToolOutput::error(format!("unknown tool: {name}")),
         }
     }

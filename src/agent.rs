@@ -490,6 +490,13 @@ impl Agent {
             // tool schemas or loaded skills, so on a resumed session it reads
             // far under the truth and the clamp lets a doomed request through.
             let mut attempt_tokens = max_tokens;
+            // Shrinking output answers "you asked for too much output". It
+            // answers nothing about a prompt that is itself too big, and this
+            // server reports a *lower bound* ("at least N input tokens") that
+            // grows by exactly as much as we give back — so shrinking in a loop
+            // chases its own tail. One shrink, then compact, then stop.
+            let mut shrunk = false;
+            let mut compacted_here = false;
             let completion = loop {
                 let req = ChatRequest {
                     model: self.model.clone(),
@@ -517,13 +524,36 @@ impl Agent {
                 // re-tripped on the very next request, forever: every step paid
                 // for a failed call to buy one step of progress.
                 let room = limit.saturating_sub(prompt).saturating_sub(CONTEXT_RESERVE);
-                if room < MIN_OUTPUT_TOKENS || attempt_tokens.is_some_and(|t| (t as usize) <= room)
-                {
-                    // Either there is no room to give back, or we already asked
-                    // for less than the room and the prompt itself is the
-                    // problem. Compaction is the only lever left.
-                    break Err(e);
+                let can_shrink = !shrunk
+                    && room >= MIN_OUTPUT_TOKENS
+                    && attempt_tokens.is_none_or(|t| (t as usize) > room);
+                if !can_shrink {
+                    // The prompt is the problem. Compaction is the only lever
+                    // left, so pull it here rather than failing the turn and
+                    // making the user hit continue.
+                    if compacted_here {
+                        break Err(e);
+                    }
+                    compacted_here = true;
+                    if let Err(ce) = self.compact(session).await {
+                        self.emit(session, Event::Error {
+                            message: format!("compaction failed: {ce}"),
+                        });
+                        break Err(e);
+                    }
+                    messages.truncate(1);
+                    messages.extend(session.messages().iter().cloned());
+                    let room = self
+                        .context_limit
+                        .saturating_sub(self.working_tokens(session))
+                        .saturating_sub(CONTEXT_RESERVE);
+                    attempt_tokens = self
+                        .max_tokens
+                        .map(|m| (m as usize).min(room).max(MIN_OUTPUT_TOKENS) as u32);
+                    shrunk = false;
+                    continue;
                 }
+                shrunk = true;
                 // Say it once per turn. It is a self-healing adjustment, and
                 // sixteen near-identical lines pushed the actual work off the
                 // screen. Every occurrence still goes to the session, so
@@ -869,6 +899,10 @@ impl Agent {
         }
 
         session.compact(&summary, split)?;
+        // The provider's last prompt count described a context that no longer
+        // exists. Keeping it made the clamp reserve room for messages we just
+        // deleted, and kept re-triggering compaction on a session already cut.
+        self.last_prompt_tokens.store(0, Ordering::Relaxed);
         let after = session.messages().len();
         let tokens_after = estimate_tokens(session.messages());
         self.emit(session, Event::Compaction {

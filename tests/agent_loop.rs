@@ -130,6 +130,60 @@ impl LlmClient for FlakyClient {
     }
 }
 
+/// Rejects every request the way vLLM does: with a *lower bound* on the prompt
+/// ("at least N"), derived from the limit and the output asked for. Give back
+/// 512 output tokens and the reported prompt grows by 512, so shrinking output
+/// in a loop chases its own tail.
+struct TightWindowClient {
+    calls: Arc<Mutex<usize>>,
+    /// Accept once the request asks for less than this much output.
+    accept_below: u32,
+}
+
+#[async_trait]
+impl LlmClient for TightWindowClient {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+        _sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        *self.calls.lock().unwrap() += 1;
+        let asked = req.max_tokens.unwrap_or(0);
+        if asked < self.accept_below {
+            return Ok(Completion { content: Some("done".into()), ..Default::default() });
+        }
+        anyhow::bail!(
+            "LLM HTTP 400 Bad Request: {{\"error\":{{\"message\":\"This model's maximum \
+             context length is 32768 tokens. However, you requested {asked} output tokens and \
+             your prompt contains at least {} input tokens, for a total of at least 32769 \
+             tokens.\"}}}}",
+            32769 - asked
+        )
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_bound_request_compacts_instead_of_shrinking_forever() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // A real run logged 441 of these warnings: each retry gave back 512 output
+    // tokens, the reported prompt grew by 512, and the turn died having never
+    // once tried making the prompt smaller.
+    let calls = Arc::new(Mutex::new(0));
+    let client = TightWindowClient { calls: calls.clone(), accept_below: 0 };
+    let agent = build_agent_with_client(Arc::new(client), dir.path(), 3);
+
+    let _ = agent
+        .run_turn(&mut session, "write chapter 10", "system", None, CancellationToken::new())
+        .await;
+
+    let n = *calls.lock().unwrap();
+    assert!(n <= 4, "one shrink, one compaction, then stop — not {n} attempts");
+}
+
 #[tokio::test]
 async fn a_dropped_connection_is_retried_not_fatal() {
     common::isolate_home();
