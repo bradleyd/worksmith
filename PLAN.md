@@ -1150,9 +1150,73 @@ documents, not three files.
    *with headings* should list them in the truncation notice, so even outside
    skills the model learns "fetch the section, not the file".
 
-Order of work: (2) is useful alone; (1) makes it discoverable; (4) is polish.
-Fits before workflows (§8a) — workers inherit the same tool, so a worker sent
-to "apply writing rules to ch10 §3" fetches one section instead of the pack.
+### Mechanics (planned 2026-08-22)
+
+**Nobody authors a TOC.** The map is generated at load time from headings that
+already exist. A hand-maintained index drifts stale the first week — the same
+disease as the sqlite index, just in markdown. Consequence for authors: the only
+"schema" a skill must follow to benefit is *use headings*, which every skill
+already does because they are written for people. A skill with headingless
+references degrades to today's behavior (whole-file read under the 8kB cap),
+never to an error.
+
+**Generation.** When `skill(name)` first loads:
+
+1. Walk `<skill>/references/*.md` (one level; `scripts/` and `assets/` are not
+   prose and are skipped). Alphabetical, same as `ls`.
+2. For each file, take lines matching `^#{1,4} ` — outside fenced code blocks,
+   the one real parsing subtlety (a `# comment` inside a ```` ```bash ````
+   fence is not a heading). Deeper than `####` is noise, skip.
+3. Emit path + indented headings into the pinned block, after the body:
+
+       <skill-map name="book-writer">
+       references/writing-rules.md
+         # Writing rules: voice, listings, and formatting
+         ## 8. Writing Style Rules
+         ## 9. Handling Special Characters
+       references/template-styles.md
+         # Template styles
+         ...
+       Fetch one section: skill(name: "book-writer", section: "Writing Style Rules")
+       </skill-map>
+
+   The trailing usage line is the teaching — the instruction lives next to the
+   map it operates on. Cost: ~30–60 tokens per file, bounded at 1kB per skill
+   (a skill with 200 headings gets its deepest level dropped first, then a
+   "…N more, grep the file" line, never a silent cut).
+4. Nothing is cached. The walk is a few file reads at skill-load time, once per
+   session; the filesystem stays the single source of truth, so editing a
+   reference mid-session is picked up by the next fetch with no invalidation
+   story.
+
+**Fetch.** `skill(name, section)` — `name` stays required, sections are
+namespaced per skill:
+
+1. Case-insensitive substring match of `section` against that skill's map
+   (headings with their numbers stripped: "writing style" hits
+   "## 8. Writing Style Rules").
+2. One hit → return from that heading to the next heading of equal or
+   shallower depth, prefixed with its file path so follow-up `read` calls
+   resolve. Result is a normal tool result: compactable, re-fetchable, capped.
+3. Several hits → return the candidate list (file + heading), no content. The
+   model picks; that round trip is ~50 tokens.
+4. No hit → the map plus "grep the references/ dir" as the fallback pointer.
+   `section` on a skill with no references is the same miss, not an error.
+
+**Not doing:** front-matter section metadata, per-section descriptions,
+cross-skill section search, embeddings. Each is a maintenance surface for a
+problem grep has not yet failed to solve. Revisit only on a traced failure.
+
+**Tests that pin the behavior:** fence-aware heading extraction; slice
+boundaries (last section of file, nested subsections stay inside their
+parent); ambiguous fetch returns candidates; headingless file degrades
+gracefully; map respects its 1kB bound; `chapter-editor` and `book-writer` —
+the two real installed skills — both produce sane maps as fixtures.
+
+Order of work: fetch (2) is useful alone; map (1) makes it discoverable;
+cap-message headings (4) is polish. Fits before workflows (§8a) — workers
+inherit the same tool, so a worker sent to "apply writing rules to ch10 §3"
+fetches one section instead of the pack.
 
 **Measure before extending:** re-read count per session for skill files is in
 the JSONL trace (yesterday: 8×). If sections drop it to ~1× the design is
