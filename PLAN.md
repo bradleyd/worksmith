@@ -571,6 +571,9 @@ recall, which is what the picker does. Telescope's shape, not which-key's.
   overlay fall-through and stray single presses at once.
 - **`↓4373` in the footer is unguessable** — its own author had to ask. Spell
   it `out:4373`; glyphs earn density only when obvious.
+- **`↻` means two things**: reasoning tokens in the footer, a nudge in the
+  transcript. Both questions were asked within one session of live use. Spell
+  the footer one `think:4.3k`-style (`out:…  think:…`), keep ↻ for nudges only.
 
 ## 10. Milestones
 
