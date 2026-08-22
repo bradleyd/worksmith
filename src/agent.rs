@@ -461,7 +461,14 @@ impl Agent {
             }
 
             let mut messages = Vec::with_capacity(session.messages().len() + 1);
-            messages.push(Message::system(system_prompt));
+            // Skills are pinned above the compaction line. Their text is
+            // standing instruction — the conventions the work has to follow —
+            // and treating it as ordinary conversation meant compaction ate it
+            // and the model reloaded the same pack again and again.
+            messages.push(Message::system(with_loaded_skills(
+                system_prompt,
+                &self.tool_ctx,
+            )));
             messages.extend(session.messages().iter().cloned());
 
             // Never ask for more output than the window can hold. The server
@@ -883,6 +890,39 @@ impl Agent {
         }
         Ok(())
     }
+}
+
+/// The system prompt plus any skills loaded this session.
+///
+/// Bounded: a project with many large skills should not be able to crowd out
+/// the conversation, so past the cap the oldest loads are dropped and the model
+/// can reload one if it still needs it.
+fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> String {
+    const MAX_PINNED_CHARS: usize = 12_000;
+    let loaded = ctx.loaded_skills.lock().unwrap();
+    if loaded.is_empty() {
+        return system_prompt.to_string();
+    }
+    let mut packs: Vec<&(String, String)> = Vec::new();
+    let mut used = 0usize;
+    for entry in loaded.iter().rev() {
+        if used + entry.1.len() > MAX_PINNED_CHARS && !packs.is_empty() {
+            break;
+        }
+        used += entry.1.len();
+        packs.push(entry);
+    }
+    packs.reverse();
+
+    let mut out = String::with_capacity(system_prompt.len() + used + 64);
+    out.push_str(system_prompt);
+    out.push_str("\n\n<SKILLS-LOADED>\n");
+    for (_, text) in packs {
+        out.push_str(text);
+        out.push_str("\n\n");
+    }
+    out.push_str("</SKILLS-LOADED>\n");
+    out
 }
 
 /// The first line of an error chain, short enough for one notice.

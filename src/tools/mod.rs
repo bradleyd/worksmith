@@ -38,6 +38,11 @@ pub struct ToolContext {
     /// and wrong for anything a user is watching — the real front ends install
     /// their own.
     pub approver: std::sync::Arc<dyn approval::Approver>,
+    /// Skills loaded this session, name -> body. The agent pins these to the
+    /// system prompt, above the compaction line: a skill is standing
+    /// instruction, not conversation, and compacting it away made the model
+    /// load the same 4kB pack eight times in one session.
+    pub loaded_skills: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl Default for ToolContext {
@@ -48,6 +53,7 @@ impl Default for ToolContext {
             bash_timeout: Duration::from_secs(120),
             is_worker: false,
             approver: std::sync::Arc::new(approval::AutoApprove),
+            loaded_skills: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }

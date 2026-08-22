@@ -159,3 +159,35 @@ fn a_misplaced_skill_can_be_pointed_at() {
     assert!(!SkillCatalog::discover(dir.path()).is_empty());
     assert!(SkillCatalog::misplaced(dir.path()).is_empty());
 }
+
+/// A skill is standing instruction, not conversation. Compaction deleted it and
+/// the model reloaded the same 4kB pack eight times in one session, finally
+/// tripping stuck detection on five identical `skill` calls in a row.
+#[tokio::test]
+async fn a_skill_loads_once_and_stays_loaded() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let skills = dir.path().join("skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    write_skill(&skills, "book-writer", "how chapters are written", "ALWAYS use the outline");
+
+    let registry = ToolRegistry::with_builtins();
+    let ctx = ToolContext { cwd: dir.path().to_path_buf(), ..Default::default() };
+
+    let first = registry.run("skill", json!({"name": "book-writer"}), &ctx).await;
+    assert!(first.content.contains("ALWAYS use the outline"), "{}", first.content);
+
+    let second = registry.run("skill", json!({"name": "book-writer"}), &ctx).await;
+    assert!(!second.is_error, "asking twice is not an error");
+    assert!(second.content.contains("already loaded"), "{}", second.content);
+    assert!(
+        !second.content.contains("ALWAYS use the outline"),
+        "the body should not be served twice: {}",
+        second.content
+    );
+
+    // Because it is pinned to the system prompt, where compaction cannot reach.
+    let pinned = ctx.loaded_skills.lock().unwrap();
+    assert_eq!(pinned.len(), 1);
+    assert!(pinned[0].1.contains("ALWAYS use the outline"));
+}

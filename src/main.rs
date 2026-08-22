@@ -198,6 +198,7 @@ async fn run(args: Args) -> Result<()> {
         bash_timeout: Duration::from_secs(config.bash_timeout_secs()),
         is_worker: false,
         approver,
+        ..Default::default()
     };
 
     // --fast / --think beat the configured default.

@@ -45,14 +45,31 @@ impl Tool for SkillTool {
         let name = name.trim();
         match catalog.get(name) {
             Some(skill) => match skill.body() {
-                Ok(body) => ToolOutput::ok(format!(
+                Ok(body) => {
+                    // Already loaded: the text is pinned to the system prompt,
+                    // so serving it again spends a thousand tokens to tell the
+                    // model something it is already looking at.
+                    let mut loaded = ctx.loaded_skills.lock().unwrap();
+                    if loaded.iter().any(|(n, _)| n == &skill.name) {
+                        return ToolOutput::ok(format!(
+                            "skill `{}` is already loaded — its full instructions are in your \
+                             system prompt under <SKILLS-LOADED>. Files live in {}. Get on with \
+                             the work it describes.",
+                            skill.name,
+                            skill.dir.display()
+                        ));
+                    }
+                    let text = format!(
                     // Naming the directory is what makes the skill's own
                     // `references/...` paths resolvable with the read tool.
                     "skill `{}` (files live in {})\n\n{}",
-                    skill.name,
-                    skill.dir.display(),
-                    body.trim()
-                )),
+                        skill.name,
+                        skill.dir.display(),
+                        body.trim()
+                    );
+                    loaded.push((skill.name.clone(), text.clone()));
+                    ToolOutput::ok(text)
+                }
                 Err(e) => ToolOutput::error(format!("could not read skill `{name}`: {e}")),
             },
             None => ToolOutput::error(format!("no skill named `{name}`.\n{}", list(&catalog))),
