@@ -638,6 +638,64 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
     );
 }
 
+/// The screenshot bug (2026-08-22): provider prompt 25106, estimate 11781.
+/// "Keep a third of the window" in estimate units kept nearly the whole real
+/// prompt, so compaction fired every step and freed ~9% each time. The keep
+/// budget must subtract the measured overhead (provider − estimate) first.
+#[tokio::test]
+async fn compaction_cuts_deeper_when_overhead_dwarfs_the_estimate() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // ~300 estimated tokens of messages, in many small pieces so a boundary
+    // exists wherever the budget lands.
+    for _ in 0..15 {
+        session.append_message(Message::user("x".repeat(40))).unwrap();
+        session.append_message(Message::assistant(Some("y".repeat(40)), vec![])).unwrap();
+    }
+    let est_before = 15 * 2 * 40 / 4; // ~300
+
+    // Provider reports 900 against a 1000 window: trigger (750) fires, and the
+    // overhead is 900 − ~300 = ~600 — bigger than the naive keep budget of 333.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let client = RecordingClient { seen, reply: "SUMMARY".into(), prompt_tokens: 900 };
+    let agent = Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        1000,
+        1, // keep_recent_turns — useless here by design; the token path decides
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            ..Default::default()
+        },
+    );
+
+    agent.run_turn(&mut session, "one", "system", None, CancellationToken::new()).await.unwrap();
+    agent.run_turn(&mut session, "two", "system", None, CancellationToken::new()).await.unwrap();
+
+    let est_after: usize = session
+        .messages()
+        .iter()
+        .map(|m| m.content.as_deref().map_or(0, |c| c.len()) / 4)
+        .sum();
+    assert!(
+        est_after < est_before / 2,
+        "with overhead 600 of a 1000 window, the naive keep (333) would retain \
+         nearly everything; the overhead-aware keep must cut hard: {est_after} vs {est_before}"
+    );
+}
+
 #[tokio::test]
 async fn a_compacted_session_stays_compacted_when_reopened() {
     common::isolate_home();
