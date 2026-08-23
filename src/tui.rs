@@ -4058,6 +4058,23 @@ mod tests {
             }
         }
 
+        // Absence of White is only half the claim. Removing the highlight
+        // entirely also leaves no white cell, and the selected row is then
+        // unmarked — which is the bug this test was written after, one level
+        // up. So assert the good thing is present, not just the bad thing gone.
+        fn assert_row_is_marked(a: &App, needle: &str, what: &str) {
+            let mut term = Terminal::new(TestBackend::new(78, 12)).unwrap();
+            term.draw(|f| ui(f, a)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let marked = (0..buf.area.height).any(|y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.contains(needle)
+                    && (0..buf.area.width)
+                        .any(|x| buf[(x, y)].modifier.contains(Modifier::REVERSED))
+            });
+            assert!(marked, "{what}: the selected row must be visibly highlighted");
+        }
+
         // The overlay paints over the transcript, so they need separate draws —
         // checking them in one render silently skips whichever is underneath.
         let mut a = app();
@@ -4071,12 +4088,14 @@ mod tests {
             vec![OverlayItem { label: "/help".into(), description: "keys".into() }],
         ));
         assert_no_white(&a, "picker");
+        assert_row_is_marked(&a, "/help", "picker");
 
         a.overlay = Some(Overlay::reference(
             "footer",
             vec![OverlayItem { label: "\u{21bb}".into(), description: "thinking".into() }],
         ));
         assert_no_white(&a, "legend");
+        assert_row_is_marked(&a, "\u{21bb}", "legend");
     }
 
     #[test]
@@ -4261,8 +4280,15 @@ mod tests {
             .collect();
 
         let hint_row = rows.iter().position(|r| r.contains("/memory")).expect("hint is drawn");
-        let composer_row =
-            rows.iter().position(|r| r.contains("/me ")).unwrap_or(rows.len() - 1);
+        // No `unwrap_or` fallback here. Drawing the hint *below* the composer
+        // covers the text being typed, so "/me " goes missing — and a fallback
+        // of "assume it is the last row" turns that into a passing comparison.
+        // The mutation that moves the hint down must fail this test, not sail
+        // through it.
+        let composer_row = rows
+            .iter()
+            .position(|r| r.contains("/me "))
+            .expect("the composer still shows what is being typed");
         assert!(hint_row < composer_row, "the hint sits above what you are typing");
         assert!(rows.iter().any(|r| r.contains("Tab accepts")), "and says how to take it");
     }
