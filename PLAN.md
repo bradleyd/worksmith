@@ -1294,7 +1294,7 @@ the JSONL trace (yesterday: 8×). If sections drop it to ~1× the design is
 done; embeddings-grade retrieval stays rejected until a real session shows
 grep-over-headings failing to find something.
 
-## 10d. The TUI assumes a dark terminal (found 2026-08-23)
+## 10d. The TUI assumed a dark terminal — fixed 2026-08-23
 
 Found by running on a light Ghostty theme for the first time. The model
 answered — footer read `↓75` and `[done]` — and the transcript showed nothing
@@ -1307,38 +1307,58 @@ whatever theme the terminal has: set Ghostty to gruvbox and worksmith is
 gruvbox, for free. That property is worth more than any theme system and must
 not be traded away.
 
-**The bug** is the handful of sites that name a colour where they meant *the
+**The bug** was the handful of sites that named a colour where they meant *the
 default text*. `Color::White` is ANSI 7, which on a light theme is the
 background. Naming a foreground colour is a claim about the background, and
-these sites make that claim by accident.
+those sites made the claim by accident.
 
-Confirmed:
+**Fixed:** three sites, all `Color::White` as a foreground.
 
-- `src/tui.rs:3168` — `Kind::Assistant => fg(Color::White)`. The model's
-  replies. The single most important text in the app, invisible.
-- `src/tui.rs:2989`, `:3047` — the overlay's highlighted row,
-  `fg(White) + BOLD`. The selected row vanishes, so a picker reads as a list
-  with a hole punched where the cursor is.
-- Judgment call, not a bug: `Kind::User` in cyan (`:3167`) and the footer's
-  `Black`-on-`Cyan` segment (`:3391`) are legible on light backgrounds but
-  washed out. Cyan-on-white is the classic low-contrast pair, and your own
-  input should be the most anchored thing on screen.
+- `Kind::Assistant` in the transcript — the model's replies. The single most
+  important text in the app, invisible. Now names no colour at all.
+- The overlay's highlighted row, in both the picker and the reference/legend
+  variant — `fg(White) + BOLD`, so the selected row vanished and a picker read
+  as a list with a hole punched where the cursor was. The first fix dropped the
+  colour and kept `BOLD`; on a light theme bold-on-white is itself invisible,
+  so the highlight did not show. Now `Modifier::REVERSED` on the whole row —
+  the same idiom the cursor row uses — a solid bar that reads on any theme.
 
-The codebase already knows the rule. `src/tui.rs:3940`: the cursor row uses
-reverse video *"so it reads in any theme rather than a colour that might
-vanish."* Written down once, applied once, missed everywhere else.
+**Deliberately left:** the two `Black`-on-`Yellow` / `Black`-on-`Cyan` pairs set
+both halves, so they make no claim about the background and are safe. The
+semantic hues (red errors, green additions, yellow tools, blue notices) are
+colours 1-6, which every theme keeps recognisable — naming those is the thing
+that makes worksmith inherit a theme at all.
 
-**How it gets tested.** Manually in fifteen seconds:
+**Still a judgment call:** `Kind::User` in cyan and the footer's cyan segment
+are legible on light backgrounds but washed out — cyan-on-white is the classic
+low-contrast pair, and your own input should be the most anchored thing on
+screen. `Modifier::BOLD` on default text would anchor it harder than any hue.
+Not changed without looking at it.
+
+The codebase already knew the rule: the cursor row uses reverse video *"so it
+reads in any theme rather than a colour that might vanish."* Written down once,
+applied once, missed everywhere else. The general form — **emphasis belongs to
+modifiers, meaning belongs to hues, and the contrast extremes belong to
+nobody** — is what the test now enforces.
+
+**How it is tested.** Manually in fifteen seconds:
 
     open -na Ghostty.app --args --theme="Builtin Light" -e worksmith
 
 `Solarized Light` and `Ayu Light` stress different halves (low-contrast
-background, washed-out brights). Then pinned with `TestBackend`, which the
-suite already uses five times over: assert assistant text renders with
-`fg == Color::Reset`. The manual pass finds these; the test stops them coming
-back, and `fg(Color::White)` looks harmless to anyone working on a dark theme.
+background, washed-out brights). Pinned by a `TestBackend` test asserting that
+no cell anywhere names `Color::White` as a foreground — the whole buffer rather
+than the three known sites, so a fourth one added later trips it too.
 
-**Scope: this is deleting colour, not adding it.** It is not a theme system.
+One lesson from writing it, worth more than the fix: **the first version of the
+test passed with the bug reintroduced.** The overlay paints over the transcript
+and `ensure_rows` had not been called, so it was scanning a buffer that did not
+contain the thing under test. It now draws three times (transcript, picker,
+legend) and asserts the transcript actually rendered. Every buffer test in this
+file should be mutation-checked before it is believed; a green assertion over
+an empty region looks identical to a passing one.
+
+**Scope: this was deleting colour, not adding it.** It is not a theme system.
 Ghostty's theme already is worksmith's theme.
 
 ### Themes proper, if ever

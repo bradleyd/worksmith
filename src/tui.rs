@@ -3005,17 +3005,21 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
         .skip(first)
         .take(inner.height as usize)
         .map(|(i, (_, item))| {
+            // Reverse video for the whole selected row: a solid highlight bar
+            // that reads on a light or dark theme, unlike a named colour (see
+            // the cursor row). Bold alone is invisible on a light background.
             let style = if i == sel {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
-            // A marker as well as a style: bold alone is invisible in a
-            // low-contrast theme, and this row is the one Tab will accept.
             let marker = if i == sel { "▸ " } else { "  " };
             Line::from(vec![
                 Span::styled(format!("{marker}{:<label_w$}  ", item.label), style),
-                Span::styled(item.description.clone(), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    item.description.clone(),
+                    if i == sel { style } else { Style::default().fg(Color::DarkGray) },
+                ),
             ])
         })
         .collect();
@@ -3063,8 +3067,11 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
             let selected = i == sel;
             let marker = if selected { "▸ " } else { "  " };
             let label = format!("{:<label_w$}", item.label);
+            // Reverse video for the whole selected row: a solid highlight bar
+            // that reads on a light or dark theme, unlike a named colour (see
+            // the cursor row). Bold alone is invisible on a light background.
             let style = if selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
@@ -3072,7 +3079,7 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
                 Span::styled(format!("{marker}{label}"), style),
                 Span::styled(
                     format!("  {}", item.description),
-                    Style::default().fg(Color::DarkGray),
+                    if selected { style } else { Style::default().fg(Color::DarkGray) },
                 ),
             ])
         })
@@ -3183,9 +3190,13 @@ fn item_rows(
             rows.push(Line::from(""));
             return;
         }
+        // Colours 1-6 are hues: every theme keeps its red red, so naming one is
+        // portable. White is ANSI 7 — a contrast extreme, and the *background*
+        // on a light theme. Assistant text is the app's default text, so it
+        // names no colour at all and inherits the terminal's foreground.
         let (style, label): (Style, &str) = match item.kind {
             Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
-            Kind::Assistant => (Style::default().fg(Color::White), ""),
+            Kind::Assistant => (Style::default(), ""),
             Kind::Thinking => {
                 (Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), "thinking ")
             }
@@ -3954,6 +3965,58 @@ mod tests {
         b.insert_char('j');
         assert!(b.escape_pair('k'));
         assert_eq!(b.input, "");
+    }
+
+    #[test]
+    fn nothing_names_a_colour_that_is_the_background_on_a_light_theme() {
+        // Found by running on a light Ghostty theme: the model answered, the
+        // footer said done, and the transcript showed nothing. The reply was
+        // there the whole time, white-on-white.
+        //
+        // Worksmith emits ANSI colour *names*, never RGB, so the terminal's
+        // theme is worksmith's theme — which only holds while every name is a
+        // hue. White is ANSI 7: a contrast extreme whose end of the axis flips
+        // between light and dark. Emphasis belongs to modifiers, which no theme
+        // can invert.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn assert_no_white(a: &App, what: &str) {
+            let mut term = Terminal::new(TestBackend::new(78, 12)).unwrap();
+            term.draw(|f| ui(f, a)).unwrap();
+            let buf = term.backend().buffer().clone();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let cell = &buf[(x, y)];
+                    assert_ne!(
+                        cell.fg,
+                        Color::White,
+                        "{what}: ({x},{y}) {:?} names White as a foreground",
+                        cell.symbol()
+                    );
+                }
+            }
+        }
+
+        // The overlay paints over the transcript, so they need separate draws —
+        // checking them in one render silently skips whichever is underneath.
+        let mut a = app();
+        a.push(Kind::Assistant, "a reply");
+        a.ensure_rows(78);
+        assert!(!a.cached_rows.is_empty(), "the transcript must actually render");
+        assert_no_white(&a, "transcript");
+
+        a.overlay = Some(Overlay::new(
+            "commands",
+            vec![OverlayItem { label: "/help".into(), description: "keys".into() }],
+        ));
+        assert_no_white(&a, "picker");
+
+        a.overlay = Some(Overlay::reference(
+            "footer",
+            vec![OverlayItem { label: "\u{21bb}".into(), description: "thinking".into() }],
+        ));
+        assert_no_white(&a, "legend");
     }
 
     #[test]
