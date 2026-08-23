@@ -392,6 +392,38 @@ impl App {
         }
     }
 
+    /// Everything on `App` that describes *this* session, cleared in one place.
+    ///
+    /// The context itself lives on `Session`, which `/new` replaces wholesale.
+    /// These are the display fields that shadow it, and they used to be
+    /// hand-cleared at the call site — so the transcript emptied while the
+    /// footer went on reporting the old session's context, cost and token
+    /// counts until the next `Usage` event happened to overwrite them. The
+    /// cumulative ones never corrected themselves at all.
+    ///
+    /// A method rather than a list of assignments in the handler: the next
+    /// per-session counter added to the footer has one obvious place to be
+    /// reset, and forgetting it is a visible test failure rather than a footer
+    /// that quietly describes two sessions at once.
+    fn reset_for_new_session(&mut self, path: PathBuf) {
+        self.session_path = path;
+        self.items.clear();
+        self.cur_assistant = None;
+        self.cur_thinking = None;
+        // Counters the footer reads. Totals are per-session: they sit next to a
+        // per-session `ctx %`, and a cost that spans sessions would be
+        // answering a different question than the number beside it.
+        self.last_prompt_tokens = 0;
+        self.last_reasoning_tokens = 0;
+        self.step_reasoning_chars = 0;
+        self.total_in_tokens = 0;
+        self.total_out_tokens = 0;
+        self.last_finish_reason = None;
+        // A fresh transcript has nothing to be scrolled back into.
+        self.scroll_up = 0;
+        self.dirty = true;
+    }
+
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
         let at = self.items.len();
         self.items.push(Item { kind, text: text.into() });
@@ -1786,11 +1818,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             }
             let mut s = session.lock().await;
             *s = Session::create(cwd)?;
-            app.session_path = s.path().to_path_buf();
-            app.items.clear();
-            app.cur_assistant = None;
-            app.cur_thinking = None;
-            app.dirty = true;
+            app.reset_for_new_session(s.path().to_path_buf());
             app.push(Kind::Notice, format!("started new session {}", s.id));
         }
         "compact" => {
@@ -3624,6 +3652,38 @@ mod tests {
         });
         assert_eq!(a.last_prompt_tokens, 600);
         assert_eq!(a.total_out_tokens, 50);
+    }
+
+    #[test]
+    fn a_new_session_resets_everything_the_footer_reports() {
+        // The bug: /new emptied the transcript but left the counters, so the
+        // footer went on reporting the previous session's context and cost over
+        // an empty screen. Asserting the whole footer string rather than the
+        // fields means a counter added later has to be reset to keep this green.
+        let mut a = app();
+        a.push(Kind::User, "hello");
+        a.apply_event(Event::Thinking { text: "x".repeat(400) });
+        a.apply_event(Event::Usage {
+            prompt_tokens: 3055,
+            completion_tokens: 75,
+            total_tokens: 3130,
+            reasoning_tokens: 52,
+            finish_reason: Some("length".into()),
+        });
+        a.scroll_up = 7;
+        let before = footer_string(&a);
+        assert!(before.contains("3055"), "precondition: the footer reports the old session");
+
+        a.reset_for_new_session(PathBuf::from("/tmp/new-session.jsonl"));
+
+        assert_eq!(
+            footer_string(&a),
+            footer_string(&app()),
+            "a new session's footer must read like a fresh one"
+        );
+        assert!(a.items.is_empty(), "the transcript is empty");
+        assert_eq!(a.scroll_up, 0, "nothing to be scrolled back into");
+        assert_eq!(a.session_path, PathBuf::from("/tmp/new-session.jsonl"));
     }
 
     #[test]
