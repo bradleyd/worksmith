@@ -191,3 +191,86 @@ async fn a_skill_loads_once_and_stays_loaded() {
     assert_eq!(pinned.len(), 1);
     assert!(pinned[0].1.contains("ALWAYS use the outline"));
 }
+
+/// The two levels of progressive disclosure through the tool itself: loading
+/// pins body + map, `section` fetches one slice as an ordinary (compactable)
+/// result.
+#[tokio::test]
+async fn a_section_is_fetched_through_the_tool_without_loading_whole_files() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let skills = dir.path().join("skills");
+    let refs = skills.join("book-writer").join("references");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::write(
+        skills.join("book-writer").join("SKILL.md"),
+        "---\nname: book-writer\ndescription: chapters\n---\nRead rules before drafting.",
+    )
+    .unwrap();
+    std::fs::write(
+        refs.join("writing-rules.md"),
+        "# Writing rules\n\n## 8. Writing Style Rules\nShort sentences win.\n\n\
+         ## 9. Handling Special Characters\nEscape angle brackets.\n",
+    )
+    .unwrap();
+
+    let registry = ToolRegistry::with_builtins();
+    let ctx = ToolContext { cwd: dir.path().to_path_buf(), ..Default::default() };
+
+    // Load: the pinned text carries the map, so the model knows what exists.
+    let load = registry.run("skill", json!({"name": "book-writer"}), &ctx).await;
+    assert!(load.content.contains("<skill-map"), "{}", load.content);
+    assert!(load.content.contains("## 8. Writing Style Rules"));
+    assert!(
+        !load.content.contains("Short sentences win"),
+        "the map lists sections; it must not carry their content"
+    );
+
+    // Fetch: one section, named by file, tiny.
+    let one = registry
+        .run("skill", json!({"name": "book-writer", "section": "writing style"}), &ctx)
+        .await;
+    assert!(!one.is_error, "{}", one.content);
+    assert!(one.content.contains("Short sentences win"));
+    assert!(one.content.contains("writing-rules.md"), "names where it landed");
+    assert!(!one.content.contains("Escape angle brackets"), "and only that section");
+
+    // A miss teaches, not just fails: the map and the grep fallback.
+    let miss = registry
+        .run("skill", json!({"name": "book-writer", "section": "nonexistent"}), &ctx)
+        .await;
+    assert!(miss.is_error);
+    assert!(miss.content.contains("<skill-map"), "{}", miss.content);
+}
+
+/// The two real installed skills are the fixtures the plan calls for: their
+/// references are heading-structured markdown, so both must produce a sane,
+/// bounded map. Runs only where they exist (a dev machine, not CI), and builds
+/// the `Skill` by hand — calling discovery here would touch the process-wide
+/// config cache before other tests isolate HOME.
+#[test]
+fn the_installed_skills_produce_sane_maps() {
+    for name in ["book-writer", "chapter-editor"] {
+        let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".worksmith/skills")
+            .join(name);
+        if !dir.exists() {
+            continue;
+        }
+        let skill = worksmith::skill::Skill {
+            name: name.into(),
+            description: String::new(),
+            path: dir.join("SKILL.md"),
+            dir,
+            allowed_tools: None,
+        };
+        let map = skill.map();
+        assert!(!map.is_empty(), "{name} has heading-structured references");
+        assert!(
+            map.len() <= worksmith::skill::MAX_MAP_CHARS + 200,
+            "{name} map is bounded: {} chars",
+            map.len()
+        );
+        assert!(map.contains("references/"), "{name}: {map}");
+    }
+}

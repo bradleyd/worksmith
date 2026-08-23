@@ -561,6 +561,20 @@ recall, which is what the picker does. Telescope's shape, not which-key's.
   (fuzzy, tab to accept). Steal the behavior from `reference/gemini-cli`'s
   @mention/shell completion and `reference/pi`'s `fuzzy.ts`.
 
+### UX debt (noted 2026-08-22, from live use)
+
+- **Double-Esc kills the turn.** Esc closes the slash overlay; a reflex second
+  press falls through to abort and silently ends a 20-minute run. An Esc that
+  dismissed *anything* (overlay, picker, search) should not also be armed to
+  abort: make abort two-stage — first press shows "Esc again to stop the turn"
+  in the status line, second press within ~1.5s aborts. That guards the
+  overlay fall-through and stray single presses at once.
+- **`↓4373` in the footer is unguessable** — its own author had to ask. Spell
+  it `out:4373`; glyphs earn density only when obvious.
+- **`↻` means two things**: reasoning tokens in the footer, a nudge in the
+  transcript. Both questions were asked within one session of live use. Spell
+  the footer one `think:4.3k`-style (`out:…  think:…`), keep ↻ for nudges only.
+
 ## 10. Milestones
 
 **M0 — Spike (1–2 days)**: `llm` crate against Anthropic streaming + one

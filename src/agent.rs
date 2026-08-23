@@ -881,7 +881,19 @@ impl Agent {
             let msgs = session.messages();
             // Keep roughly a third of the window verbatim: enough to continue
             // from, little enough that the next few steps fit.
-            let split = compaction_split(msgs, self.keep_recent_turns, self.context_limit / 3);
+            // The keep budget must be in the same units as what compaction_split
+            // measures: estimated message tokens. The trigger runs on the
+            // provider's count, which also covers the system prompt, tool
+            // schemas, pinned skills, and everything the ~4-chars/token guess
+            // undercounts. On a real session that overhead was 13k of a 25k
+            // prompt — so "keep a third of the window" in estimate units kept
+            // nearly the whole real prompt, and compaction fired every step
+            // freeing ~9% each time. Subtract the measured overhead first.
+            let overhead = self
+                .working_tokens(session)
+                .saturating_sub(estimate_tokens(session.messages()));
+            let keep = (self.context_limit / 3).saturating_sub(overhead).max(1_024);
+            let split = compaction_split(msgs, self.keep_recent_turns, keep);
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
             }

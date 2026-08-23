@@ -76,6 +76,25 @@ fn cap(mut out: ToolOutput) -> ToolOutput {
         return out;
     }
     let omitted = out.content.len() - MAX_TOOL_RESULT_BYTES;
+    // Headings from the *whole* content, gathered before the cut: the notice
+    // can then name what the model did not get to see, which turns "read it
+    // again" into "fetch the one section you need".
+    // `read` numbers its lines ("     3\t## Rule"), which hides every heading
+    // from a scanner that expects them at column zero — strip the prefix first.
+    let unnumbered: String = out
+        .content
+        .lines()
+        .map(|l| match l.split_once('\t') {
+            Some((n, rest)) if !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()) => rest,
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let outline: Vec<String> = crate::skill::headings(&unnumbered)
+        .into_iter()
+        .take(12)
+        .map(|(level, title)| format!("{} {title}", "#".repeat(level)))
+        .collect();
     let mut end = MAX_TOOL_RESULT_BYTES;
     while end > 0 && !out.content.is_char_boundary(end) {
         end -= 1;
@@ -87,6 +106,13 @@ fn cap(mut out: ToolOutput) -> ToolOutput {
          `offset`/`limit`, or narrow the command — searching for what you need beats pulling \
          the whole thing in.]"
     ));
+    if !outline.is_empty() {
+        out.content.push_str("\n[the full content is organized under these headings:\n");
+        for h in outline {
+            out.content.push_str(&format!("  {h}\n"));
+        }
+        out.content.push(']');
+    }
     out
 }
 
