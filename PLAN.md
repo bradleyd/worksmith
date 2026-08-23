@@ -838,6 +838,50 @@ models are a user's choice to configure, not something to ship: they trade
 away instruction-following, which is exactly what this harness exists to
 compensate for.
 
+## 8a-1. The chapter pipeline is the first workflow (2026-08-23)
+
+Bradley, after the Chapter 10 run: "yes, that is what workflows will be."
+
+The week of book work executed a five-stage workflow by hand, and every manual
+step is a field in the eventual declaration:
+
+    [[stage]]                       # what got done by hand
+    name = "draft"
+    thinking = "off"                # /think off, set manually, forgotten once
+    until = "test -s chapter10.md"  # stated in the prompt after a run
+                                    # that did archaeology instead of writing
+
+    [[stage]]
+    name = "review"
+    thinking = 2000                 # caught style violations and fact errors
+                                    # that think:off never would have
+
+    [[stage]]
+    name = "annotate"
+    thinking = 2000                 # editorial judgment
+
+    [[stage]]
+    name = "generate"
+    thinking = "off"                # overthought XML until switched manually
+    until = "python3 scripts/check_styles.py out.docx"
+
+Evidence the fields earn their place:
+
+- **Per-stage thinking**: two of three phase transitions were caught by hand
+  ("it is really overthinking this"). Wrong level cost real time both
+  directions.
+- **Per-stage until, answering open decision #9**: a check is a shell command,
+  and the durable ones ship with the *skill* (`scripts/check_styles.py`), not
+  the project. Model self-reports failed four times in the docx saga
+  ("all pass" over a document with no TOC); the script caught everything on
+  its first run. Checks assert invariants, not absolute counts — "Body == 72"
+  was wrong twice because it encoded one chapter's shape.
+- **Per-stage model is next**: drafting quality was the one axis no check
+  recovered (M12 routing — hosted for prose, local for mechanics).
+- The loop already has the right reflexes ("say which and stop" beat every
+  verbose verification prompt); workflows make them declarations instead of
+  prompt discipline.
+
 ## 8a. Workflows, designed 2026-08-20
 
 Grounded in a real run rather than a hypothetical: `worksmith spawn -n 3 "write
