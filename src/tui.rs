@@ -149,6 +149,10 @@ struct Overlay {
     items: Vec<OverlayItem>,
     filter: String,
     selected: usize,
+    /// A picker lets you select a row (Enter puts it in the composer). A
+    /// reference — like the footer legend — has nothing to pick: Enter just
+    /// closes, and the footer bar says so.
+    picking: bool,
 }
 
 #[derive(Clone)]
@@ -159,7 +163,14 @@ struct OverlayItem {
 
 impl Overlay {
     fn new(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
-        Self { title: title.into(), items, filter: String::new(), selected: 0 }
+        Self { title: title.into(), items, filter: String::new(), selected: 0, picking: true }
+    }
+
+    /// A read-only list: rows can be scrolled and filtered, but there is
+    /// nothing to select. Enter closes rather than putting a row in the
+    /// composer, which would be nonsense for a legend.
+    fn reference(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
+        Self { title: title.into(), items, filter: String::new(), selected: 0, picking: false }
     }
 
     /// Items matching the filter, as `(original index, item)`.
@@ -1411,9 +1422,10 @@ async fn handle_key(
                 ov.selected = 0;
             }
             KeyCode::Enter => {
-                let chosen = ov.chosen();
+                let (chosen, picking) = (ov.chosen(), ov.picking);
                 app.overlay = None;
-                if let Some(label) = chosen {
+                // A reference has nothing to pick, so Enter just closes.
+                if picking && let Some(label) = chosen {
                     // Put it in the composer rather than running it: a picker
                     // that fires commands on Enter is a picker you cannot use
                     // to *look* at something.
@@ -1692,6 +1704,12 @@ async fn handle_command(
                 .collect();
             app.overlay = Some(Overlay::new("commands · type to filter", items));
         }
+        "help" | "h" if parts.clone().next().map(|s| s.to_ascii_lowercase()) == Some("footer".to_string()) => {
+            // The footer's glyphs are unguessable (its own author had to ask);
+            // a legend explains them without changing the footer. A reference,
+            // not a picker: there is nothing to select.
+            app.overlay = Some(Overlay::reference("footer legend · Esc close", footer_legend()));
+        }
         "help" | "h" => {
             // One wrapped paragraph of everything was unreadable. Group it, put
             // one thing per line, and align the descriptions.
@@ -1706,6 +1724,7 @@ KEYS
   Esc            abort / clear        Ctrl+C       quit
   Ctrl+O         show tool output     Ctrl+T       show thinking
   PageUp/Down    scroll               Ctrl+U/D     scroll
+  /help footer   what the footer's glyphs mean
 
 NORMAL MODE (Esc on an empty composer, or `jj`)
   j k  ↑ ↓       move            Ctrl+U/D   half page
@@ -2772,6 +2791,7 @@ fn arg_completions(
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],
+        "help" | "h" if prev == 1 => &["footer"],
         "think" if prev == 1 => {
             // Servers disagree about which levels exist: OpenRouter documents
             // minimal..max, and some vLLM builds accept only xhigh/medium/low.
@@ -3024,7 +3044,7 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .title_bottom(" ↑↓ move · Enter pick · Esc close ");
+        .title_bottom(if ov.picking { " ↑↓ move · Enter pick · Esc close " } else { " ↑↓ move · Esc close " });
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -3339,7 +3359,11 @@ fn parse_budget(s: &str) -> Option<u32> {
     .filter(|n| *n > 0)
 }
 
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+/// The left half of the footer: model, context, and the token/cost/thinking/
+/// agent counters. Factored out of `render_footer` so it can be asserted on
+/// directly — the footer-legend drift test checks every glyph it explains
+/// against this string.
+fn footer_string(app: &App) -> String {
     let pct = (app.last_prompt_tokens as usize * 100)
         .checked_div(app.context_limit)
         .unwrap_or(0)
@@ -3371,11 +3395,14 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         String::new()
     };
     let tail = format!("{reasoning}{cut}{cost}{fast}{agents}");
-    let left = format!(
+    format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail
-    );
+    )
+}
 
+fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    let left = footer_string(app);
     // While a turn runs, show an animated spinner + elapsed seconds.
     let status = if app.pending_approval.is_some() {
         // No spinner: nothing is happening, and an animation would say it is.
@@ -3393,6 +3420,31 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(status, Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// What the footer's glyphs mean, as a legend. A strict glyph→meaning table:
+/// the left column is the token as it appears in `footer_string`, the right is
+/// what it is. `/help footer` opens this in the picker.
+fn footer_legend() -> Vec<OverlayItem> {
+    [
+        ("<model>", "the model serving this session"),
+        ("ctx N% (a/b)", "last prompt size vs the model's context window"),
+        ("↓N", "output tokens generated this session (answers, not reasoning)"),
+        (
+            "↻N",
+            "reasoning tokens on the last step — a live estimate while it streams, the provider's number once it lands. In the transcript ↻ marks a nudge — same glyph, different place.",
+        ),
+        ("⚠cut", "the last answer was cut off at max-tokens (finish reason `length`) — truncated, not finished"),
+        ("$N", "cost this session — only shown when the model has prices; a free/local model shows nothing"),
+        ("think:<label>", "current thinking mode (off / on / a budget like 2k / an effort)"),
+        ("↑N agents", "workers running (plus · M queued when any are waiting)"),
+    ]
+    .into_iter()
+    .map(|(label, description)| OverlayItem {
+        label: label.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
 }
 
 /// Draw the command picker into an off-screen buffer and print it. A dev aid:
@@ -3581,6 +3633,61 @@ mod tests {
         assert_eq!(a.last_reasoning_tokens, 2000, "the provider's number replaces the estimate");
         assert_eq!(a.step_reasoning_chars, 0, "the live count resets for the next step");
         assert_eq!(a.last_finish_reason.as_deref(), Some("length"), "cut-off is recorded");
+    }
+
+    #[test]
+    fn footer_legend_rows_are_well_formed() {
+        let rows = footer_legend();
+        assert_eq!(rows.len(), 8, "one row per footer glyph");
+        for r in &rows {
+            assert!(!r.label.is_empty(), "a row with no glyph");
+            assert!(!r.description.trim().is_empty(), "{} has no meaning", r.label);
+        }
+    }
+
+    #[test]
+    fn footer_legend_explains_every_glyph_the_footer_shows() {
+        // The drift guard: build an app with every conditional footer segment
+        // forced on, and assert each legend row's glyph actually appears. Fails
+        // if the legend describes a glyph the footer doesn't render, or if a
+        // footer glyph is renamed and the legend goes stale.
+        let mut a = app();
+        a.last_prompt_tokens = 100;
+        a.last_reasoning_tokens = 2000;
+        a.last_finish_reason = Some("length".into());
+        a.prices = crate::config::ModelSettings { input: Some(1.0), output: Some(2.0), ..Default::default() };
+        a.total_in_tokens = 1_000_000;
+        a.total_out_tokens = 1_000_000;
+        a.think_label = Some("2k".into());
+        a.agents_running = 2;
+        a.agents_queued = 1;
+
+        let s = footer_string(&a);
+        for r in footer_legend() {
+            // The label is a template (`↓N`, `think:<label>`); the glyph is the
+            // literal part — drop the trailing `N` and any `<…>` placeholder.
+            let glyph = match r.label.as_str() {
+                "<model>" => a.model.as_str(),
+                _ => {
+                    let head = r.label.split_once(' ').map(|(g, _)| g).unwrap_or(&r.label);
+                    let g = head.strip_suffix('N').unwrap_or(head);
+                    g.split('<').next().unwrap_or(g)
+                }
+            };
+            assert!(s.contains(glyph), "legend explains `{}` but the footer shows no such glyph in `{s}`", r.label);
+        }
+    }
+
+    #[test]
+    fn footer_omits_segments_it_would_not_show() {
+        // The legend must not describe a glyph as always-present when the footer
+        // hides it: no prices → no `$`, no cut-off → no `⚠cut`, no agents → no `↑`.
+        let a = app(); // no prices, no reasoning, no cut, no agents
+        let s = footer_string(&a);
+        assert!(!s.contains('$'), "a free model shows no cost");
+        assert!(!s.contains("⚠cut"), "no cut-off, no warning");
+        assert!(!s.contains('↑'), "no workers, no agent count");
+        assert!(!s.contains('↻'), "no reasoning, no reasoning spend");
     }
 
     #[tokio::test]
@@ -4119,6 +4226,25 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_legend_renders_in_the_picker() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app();
+        app.overlay = Some(Overlay::reference("footer legend · Esc close", footer_legend()));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| ui(f, &app)).unwrap();
+        let rendered: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+
+        assert!(rendered.contains("footer legend"), "the legend's title");
+        assert!(rendered.contains("Esc close"), "and how to get out");
+        assert!(!rendered.contains("Enter pick"), "a reference has nothing to pick");
+        assert!(rendered.contains("reasoning tokens"), "the ↻ row's meaning");
+        assert!(rendered.contains("max-tokens"), "the ⚠cut row's meaning");
+    }
+
+    #[test]
     fn completes_slash_commands() {
         let (start, c) = compute_completions("/me", Path::new("."), &probe_store()).unwrap();
         assert_eq!(start, 0);
@@ -4146,6 +4272,12 @@ mod tests {
         assert_eq!(c, vec!["global ".to_string(), "project ".to_string()]);
         let (_, c) = compute_completions("/memory add project ", Path::new("."), &probe_store()).unwrap();
         assert!(c.contains(&"decision ".to_string()) && c.contains(&"lesson ".to_string()), "{c:?}");
+
+        // /help has one subcommand: footer.
+        let (_, c) = compute_completions("/help ", Path::new("."), &probe_store()).unwrap();
+        assert_eq!(c, vec!["footer ".to_string()]);
+        let (_, c) = compute_completions("/help f", Path::new("."), &probe_store()).unwrap();
+        assert_eq!(c, vec!["footer ".to_string()]);
     }
 
     #[test]

@@ -569,11 +569,24 @@ recall, which is what the picker does. Telescope's shape, not which-key's.
   abort: make abort two-stage — first press shows "Esc again to stop the turn"
   in the status line, second press within ~1.5s aborts. That guards the
   overlay fall-through and stray single presses at once.
-- **`↓4373` in the footer is unguessable** — its own author had to ask. Spell
-  it `out:4373`; glyphs earn density only when obvious.
-- **`↻` means two things**: reasoning tokens in the footer, a nudge in the
-  transcript. Both questions were asked within one session of live use. Spell
-  the footer one `think:4.3k`-style (`out:…  think:…`), keep ↻ for nudges only.
+- **The footer glyphs are unguessable — a legend, not a relabel**
+  *(decided 2026-08-23)*. `↓4373` had its own author asking what it meant, and
+  `↻` means two things: reasoning tokens in the footer, a nudge in the
+  transcript. Both questions came up inside one session of live use.
+
+  The first instinct was to spell them out (`out:4373  think:4.3k`).
+  **Rejected.** Relabeling buys one glyph's clarity, pays footer width for it
+  forever, and leaves the next glyph exactly where this one started. The
+  footer is the one place where density is the whole point.
+
+  Instead: **a `/help` footer overlay naming every glyph.** Glyphs earn their
+  density once something makes them discoverable, and a legend is the thing
+  that makes them discoverable. `↻` may stay overloaded — the legend can say
+  both meanings, which is cheaper than finding a second glyph nobody guesses
+  either.
+
+  Depends on §10d: if the legend is an `Overlay`, it inherits the invisible
+  highlighted row, i.e. it would be built on the one broken widget.
 
 ## 10. Milestones
 
@@ -1280,6 +1293,81 @@ fetches one section instead of the pack.
 the JSONL trace (yesterday: 8×). If sections drop it to ~1× the design is
 done; embeddings-grade retrieval stays rejected until a real session shows
 grep-over-headings failing to find something.
+
+## 10d. The TUI assumes a dark terminal (found 2026-08-23)
+
+Found by running on a light Ghostty theme for the first time. The model
+answered — footer read `↓75` and `[done]` — and the transcript showed nothing
+after the thinking block. The reply was on screen the whole time, rendered
+white-on-white.
+
+**What is already right, and stays.** Worksmith emits ANSI-16 colour *names*,
+never RGB, and sets a background in exactly two places. So it already inherits
+whatever theme the terminal has: set Ghostty to gruvbox and worksmith is
+gruvbox, for free. That property is worth more than any theme system and must
+not be traded away.
+
+**The bug** is the handful of sites that name a colour where they meant *the
+default text*. `Color::White` is ANSI 7, which on a light theme is the
+background. Naming a foreground colour is a claim about the background, and
+these sites make that claim by accident.
+
+Confirmed:
+
+- `src/tui.rs:3168` — `Kind::Assistant => fg(Color::White)`. The model's
+  replies. The single most important text in the app, invisible.
+- `src/tui.rs:2989`, `:3047` — the overlay's highlighted row,
+  `fg(White) + BOLD`. The selected row vanishes, so a picker reads as a list
+  with a hole punched where the cursor is.
+- Judgment call, not a bug: `Kind::User` in cyan (`:3167`) and the footer's
+  `Black`-on-`Cyan` segment (`:3391`) are legible on light backgrounds but
+  washed out. Cyan-on-white is the classic low-contrast pair, and your own
+  input should be the most anchored thing on screen.
+
+The codebase already knows the rule. `src/tui.rs:3940`: the cursor row uses
+reverse video *"so it reads in any theme rather than a colour that might
+vanish."* Written down once, applied once, missed everywhere else.
+
+**How it gets tested.** Manually in fifteen seconds:
+
+    open -na Ghostty.app --args --theme="Builtin Light" -e worksmith
+
+`Solarized Light` and `Ayu Light` stress different halves (low-contrast
+background, washed-out brights). Then pinned with `TestBackend`, which the
+suite already uses five times over: assert assistant text renders with
+`fg == Color::Reset`. The manual pass finds these; the test stops them coming
+back, and `fg(Color::White)` looks harmless to anyone working on a dark theme.
+
+**Scope: this is deleting colour, not adding it.** It is not a theme system.
+Ghostty's theme already is worksmith's theme.
+
+### Themes proper, if ever
+
+Loading base16/base24 schemes (`~/.worksmith/themes/*.yaml`, a `/theme` picker
+over the overlay that already exists) is the portable form of "there are a ton
+of neovim themes out there" — gruvbox, tokyonight, catppuccin, nord, rose-pine
+all ship as sixteen hex values and documented slots. Parsing neovim Lua to
+extract them is not worth discussing.
+
+But it is optional and it is later, for two reasons:
+
+- It only matters if worksmith should look *unlike* the terminal it runs in,
+  which is a weaker want than it first sounds.
+- A colourscheme needs surface to act on. Ours is seven message kinds and a
+  diff. Syntax highlighting inside code blocks and diffs is the missing
+  surface, and it should come first — otherwise `/theme` is a picker that
+  changes seven colours.
+
+The prerequisite for either is the same refactor: collapse the 22 scattered
+`Color::` sites into ~17 named roles, with `Theme::terminal()` reproducing
+today's output exactly. Worth doing on its own merits — `Color::DarkGray`
+currently means thinking text, tool results, command descriptions, "(nothing
+matches)", footer chrome and status, and none of them can move independently.
+Same class of bug as `↻` meaning two things (§9).
+
+**Deliberately not:** hard-coded RGB anywhere; auto light/dark switching off an
+OSC 11 background query (unreliable through multiplexers, and stating it in
+config is one line).
 
 ## 11. Open decisions
 
