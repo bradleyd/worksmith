@@ -40,8 +40,8 @@ use crate::fanout::{
     spawn_notice,
 };
 use crate::report::{
-    GroupAcc, group_report, record_in_group, single_report, truncate, truncate_chars,
-    worker_headline,
+    GroupAcc, common_opening, group_report, record_in_group, single_report, truncate,
+    truncate_chars, worker_headline,
 };
 use crate::config::Config;
 use crate::llm::ModelOverride;
@@ -1341,8 +1341,30 @@ async fn run_loop(
                         // looks wrong can be diagnosed without a rebuild.
                         app.push(Kind::Notice, plan.note.clone());
                         if plan.tasks.len() > 1 {
-                            for (i, t) in plan.tasks.iter().enumerate() {
-                                app.push(Kind::Notice, format!("  {}. {}", i + 1, truncate(t, 100)));
+                            // Every task repeats the same setup, because each has
+                            // to stand alone. Say it once, so the truncation falls
+                            // on the shared half rather than the distinct one.
+                            match common_opening(&plan.tasks) {
+                                Some((shared, tails)) => {
+                                    app.push(
+                                        Kind::Notice,
+                                        format!("  all: {}…", truncate(&shared, 100)),
+                                    );
+                                    for (i, t) in tails.iter().enumerate() {
+                                        app.push(
+                                            Kind::Notice,
+                                            format!("  {}. …{}", i + 1, truncate(t, 100)),
+                                        );
+                                    }
+                                }
+                                None => {
+                                    for (i, t) in plan.tasks.iter().enumerate() {
+                                        app.push(
+                                            Kind::Notice,
+                                            format!("  {}. {}", i + 1, truncate(t, 100)),
+                                        );
+                                    }
+                                }
                             }
                         }
                         let report =

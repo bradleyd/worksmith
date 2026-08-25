@@ -14,6 +14,51 @@ pub struct GroupAcc {
     pub done: Vec<WorkerSummary>,
 }
 
+/// Split a fan-out's tasks into the wording they share and what is left.
+///
+/// Tasks must be self-contained — workers cannot talk to each other — so every
+/// one of them repeats the same setup ("Read X and Y, then draft…"). Listed
+/// verbatim and truncated to fit, they come out identical on screen and a
+/// perfectly good split reads as a planner that lost its mind. Say the shared
+/// part once and let the tails be the tails.
+///
+/// Returns `None` when there is nothing worth sharing — one task, or too little
+/// in common to be worth a line of its own.
+pub fn common_opening(tasks: &[String]) -> Option<(String, Vec<String>)> {
+    /// Below this a shared opening is not what is crowding out the difference,
+    /// and hoisting it costs a line to save a few characters.
+    const WORTH_HOISTING: usize = 24;
+
+    if tasks.len() < 2 {
+        return None;
+    }
+    let first: Vec<char> = tasks[0].chars().collect();
+    let mut n = first.len();
+    for t in &tasks[1..] {
+        n = n.min(
+            t.chars().zip(first.iter()).take_while(|(a, b)| a == *b).count(),
+        );
+        if n == 0 {
+            return None;
+        }
+    }
+    // Cut on a word boundary: half a word shared and half repeated reads worse
+    // than not hoisting at all.
+    while n > 0 && !first[n - 1].is_whitespace() {
+        n -= 1;
+    }
+    let shared: String = first[..n].iter().collect();
+    let shared = shared.trim_end().to_string();
+    if shared.chars().count() < WORTH_HOISTING {
+        return None;
+    }
+    let tails = tasks
+        .iter()
+        .map(|t| t.chars().skip(n).collect::<String>().trim_start().to_string())
+        .collect();
+    Some((shared, tails))
+}
+
 /// Record a finished worker against its group, and hand back the whole group
 /// once every member has reported.
 ///
@@ -154,6 +199,63 @@ pub fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- fan-out task display ----
+
+    #[test]
+    fn a_shared_opening_is_said_once_instead_of_truncating_every_task() {
+        // The real case: two genuinely different tasks that looked identical on
+        // screen because the first 55 characters matched and the line was cut
+        // at 100. The split was fine; the display made it look broken.
+        let tasks = vec![
+            "Read CONVENTIONS.md and DOCS_PLAN.md, then draft an outline for a \"Getting Started\" section".to_string(),
+            "Read CONVENTIONS.md and DOCS_PLAN.md, then draft an outline for a \"Why This Harness\" section".to_string(),
+        ];
+        let (shared, tails) = common_opening(&tasks).expect("a long shared opening");
+        assert_eq!(shared, "Read CONVENTIONS.md and DOCS_PLAN.md, then draft an outline for a");
+        assert_eq!(tails[0], "\"Getting Started\" section");
+        assert_eq!(tails[1], "\"Why This Harness\" section");
+    }
+
+    #[test]
+    fn nothing_is_hoisted_when_there_is_little_or_nothing_in_common() {
+        let distinct = vec!["Update the README".to_string(), "Refactor the parser".to_string()];
+        assert!(common_opening(&distinct).is_none(), "no shared opening");
+
+        // Shared but too short to be what is crowding the line out.
+        let short = vec!["Fix the parser bug".to_string(), "Fix the render bug".to_string()];
+        assert!(common_opening(&short).is_none());
+
+        let one = vec!["Only one task here, nothing to compare it against".to_string()];
+        assert!(common_opening(&one).is_none());
+    }
+
+    #[test]
+    fn the_shared_part_is_cut_on_a_word_boundary() {
+        // "Draft the intro" / "Draft the index" share "Draft the in" — hoisting
+        // mid-word would leave "tro" and "dex".
+        let tasks = vec![
+            "Read the plan and then draft the introduction section".to_string(),
+            "Read the plan and then draft the index section".to_string(),
+        ];
+        let (shared, tails) = common_opening(&tasks).unwrap();
+        assert!(shared.ends_with("draft the"), "cut mid-word: {shared}");
+        assert_eq!(tails[0], "introduction section");
+        assert_eq!(tails[1], "index section");
+    }
+
+    #[test]
+    fn multibyte_openings_do_not_split_a_character() {
+        let tasks = vec![
+            "文档を読んでから、序章の概要を作成する".to_string(),
+            "文档を読んでから、目次の概要を作成する".to_string(),
+        ];
+        // No panic, and whatever comes back reassembles.
+        if let Some((shared, tails)) = common_opening(&tasks) {
+            assert!(tasks[0].starts_with(&shared) || shared.is_empty());
+            assert!(!tails[0].is_empty());
+        }
+    }
 
     // ---- group accumulation ----
 

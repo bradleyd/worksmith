@@ -243,7 +243,10 @@ pub async fn plan_fanout(
                  to each other. So: no task may depend on another task's output, no task may \
                  be a step that only makes sense after another finishes, and no two tasks may \
                  write the same file. If the work is a sequence of phases rather than parallel \
-                 pieces, do not describe the phases — split the largest parallel part instead.";
+                 pieces, do not describe the phases — split the largest parallel part instead. \
+                 Begin each task with what makes it DIFFERENT from the others; shared setup \
+                 (which files to read, context to gather) goes at the end. Tasks that open with \
+                 the same words are indistinguishable in a list, however different their ends.";
     let system = match want {
         Some(n) => format!(
             "You split a work request into exactly {n} tasks for {n} independent \
@@ -271,7 +274,16 @@ pub async fn plan_fanout(
     match agent.ask(&system, &task, 2048).await {
         Ok(text) => match parse_subtasks(&text, want, max) {
             Ok(tasks) => {
-                let note = format!("planner split the work into {} task(s)", tasks.len());
+                // Say whose idea the count was. "planner split the work into 2"
+                // reads as a decision the planner made, and with `-n` it is not:
+                // the count is fixed before the model sees the request, and the
+                // prompt tells it to invent variations when the work does not
+                // divide that way. Reporting both cases identically invites the
+                // user to blame the planner for obeying them.
+                let note = match want {
+                    Some(n) => format!("split into {n} task(s), as you asked"),
+                    None => format!("planner chose to split this into {} task(s)", tasks.len()),
+                };
                 FanOutPlan { tasks, note }
             }
             Err(why) => {
