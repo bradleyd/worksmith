@@ -141,7 +141,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/think", "how hard to think: a level or a token budget"),
     ("/route", "which provider serves you (OpenRouter)"),
     ("/pair", "stop at decisions so you learn the code being written"),
-    ("/mouse", "wheel scrolling vs. selecting text"),
+    ("/mouse", "wheel scrolls the transcript (off: the terminal keeps the wheel)"),
     ("/trust", "is this project's own config in effect?"),
     ("/history", "what the loop did, and when"),
     ("/quit", "exit"),
@@ -339,8 +339,8 @@ struct App {
     pending_ask: Option<crate::tools::approval::TextRequest>,
     /// OpenRouter provider routing, when set live with `/route`.
     route: Option<String>,
-    /// Is mouse capture on? Off by default so the terminal keeps its own text
-    /// selection; `/mouse on` trades that for wheel scrolling.
+    /// Is mouse capture on? On by default, so the wheel scrolls the transcript
+    /// you are looking at. Shift+drag still selects text — see `setup_terminal`.
     mouse: bool,
 }
 
@@ -399,7 +399,7 @@ impl App {
             pending_approval: None,
             pending_ask: None,
             route: None,
-            mouse: false,
+            mouse: true,
         }
     }
 
@@ -936,12 +936,24 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 fn setup_terminal() -> Result<Term> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut out = io::stdout();
-    // Deliberately NOT EnableMouseCapture. Capturing the mouse takes drag events
-    // away from the terminal, which kills click-and-drag text selection — you
-    // can no longer copy anything out of the window. All it buys is wheel
-    // scrolling, and PageUp/PageDown and Ctrl+U/Ctrl+D already do that.
-    // `/mouse on` turns capture on for anyone who wants the wheel instead.
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste)
+    // Capture the mouse, so the wheel scrolls the transcript.
+    //
+    // This used to be off, on the reasoning that capture takes drag events from
+    // the terminal and kills click-and-drag selection. That reasoning was
+    // wrong: **Shift+drag bypasses mouse capture** in every mainstream terminal
+    // (iTerm2, Terminal.app, kitty, wezterm, gnome-terminal), which is how vim,
+    // tmux and htop all capture the mouse and stay copy-able. Verified here.
+    //
+    // Leaving it off was not neutral either, which is the real reason this
+    // changed. We run in the alternate screen, which has no scrollback, so the
+    // wheel has nothing native to do — and iTerm2 and Terminal.app default to
+    // *alternate scroll mode*, translating wheel-up/down into Up/Down arrows.
+    // The composer maps those to prompt history. So an uncaptured wheel did not
+    // scroll anything; it silently walked you through your own past prompts.
+    //
+    // `/mouse off` restores the old behaviour for anyone whose terminal does
+    // not do Shift+drag.
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)
         .context("entering alternate screen")?;
     Terminal::new(CrosstermBackend::new(out)).context("creating terminal")
 }
@@ -1848,7 +1860,7 @@ PROJECT
   /trust revoke                       decide again on the next start
 
 TERMINAL
-  /mouse [on|off]                     wheel scrolling vs. selecting text to copy
+  /mouse [on|off]                     wheel scrolls the transcript (on by
                                       default; Shift+drag still selects text)
 
 Ids accept any unique prefix, and Tab completes them. @path includes a file."
@@ -2178,12 +2190,13 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     app.push(
                         Kind::Notice,
                         if want {
-                            "mouse capture on — wheel scrolls, but the terminal can no longer \
-                             select text"
+                            "mouse capture on — the wheel scrolls the transcript. Shift+drag \
+                             still selects text to copy."
                                 .to_string()
                         } else {
-                            "mouse capture off — drag to select and copy; PageUp/PageDown and \
-                             Ctrl+U/Ctrl+D scroll"
+                            "mouse capture off — the terminal owns the wheel again. In the \
+                             alternate screen that usually means it sends Up/Down, which walks \
+                             prompt history; PageUp/PageDown and Ctrl+U/Ctrl+D scroll."
                                 .to_string()
                         },
                     );
