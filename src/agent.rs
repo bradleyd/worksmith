@@ -174,8 +174,8 @@ pub struct Agent {
     registry: Arc<ToolRegistry>,
     bus: EventBus,
     model: String,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
     top_k: Option<u32>,
     max_tokens: Option<u32>,
     max_steps: usize,
@@ -200,7 +200,7 @@ impl Agent {
         registry: Arc<ToolRegistry>,
         bus: EventBus,
         model: String,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
         max_steps: usize,
         max_retries: usize,
@@ -237,7 +237,7 @@ impl Agent {
     /// Sampling the model asks for (`[models."provider/model"]`). Unset fields
     /// leave the server's own defaults alone, which is what every request did
     /// before this table existed.
-    pub fn with_sampling(mut self, temperature: Option<f32>, top_p: Option<f32>, top_k: Option<u32>) -> Self {
+    pub fn with_sampling(mut self, temperature: Option<f64>, top_p: Option<f64>, top_k: Option<u32>) -> Self {
         if temperature.is_some() {
             self.temperature = temperature;
         }

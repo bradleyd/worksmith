@@ -18,7 +18,7 @@ use crate::supervisor::{Mode, SupervisorConfig};
 pub struct Config {
     /// Default model as `provider/model` (or bare `model` if one provider).
     pub model: Option<String>,
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub providers: HashMap<String, ProviderConfig>,
     pub agent: AgentConfig,
@@ -191,8 +191,8 @@ pub struct ModelSettings {
     pub input: Option<f64>,
     /// USD per million output (completion) tokens.
     pub output: Option<f64>,
-    pub temperature: Option<f32>,
-    pub top_p: Option<f32>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
     pub top_k: Option<u32>,
     /// This model's context window in tokens. A global `agent.context-limit`
     /// cannot be right for a 32k local model and a 256k one at the same time,

@@ -155,11 +155,17 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
-    pub temperature: Option<f32>,
+    /// f64, not f32. `serde_json::Value` has no f32 variant, so an f32 is
+    /// widened on the way out and its representation error becomes visible:
+    /// `0.7f32` serializes as `0.699999988079071`. Most providers ignore the
+    /// extra digits; Z.AI rejects the request outright ("The temperature
+    /// parameter is illegal.：限制小数点[2]位"). TOML parses floats as f64
+    /// already, so the narrowing bought nothing and only lost precision.
+    pub temperature: Option<f64>,
     /// Nucleus and top-k sampling, when the model asks for specific values.
     /// Unset means "whatever the server defaults to", which is what every
     /// request did before `[models]` existed.
-    pub top_p: Option<f32>,
+    pub top_p: Option<f64>,
     pub top_k: Option<u32>,
     pub max_tokens: Option<u32>,
     /// How much the model may deliberate before answering. `None` sends nothing

@@ -569,6 +569,24 @@ mod thinking_tests {
     }
 
     #[test]
+    fn sampling_numbers_go_out_as_written_not_as_float_noise() {
+        // The bug: temperature was `f32`, `serde_json::Value` has no f32
+        // variant, so 0.7 went out as 0.699999988079071. Most providers shrug;
+        // Z.AI rejects it — "The temperature parameter is illegal.：限制小数点[2]位".
+        let mut r = req(None);
+        r.temperature = Some(0.7);
+        r.top_p = Some(0.95);
+        let b = build_request_body(&r, ThinkingDialect::Reasoning, None, None);
+
+        assert_eq!(b["temperature"].to_string(), "0.7");
+        assert_eq!(b["top_p"].to_string(), "0.95");
+        // The whole body, because that is what the provider actually parses.
+        let wire = serde_json::to_string(&b).unwrap();
+        assert!(wire.contains(r#""temperature":0.7"#), "{wire}");
+        assert!(!wire.contains("0.6999"), "float noise reached the wire: {wire}");
+    }
+
+    #[test]
     fn silence_by_default() {
         // Sending nothing is what keeps every provider working; only opt-in.
         let b = build_request_body(&req(None), ThinkingDialect::Reasoning, None, None);
