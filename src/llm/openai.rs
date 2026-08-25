@@ -206,6 +206,15 @@ impl LlmClient for OpenAiCompatClient {
                         .and_then(|m| m.as_str())
                         .map(str::to_string)
                         .unwrap_or_else(|| err.to_string());
+                    // Classify it the way an HTTP status is classified above.
+                    // Without this, the *same* condition retried three times as
+                    // a status code and not at all in band: "Upstream idle
+                    // timeout exceeded" killed two workers outright while a 503
+                    // on the same provider would have been retried.
+                    if in_band_is_transient(err) {
+                        return Err(anyhow::Error::new(crate::llm::Transient)
+                            .context(format!("LLM stream error: {msg}")));
+                    }
                     bail!("LLM stream error: {msg}");
                 }
                 let chunk: ChunkResp = match serde_json::from_str(data) {
@@ -223,6 +232,40 @@ impl LlmClient for OpenAiCompatClient {
 /// Build the JSON request body by hand — this gives us exact control over the
 /// assistant `tool_calls` / tool-result shapes that OpenAI-compat servers are
 /// picky about.
+/// Is an in-band stream error worth trying again?
+///
+/// Providers report mid-stream failures inside a 200 response: `data: {"error":
+/// {...}}`. Those need the same 429/5xx judgement the HTTP path already makes,
+/// or an overloaded server is permanent when it arrives one way and temporary
+/// when it arrives the other.
+///
+/// Codes first, because they are the provider actually telling us. The message
+/// match is a fallback for payloads that carry no code at all — OpenRouter's
+/// idle timeout is exactly `{"error":{"message":"Upstream idle timeout
+/// exceeded"}}` — and it is kept deliberately narrow. Guessing at another
+/// vendor's wording is fragile, and guessing *wide* is the expensive
+/// direction: a permanent failure retried three times costs three calls and
+/// still fails. A 400 stays permanent — retrying an illegal parameter just
+/// spends the budget re-learning it, which is what Z.AI's temperature
+/// rejection would have done.
+fn in_band_is_transient(err: &serde_json::Value) -> bool {
+    // `code` is a number for some providers and a string for others.
+    let code = err.get("code").and_then(|c| {
+        c.as_u64().or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok()))
+    });
+    if let Some(c) = code {
+        return c == 429 || (500..600).contains(&c);
+    }
+    let msg = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    ["idle timeout", "timed out", "timeout", "overloaded", "temporarily unavailable", "try again"]
+        .iter()
+        .any(|needle| msg.contains(needle))
+}
+
 fn build_request_body(
     req: &ChatRequest,
     dialect: crate::llm::ThinkingDialect,
@@ -566,6 +609,38 @@ mod thinking_tests {
             thinking,
             sort: None,
         }
+    }
+
+    #[test]
+    fn an_in_band_failure_is_retried_on_the_same_terms_as_an_http_one() {
+        let t = |j: serde_json::Value| in_band_is_transient(&j);
+
+        // What killed two workers: no code at all, just a message.
+        assert!(t(serde_json::json!({"message": "Upstream idle timeout exceeded"})));
+        assert!(t(serde_json::json!({"message": "Server overloaded, try again"})));
+
+        // Codes win over wording, as numbers or as strings.
+        assert!(t(serde_json::json!({"code": 429, "message": "slow down"})));
+        assert!(t(serde_json::json!({"code": 503, "message": "bad gateway"})));
+        assert!(t(serde_json::json!({"code": "502", "message": "upstream"})));
+    }
+
+    #[test]
+    fn a_permanent_in_band_failure_is_not_retried() {
+        let t = |j: serde_json::Value| in_band_is_transient(&j);
+
+        // Z.AI rejecting the temperature. Retrying spends three calls
+        // re-learning the same thing.
+        assert!(!t(serde_json::json!({
+            "code": "1210",
+            "message": "The temperature parameter is illegal."
+        })));
+        assert!(!t(serde_json::json!({"code": 400, "message": "bad request"})));
+        assert!(!t(serde_json::json!({"code": 401, "message": "no key"})));
+        // A code that says permanent outranks a message that sounds transient.
+        assert!(!t(serde_json::json!({"code": 400, "message": "please try again"})));
+        assert!(!t(serde_json::json!({"message": "context length exceeded"})));
+        assert!(!t(serde_json::json!({})));
     }
 
     #[test]
