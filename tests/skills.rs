@@ -137,6 +137,12 @@ fn the_bundled_docs_skill_satisfies_our_own_loader() {
 fn a_misplaced_skill_can_be_pointed_at() {
     use worksmith::skill::SkillCatalog;
 
+    // `discover` searches the *global* skills dir as well as the project, so
+    // without this the assertion below reads whatever is in the developer's
+    // own ~/.worksmith/skills — and passes or fails depending on whose machine
+    // it runs on, and on which sibling test won the race to set the variable.
+    common::isolate_home();
+
     let dir = tempfile::tempdir().unwrap();
     write_skill(dir.path(), "bluecollar-newsletter", "house style", "the guide");
     let stray = dir.path().join("bluecollar-newsletter");

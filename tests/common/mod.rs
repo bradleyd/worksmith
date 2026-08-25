@@ -3,8 +3,11 @@
 //! Sessions and global memory live under `~/.worksmith` by default, so a test
 //! run would otherwise write scratch sessions into the developer's real one.
 //! Pointing `WORKSMITH_HOME` at a per-process scratch dir keeps the suite
-//! self-contained. Every test that creates a session or opens global memory
-//! calls [`isolate_home`] first.
+//! self-contained. Every test that touches anything resolved against that
+//! directory calls [`isolate_home`] first — sessions and global memory, but
+//! also the global skills dir, which `SkillCatalog::discover` searches
+//! alongside the project. Reading that one unisolated made a test's result
+//! depend on whose machine it ran on.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
