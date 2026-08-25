@@ -133,6 +133,31 @@ fn matches(pat: &str, cmd: &str) -> bool {
 /// pointed the agent at a project, and a path that escapes it was probably not
 /// intended. Symlinks and `..` are resolved as far as the filesystem allows.
 pub fn path_escapes_cwd(path: &Path, cwd: &Path) -> bool {
+    // Resolve `..` in the part of a path that does not exist yet.
+    //
+    // `canonicalize` cannot: it needs every component to exist. So the tail is
+    // joined verbatim, and `starts_with` then compares *lexically* — under
+    // which `proj/new/../../escape.txt` is happily "inside" `proj`. It is not:
+    // `write` calls `create_dir_all` on the parent first, which materializes
+    // `new/`, and the OS then resolves the `..` on the way out of the tree.
+    // The approval gate had already passed. Normalize before comparing.
+    fn lexical(p: &Path) -> std::path::PathBuf {
+        let mut out = std::path::PathBuf::new();
+        for c in p.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    // A `..` with nothing to pop stays: it still escapes, and
+                    // dropping it would silently rewrite the caller's path.
+                    if !out.pop() {
+                        out.push("..");
+                    }
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        out
+    }
     let canon = |p: &Path| -> std::path::PathBuf {
         // The target may not exist yet (a write creates it), so fall back to the
         // nearest existing ancestor.
@@ -140,11 +165,11 @@ pub fn path_escapes_cwd(path: &Path, cwd: &Path) -> bool {
         loop {
             if let Ok(c) = cur.canonicalize() {
                 let rest = p.strip_prefix(&cur).map(Path::to_path_buf).unwrap_or_default();
-                return c.join(rest);
+                return lexical(&c.join(rest));
             }
             match cur.parent() {
                 Some(parent) if parent != cur => cur = parent.to_path_buf(),
-                _ => return p.to_path_buf(),
+                _ => return lexical(p),
             }
         }
     };
@@ -155,6 +180,25 @@ pub fn path_escapes_cwd(path: &Path, cwd: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dotdot_inside_a_path_that_does_not_exist_yet_still_escapes() {
+        // `canonicalize` needs every component to exist, so the missing tail is
+        // joined verbatim and `starts_with` compares lexically. Under that,
+        // `proj/new/../../out.txt` reads as inside `proj` — and `write` calls
+        // `create_dir_all` first, so the OS really does resolve it outside.
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert!(
+            path_escapes_cwd(&cwd.join("new/../../out.txt"), &cwd),
+            "a `..` through a not-yet-created directory leaves the tree"
+        );
+        assert!(path_escapes_cwd(&tmp.path().join("out.txt"), &cwd));
+        assert!(!path_escapes_cwd(&cwd.join("sub/ok.txt"), &cwd), "an ordinary new file is fine");
+        assert!(!path_escapes_cwd(&cwd.join("a/../ok.txt"), &cwd), "a `..` that stays inside is fine");
+    }
 
     fn asks(cmd: &str) -> bool {
         matches!(classify(cmd), Decision::Ask(_))
