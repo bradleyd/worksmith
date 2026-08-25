@@ -40,7 +40,8 @@ use crate::fanout::{
     spawn_notice,
 };
 use crate::report::{
-    GroupAcc, group_report, single_report, truncate, truncate_chars, worker_headline,
+    GroupAcc, group_report, record_in_group, single_report, truncate, truncate_chars,
+    worker_headline,
 };
 use crate::config::Config;
 use crate::llm::ModelOverride;
@@ -1037,25 +1038,11 @@ async fn run_loop(
             // combined report instead of N disconnected ones.
             match w.group.and_then(|g| workers.group_info(g).map(|(r, t)| (g, r.to_string(), t))) {
                 Some((group, request, total)) => {
-                    let acc = match groups.iter_mut().find(|a| a.group == group) {
-                        Some(a) => a,
-                        None => {
-                            groups.push(GroupAcc {
-                                group,
-                                request,
-                                total,
-                                done: Vec::new(),
-                            });
-                            groups.last_mut().unwrap()
-                        }
+                    let Some(acc) =
+                        record_in_group(&mut groups, group, &request, total, w)
+                    else {
+                        continue; // siblings still running
                     };
-                    acc.done.push(w);
-                    if acc.done.len() < acc.total {
-                        continue;
-                    }
-                    let acc = groups.swap_remove(
-                        groups.iter().position(|a| a.group == group).unwrap(),
-                    );
                     let report = group_report(&acc);
                     app.push(Kind::Notice, format!("all {} workers finished", acc.done.len()));
                     deliver_to_parent(&app, &agent, &session, report).await;

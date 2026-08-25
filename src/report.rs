@@ -14,6 +14,46 @@ pub struct GroupAcc {
     pub done: Vec<WorkerSummary>,
 }
 
+/// Record a finished worker against its group, and hand back the whole group
+/// once every member has reported.
+///
+/// `total` is re-read from the manager on every call rather than trusted from
+/// when the group was created. `/agents drop-queued` lowers a group's expected
+/// count *after* it has begun reporting, and a snapshot taken at first-finish
+/// left the group waiting on members that no longer existed — no report, no
+/// synthesis, no error, just silence. `WorkerManager::drop_queued` decrements
+/// precisely to prevent that, and the decrement never reached the accumulator.
+pub fn record_in_group(
+    groups: &mut Vec<GroupAcc>,
+    group: u64,
+    request: &str,
+    total: usize,
+    worker: WorkerSummary,
+) -> Option<GroupAcc> {
+    let idx = match groups.iter().position(|a| a.group == group) {
+        Some(i) => i,
+        None => {
+            groups.push(GroupAcc {
+                group,
+                request: request.to_string(),
+                total,
+                done: Vec::new(),
+            });
+            groups.len() - 1
+        }
+    };
+    let acc = &mut groups[idx];
+    acc.total = total;
+    acc.done.push(worker);
+    // `>=`, not `==`: a count that drops below what already reported must still
+    // complete rather than sail past the equality and hang.
+    if acc.done.len() >= acc.total {
+        Some(groups.swap_remove(idx))
+    } else {
+        None
+    }
+}
+
 /// The one-line transcript announcement for a finished worker.
 pub fn worker_headline(w: &WorkerSummary) -> String {
     let glyph = match w.status {
@@ -114,6 +154,47 @@ pub fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- group accumulation ----
+
+    #[test]
+    fn a_group_whose_queued_members_were_dropped_still_completes() {
+        // The hang: fan out 5 with a cap of 3, the first worker finishes (so
+        // the group is created expecting 5), then `/agents drop-queued`
+        // removes the two still waiting. The remaining two finish, and the
+        // group sat at 3-of-5 forever — no report, no synthesis, no error.
+        let mut groups: Vec<GroupAcc> = Vec::new();
+
+        assert!(record_in_group(&mut groups, 1, "req", 5, summary("w1", "t", "r")).is_none());
+        assert!(record_in_group(&mut groups, 1, "req", 3, summary("w2", "t", "r")).is_none());
+
+        let done = record_in_group(&mut groups, 1, "req", 3, summary("w3", "t", "r"))
+            .expect("the lowered count must complete the group");
+        assert_eq!(done.done.len(), 3);
+        assert!(groups.is_empty(), "a completed group is removed");
+    }
+
+    #[test]
+    fn a_count_that_drops_below_what_already_reported_still_completes() {
+        // `>=` rather than `==`: if the count falls under the number already
+        // in hand, an equality check would sail straight past it.
+        let mut groups: Vec<GroupAcc> = Vec::new();
+        record_in_group(&mut groups, 1, "req", 4, summary("w1", "t", "r"));
+        record_in_group(&mut groups, 1, "req", 4, summary("w2", "t", "r"));
+        assert!(
+            record_in_group(&mut groups, 1, "req", 2, summary("w3", "t", "r")).is_some(),
+            "3 reported against a lowered total of 2 must still finish"
+        );
+    }
+
+    #[test]
+    fn groups_accumulate_independently() {
+        let mut groups: Vec<GroupAcc> = Vec::new();
+        assert!(record_in_group(&mut groups, 1, "a", 2, summary("w1", "t", "r")).is_none());
+        assert!(record_in_group(&mut groups, 2, "b", 1, summary("w2", "t", "r")).is_some());
+        assert_eq!(groups.len(), 1, "group 1 is untouched by group 2 completing");
+        assert!(record_in_group(&mut groups, 1, "a", 2, summary("w3", "t", "r")).is_some());
+    }
 
     // ---- worker results reaching the parent ----
 
