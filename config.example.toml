@@ -36,6 +36,13 @@ max-tokens = 8192
 type = "openai-compat"
 base-url = "https://openrouter.ai/api/v1"
 api-key-env = "OPENROUTER_API_KEY"
+# Seconds of silence *between stream chunks* before a request is abandoned.
+# Not a total cap: a real generation can run for many minutes and capping the
+# whole request would kill it. This bounds only the gap, so a server that
+# accepts a request and then goes quiet cannot hang the session forever.
+# Defaults to 600. Raise it for a loaded local server, where time-to-first-token
+# is the long gap — three workers queued on one machine routinely take minutes.
+# stream-idle-timeout = 600
 # How this provider spells "don't think". Guessed from the URL when unset:
 # hosted gateways get `reasoning`, self-hosted stacks get `chat-template`.
 # Sending the wrong one is worse than sending nothing — OpenRouter rejects

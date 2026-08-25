@@ -378,13 +378,37 @@ pub trait LlmClient: Send + Sync {
     ) -> anyhow::Result<Completion>;
 }
 
+/// Silence between chunks before a request is abandoned, when a provider does
+/// not set its own. Generous on purpose: the long gap is time-to-first-token,
+/// and a loaded local server can take minutes to produce it. The job here is to
+/// bound a hang, not to police slowness.
+pub const DEFAULT_STREAM_IDLE_SECS: u64 = 600;
+
+// A guard, not a test: the job of this timeout is to bound a hang, not to
+// police slowness, and a default low enough to interrupt a loaded local server
+// mid-prefill would do real damage quietly. Fails the build, not a test run.
+const _: () = assert!(
+    DEFAULT_STREAM_IDLE_SECS >= 300,
+    "too low: a queued local model can take minutes to produce a first token"
+);
+
 /// Build a streaming client for a resolved provider+model. Shared by the main
 /// session and by workers running on a different (usually cheaper) model, so
 /// there's one place that knows how a provider becomes a client.
 pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std::sync::Arc<dyn LlmClient>> {
     use anyhow::{Context, bail};
+    // `read_timeout`, not `timeout`. A total cap would kill a legitimate long
+    // generation — a 515s call is a measurement here, not a hypothetical. This
+    // bounds the *gap between chunks*, so a server that accepts the request and
+    // then goes silent cannot hang the session indefinitely, which is otherwise
+    // exactly what happens: the supervisor's `request-timeout` watches spawned
+    // workers and nothing watches the main loop.
+    let idle = std::time::Duration::from_secs(
+        resolved.provider.stream_idle_timeout.unwrap_or(DEFAULT_STREAM_IDLE_SECS),
+    );
     let http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(idle)
         .build()
         .context("building HTTP client")?;
     // Warn once per variable, not once per worker: a fan-out of five would
@@ -416,7 +440,8 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
             }
             c = c
                 .with_budget_param(resolved.provider.reasoning_budget_param.clone())
-                .with_sort(resolved.provider.sort.clone());
+                .with_sort(resolved.provider.sort.clone())
+                .with_stream_idle(idle);
             Ok(std::sync::Arc::new(c))
         }
         other => bail!("provider type `{other}` is not supported (use `openai-compat`)"),

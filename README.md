@@ -143,6 +143,88 @@ one machine will exhaust unified memory. Straddle instead, with local workers
 and a hosted judge, or run `worksmith spawn --no-synthesis` and swap models
 between the two commands.
 
+## Configuration reference
+
+Two files, merged field by field with the project's winning per field:
+`~/.worksmith/config.toml`, then `<project>/.worksmith/config.toml`. A project
+config is asked about once and remembered by content hash — it can run shell
+commands unattended and point a `base-url` anywhere, so trusting one file must
+not bless whatever it becomes after the next `git pull`. See `/trust`.
+
+[`config.example.toml`](config.example.toml) is the annotated version of this
+table and is written to `~/.worksmith/` on first run.
+
+### Top level
+
+| key | default | what it does |
+| --- | --- | --- |
+| `model` | — | `provider/model`, or a bare name when one provider is configured. `--model` overrides per run. |
+| `temperature` | server's | Fallback sampling temperature. A model's own `[models."…"]` entry wins. |
+| `max-tokens` | — | Output cap per request. Keep it generous: it also has to cover reasoning, and whole-file writes ride in tool-call arguments. |
+| `decisions-dir` | `.worksmith/decisions` | Where `/pair` files decision records. Must be a path git tracks. |
+
+### `[providers.<name>]`
+
+| key | default | what it does |
+| --- | --- | --- |
+| `type` | `openai-compat` | The only supported kind today. |
+| `base-url` | required | API root, e.g. `http://127.0.0.1:8000/v1`. |
+| `api-key-env` | — | Env var holding the key. Omit for servers that need none. A named-but-unset variable warns rather than failing. |
+| `thinking-param` | guessed from URL | `reasoning` (OpenRouter/OpenAI) or `chat-template` (vLLM/oMLX/llama.cpp). Set it explicitly behind a proxy. |
+| `reasoning-budget-param` | — | This server's field for a reasoning token budget — vLLM `thinking_token_budget`, oMLX `thinking_budget`. Opt-in, because a strict server 400s on an unknown key. |
+| `stream-idle-timeout` | `600` | Seconds of silence **between chunks** before giving up. Not a total cap — that would kill a legitimate long generation. Raise it for a loaded local server, where time-to-first-token is the long gap. |
+| `sort` | — | OpenRouter routing: `throughput`, `latency`, or `price`. Also `/route`. |
+
+### `[models."provider/model"]`
+
+One table, because prices, sampling, and window all want the same key.
+
+| key | default | what it does |
+| --- | --- | --- |
+| `input` / `output` | — | USD per million tokens. Without both, the footer shows no cost rather than a made-up `$0.00`. |
+| `temperature` / `top-p` / `top-k` | server's | Sampling this model asks for. Qwen wants 0.6 with thinking on; those are Qwen's numbers, not universal ones. |
+| `context` | `agent.context-limit` | This model's window. **Worth setting.** A global limit cannot be right for a 32k local model and a 256k hosted one at once, and being wrong means compaction waits for a trigger the server rejects the request long before reaching. |
+
+### `[agent]`
+
+| key | default | what it does |
+| --- | --- | --- |
+| `max-steps` | `50` | Model↔tool iterations per turn. |
+| `max-retries` | `3` | Re-plan attempts after a failed validation. |
+| `stuck-threshold` | `3` | Identical repeated tool calls before a nudge. |
+| `validate` | — | Default success check. `--until` overrides per run. |
+| `context-limit` | `128000` | Fallback window; compaction fires at 75%. Prefer per-model `context`. |
+| `keep-recent-turns` | `6` | Turns kept verbatim when compacting. |
+| `thinking` | server's | `on`, `off`, or a token budget. `off` is fast mode. Also `--fast` / `--think` / `/fast` / `/think`. |
+| `pair` | `false` | Offer the pairing checkpoint — the loop stops to ask you, tell you why, or hand you the hard part. Also `/pair`. Spawned workers never checkpoint. |
+
+### `[agents]` — spawned workers
+
+| key | default | what it does |
+| --- | --- | --- |
+| `max` | `4` | Concurrency cap. Extra spawns queue. |
+| `model` | session's | Run workers on a cheaper model. `/spawn --model` overrides per spawn. |
+| `validate` | — | Check every worker must pass. `/spawn --until` overrides. |
+| `supervisor` | `rules` | Watchdog policy for workers. |
+| `stuck-timeout` | `120` | Seconds of idle **between steps** before a nudge. Time waiting on a model call does not count. |
+| `max-nudges` | `3` | Nudges before escalating. |
+| `repeat-threshold` | `4` | Repeated identical calls before the supervisor acts. |
+| `token-budget` | unset | Completion tokens a worker may spend before escalating. Unset means no budget. |
+| `request-timeout` | `600` | How long the supervisor waits on an in-flight worker call before escalating. **Workers only** — the main loop's stall guard is `stream-idle-timeout`. |
+| `fanout` | — | Whether a bare `/spawn` plans a fan-out or runs one worker. |
+| `synthesize` | `true` | After a fan-out group reports, ask the session's model to combine the results. |
+
+### `[tools]`, `[web]`, `[tui]`
+
+| key | default | what it does |
+| --- | --- | --- |
+| `tools.bash-timeout-secs` | `120` | Per-command timeout for `bash`. |
+| `web.provider` | — | `brave`, `tavily`, or `searxng`. Fetching a URL needs none of this. |
+| `web.api-key-env` | — | Env var holding the search key. |
+| `web.base-url` | — | For self-hosted SearXNG. |
+| `tui.insert-escape` | — | Two characters that leave the composer, the `jj` habit. Empty disables. |
+| `tui.insert-escape-ms` | — | How quickly the two must follow each other. |
+
 ## Status
 
 Everything in the next section works today. MCP and a real sandbox are still

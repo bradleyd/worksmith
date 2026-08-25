@@ -134,6 +134,20 @@ pub struct ProviderConfig {
     /// and a strict one answers 400 for an unknown key.
     #[serde(default)]
     pub reasoning_budget_param: Option<String>,
+    /// Seconds of silence *between stream chunks* before giving up on a
+    /// request, per provider because the right number is the endpoint's.
+    ///
+    /// Not a total timeout: a legitimate generation can run for many minutes
+    /// and capping the whole request would kill it. This bounds only the gap,
+    /// so a server that accepts a request and then goes quiet cannot hang the
+    /// session forever — which it otherwise can, since the supervisor's
+    /// `request-timeout` watches spawned workers and never the main loop.
+    ///
+    /// The default is deliberately generous. Time-to-first-token is the long
+    /// gap, and three workers queued on one local server routinely take
+    /// minutes to produce it.
+    #[serde(default)]
+    pub stream_idle_timeout: Option<u64>,
     /// OpenRouter provider routing: `throughput` (fastest tokens/sec),
     /// `latency` (fastest to first token), or `price`. Sent as
     /// `provider: {"sort": …}`. Ignored by servers that don't route.

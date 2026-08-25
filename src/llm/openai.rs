@@ -26,6 +26,9 @@ pub struct OpenAiCompatClient {
     sort: Option<String>,
     /// A dropped reasoning budget is worth saying once, not once per step.
     warned_no_budget: std::sync::atomic::AtomicBool,
+    /// What the client's `read_timeout` was set to, so a stall can name the
+    /// setting that ended it instead of reporting "operation timed out".
+    stream_idle: std::time::Duration,
 }
 
 impl OpenAiCompatClient {
@@ -43,7 +46,15 @@ impl OpenAiCompatClient {
             budget_param: None,
             sort: None,
             warned_no_budget: std::sync::atomic::AtomicBool::new(false),
+            stream_idle: std::time::Duration::from_secs(crate::llm::DEFAULT_STREAM_IDLE_SECS),
         }
+    }
+
+    /// Tell the client the idle timeout its HTTP client was built with, purely
+    /// so an error can name it.
+    pub fn with_stream_idle(mut self, idle: std::time::Duration) -> Self {
+        self.stream_idle = idle;
+        self
     }
 
     /// Override the guessed dialect (config `thinking-param`).
@@ -181,7 +192,18 @@ impl LlmClient for OpenAiCompatClient {
                 chunk = stream.next() => chunk,
             };
             let Some(chunk) = next else { break };
-            let bytes = chunk.context("reading stream chunk")?;
+            let bytes = chunk.map_err(|e| {
+                if e.is_timeout() {
+                    anyhow::Error::new(crate::llm::Transient).context(format!(
+                        "the provider sent nothing for {}s and the request was abandoned. \
+                         If this model is simply slow to start, raise \
+                         `stream-idle-timeout` under its [providers.*] section.",
+                        self.stream_idle.as_secs()
+                    ))
+                } else {
+                    anyhow::Error::new(e).context("reading stream chunk")
+                }
+            })?;
             buf.extend_from_slice(&bytes);
             if buf.len() > MAX_SSE_LINE {
                 bail!(

@@ -34,3 +34,24 @@ fn a_fresh_global_home_is_created_with_a_reference_config() {
     assert!(err.contains(&home.display().to_string()), "error names the real path: {err}");
     assert!(err.contains("config.example.toml"), "error points at the example: {err}");
 }
+
+/// The stall guard is per-provider, because the right number is the endpoint's:
+/// a loaded local server takes minutes to produce a first token, and OpenRouter
+/// does not.
+#[test]
+fn a_stream_idle_timeout_is_per_provider_with_a_generous_default() {
+    let c: worksmith::config::Config = toml::from_str(
+        r#"
+        model = "local/m"
+        [providers.local]
+        base-url = "http://127.0.0.1:8000/v1"
+        [providers.remote]
+        base-url = "https://openrouter.ai/api/v1"
+        stream-idle-timeout = 90
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(c.providers["local"].stream_idle_timeout, None, "falls back to the default");
+    assert_eq!(c.providers["remote"].stream_idle_timeout, Some(90));
+}
