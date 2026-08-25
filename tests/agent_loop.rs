@@ -1069,3 +1069,31 @@ async fn one_long_turn_can_still_be_compacted() {
         "the kept slice must not start with an orphaned tool result"
     );
 }
+
+/// A turn that ends badly has to say what to do about it. The failure this
+/// covers: hitting the step limit left four words in the footer, the next
+/// keystroke took them away, and nothing said the work was still there.
+#[test]
+fn a_turn_that_ends_badly_says_what_to_do_next() {
+    use worksmith::agent::TurnOutcome;
+
+    let hit = TurnOutcome::MaxSteps(50);
+    assert_eq!(hit.label(), "hit step limit (50)", "the number, not just the fact");
+    let advice = hit.advice().expect("the step limit must explain itself");
+    assert!(advice.contains("50"), "names the cap that was hit: {advice}");
+    assert!(advice.contains("continue"), "says the work is resumable: {advice}");
+    assert!(advice.contains("max-steps"), "names the setting: {advice}");
+
+    for bad in [
+        TurnOutcome::ValidationFailed("cargo test".into()),
+        TurnOutcome::Stuck("read the same file 4 times".into()),
+        TurnOutcome::Blocked("rm -rf refused".into()),
+    ] {
+        let a = bad.advice().unwrap_or_else(|| panic!("{} says nothing", bad.label()));
+        assert!(a.len() > 40, "{}: too terse to act on", bad.label());
+    }
+
+    // Success needs no announcement, and an abort was the user's own doing.
+    assert!(TurnOutcome::Done.advice().is_none());
+    assert!(TurnOutcome::Aborted.advice().is_none(), "do not narrate what they just did");
+}

@@ -1382,7 +1382,17 @@ async fn run_loop(
                 app.running = false;
                 app.turn_start = None;
                 match res {
-                    Ok(Ok(r)) => app.status = format!("[{}]", r.outcome.label()),
+                    Ok(Ok(r)) => {
+                        app.status = format!("[{}]", r.outcome.label());
+                        // The footer says four words and the next keystroke
+                        // takes them away. A turn that ended badly has to leave
+                        // something the user can scroll back to — and say what
+                        // to do about it, since "hit step limit" answers
+                        // nothing on its own.
+                        if let Some(advice) = r.outcome.advice() {
+                            app.push(Kind::Notice, advice);
+                        }
+                    }
                     Ok(Err(e)) => app.push(Kind::Error, format!("turn error: {e:#}")),
                     Err(_) => app.push(Kind::Error, "turn task failed".to_string()),
                 }

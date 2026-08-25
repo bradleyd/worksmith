@@ -669,6 +669,11 @@ async fn repl(
         match result {
             Ok(r) if !r.outcome.is_success() => {
                 println!("\x1b[2m[{}]\x1b[0m", r.outcome.label());
+                // Same words as the TUI: the advice lives with the outcome so
+                // the two front ends cannot drift.
+                if let Some(advice) = r.outcome.advice() {
+                    println!("\x1b[2m{advice}\x1b[0m");
+                }
             }
             Ok(_) => {}
             Err(e) => eprintln!("\x1b[31mturn error:\x1b[0m {e:#}"),

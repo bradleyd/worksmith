@@ -39,8 +39,9 @@ pub enum TurnOutcome {
     Stuck(String),
     /// A destructive command was refused and the turn was hard-stopped.
     Blocked(String),
-    /// Hit the per-attempt step cap.
-    MaxSteps,
+    /// Hit the per-attempt step cap. Carries the cap, so the message can say
+    /// what the number was and what raising it means.
+    MaxSteps(usize),
     /// Cancelled mid-turn.
     Aborted,
 }
@@ -52,12 +53,42 @@ impl TurnOutcome {
             TurnOutcome::ValidationFailed(r) => format!("validation failed: {r}"),
             TurnOutcome::Stuck(r) => format!("stuck: {r}"),
             TurnOutcome::Blocked(r) => format!("blocked: {r}"),
-            TurnOutcome::MaxSteps => "hit step limit".into(),
+            TurnOutcome::MaxSteps(n) => format!("hit step limit ({n})"),
             TurnOutcome::Aborted => "aborted".into(),
         }
     }
     pub fn is_success(&self) -> bool {
         matches!(self, TurnOutcome::Done)
+    }
+
+    /// What the user can do about it, or `None` when there is nothing to say.
+    ///
+    /// A turn that ends badly used to leave four words in the footer, which the
+    /// next keystroke overwrote. The outcome was the only signal that anything
+    /// had gone wrong and it was the one thing not written down.
+    pub fn advice(&self) -> Option<String> {
+        match self {
+            // Success needs no announcement, and an aborted turn was the user's
+            // own doing — telling them what they just did is noise.
+            TurnOutcome::Done | TurnOutcome::Aborted => None,
+            TurnOutcome::MaxSteps(n) => Some(format!(
+                "Stopped after {n} steps — the cap, not a failure. Everything it did is still \
+                 in context, so `continue` picks up where it left off with a fresh {n}. If a \
+                 task needs more than {n} steps at a time, raise `max-steps` under [agent], or \
+                 split the work: `/spawn` runs pieces in parallel, each with its own budget."
+            )),
+            TurnOutcome::ValidationFailed(r) => Some(format!(
+                "The check never passed: {r}. Retries are spent, but the work is still here — \
+                 fix it and `continue`, or change what counts as done with `/validate`."
+            )),
+            TurnOutcome::Stuck(r) => Some(format!(
+                "Stopped going in circles: {r}. Asking again the same way will loop the same \
+                 way — say what to do differently."
+            )),
+            TurnOutcome::Blocked(r) => Some(format!(
+                "Stopped: {r}. Nothing was run. Say what you want done instead."
+            )),
+        }
     }
 }
 
@@ -463,7 +494,7 @@ impl Agent {
 
             match idle {
                 IdleReason::Aborted => break TurnOutcome::Aborted,
-                IdleReason::MaxSteps => break TurnOutcome::MaxSteps,
+                IdleReason::MaxSteps => break TurnOutcome::MaxSteps(self.max_steps),
                 IdleReason::Stuck(r) => break TurnOutcome::Stuck(r),
                 IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
                 IdleReason::ModelDone => {
