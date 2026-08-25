@@ -19,6 +19,15 @@ temperature = 0.7
 # return nothing at all.
 max-tokens = 8192
 
+# Where pairing checkpoints file their decision records. Relative paths resolve
+# against the project root. The default lives inside .worksmith/ because that is
+# worksmith's own namespace in someone else's repo — if your project already
+# keeps ADRs somewhere, point this at that directory instead.
+#
+# Whatever you choose has to be tracked by git: a decision filed into an ignored
+# path is not in the history it was written for.
+# decisions-dir = "docs/decisions"
+
 # --- Providers -------------------------------------------------------------
 
 # OpenRouter — many hosted models behind one key. The most practical way to mix
@@ -100,6 +109,15 @@ max-retries = 3             # validation re-plan attempts before giving up
 stuck-threshold = 3         # identical repeated tool calls before a nudge
 # validate = "cargo test"   # default success check (--until overrides per-run)
 context-limit = 128000      # approx model context (tokens); compact at 75%
+# Pairing: the loop stops at decisions worth your say — puts a question to you
+# and files the answer as a decision record, tells you *why* it did something,
+# or stubs the load-bearing function and leaves it for you to write.
+#
+# Off by default: it is an interrupt. `/pair` toggles it for a session.
+# Spawned workers never checkpoint, whatever this says — nobody is watching a
+# background task, and a fan-out of five would queue five questions behind one
+# composer.
+# pair = true
 keep-recent-turns = 6       # turns kept verbatim when compacting
 # How much does the model reason before answering? Unset leaves the provider's
 # default. "off" is fast mode ("feeling lucky"): measured at 101 completion

@@ -3,6 +3,7 @@
 
 mod bash;
 pub mod approval;
+mod checkpoint;
 pub mod policy;
 mod doc;
 mod edit;
@@ -43,7 +44,21 @@ pub struct ToolContext {
     /// instruction, not conversation, and compacting it away made the model
     /// load the same 4kB pack eight times in one session.
     pub loaded_skills: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Who to put a pairing checkpoint to. Defaults to nobody, which skips
+    /// them — see [`approval::Asker`] for why that direction, not refusal.
+    pub asker: std::sync::Arc<dyn approval::Asker>,
+    /// Checkpoints left this turn. A cap belongs in code rather than in the
+    /// tool's prose: a model can ignore a paragraph asking it to be sparing,
+    /// and cannot ignore a tool that declines the fourth call. Reset per turn
+    /// by the agent.
+    pub checkpoints_left: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Where decisions are filed, relative to `cwd` unless absolute
+    /// (`decisions-dir`, default `.worksmith/decisions`).
+    pub decisions_dir: PathBuf,
 }
+
+/// How many checkpoints one turn may raise before the tool starts declining.
+pub const CHECKPOINTS_PER_TURN: usize = 3;
 
 impl Default for ToolContext {
     fn default() -> Self {
@@ -54,6 +69,11 @@ impl Default for ToolContext {
             is_worker: false,
             approver: std::sync::Arc::new(approval::AutoApprove),
             loaded_skills: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            asker: std::sync::Arc::new(approval::NoOneToAsk),
+            checkpoints_left: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(CHECKPOINTS_PER_TURN),
+            ),
+            decisions_dir: PathBuf::from(".worksmith/decisions"),
         }
     }
 }
@@ -182,6 +202,7 @@ impl ToolRegistry {
         r.register(Box::new(recall::KnowledgeTool));
         r.register(Box::new(web::WebTool));
         r.register(Box::new(skill::SkillTool));
+        r.register(Box::new(checkpoint::CheckpointTool));
         r
     }
 

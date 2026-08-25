@@ -109,6 +109,10 @@ enum Kind {
     Diff,
     Notice,
     Error,
+    /// A pairing checkpoint. Its own channel on purpose: rendered as a notice
+    /// it reads as machinery chatter, and machinery chatter is what teaches
+    /// someone to stop reading the transcript.
+    Pair,
 }
 
 struct Item {
@@ -136,6 +140,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/fast", "answer without thinking first"),
     ("/think", "how hard to think: a level or a token budget"),
     ("/route", "which provider serves you (OpenRouter)"),
+    ("/pair", "stop at decisions so you learn the code being written"),
     ("/mouse", "wheel scrolling vs. selecting text"),
     ("/trust", "is this project's own config in effect?"),
     ("/history", "what the loop did, and when"),
@@ -328,6 +333,10 @@ struct App {
     /// the question instead of editing the composer — the agent's task is
     /// blocked until it gets a reply.
     pending_approval: Option<crate::tools::approval::ApprovalRequest>,
+    /// A pairing checkpoint waiting on an answer. Unlike an approval it does
+    /// *not* seize the keyboard: the answer is prose, so the composer stays a
+    /// composer and only Enter is routed somewhere else.
+    pending_ask: Option<crate::tools::approval::TextRequest>,
     /// OpenRouter provider routing, when set live with `/route`.
     route: Option<String>,
     /// Is mouse capture on? Off by default so the terminal keeps its own text
@@ -388,6 +397,7 @@ impl App {
             hint: None,
             tail: None,
             pending_approval: None,
+            pending_ask: None,
             route: None,
             mouse: false,
         }
@@ -820,6 +830,17 @@ impl App {
                     self.push(Kind::ToolResult, format!("{prefix}{output}"));
                 }
             }
+            Event::Checkpoint { kind, subject, detail } => {
+                // `ask` renders when its answer comes back, not here — the
+                // question is already on screen in the composer's prompt, and
+                // printing it twice reads as the loop stuttering.
+                let head = match kind.as_str() {
+                    "yours" => format!("yours — {subject}"),
+                    "ask" => return,
+                    _ => subject.clone(),
+                };
+                self.push(Kind::Pair, format!("{head}\n  {detail}"));
+            }
             Event::Nudge { reason } => self.push(Kind::Notice, format!("↻ {reason}")),
             Event::Validation { ok, detail } => {
                 if ok {
@@ -883,6 +904,7 @@ pub async fn run_tui(
     // Questions from the agent's task: "may I run this?". The agent blocks on
     // the answer, so this loop must always send one.
     approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
+    asks: tokio::sync::mpsc::Receiver<crate::tools::approval::TextRequest>,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let res = run_loop(
@@ -902,6 +924,7 @@ pub async fn run_tui(
         config,
         model_settings,
         approvals,
+        asks,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -955,6 +978,7 @@ async fn run_loop(
     // Prices and sampling for the session's model, for the footer's cost.
     model_settings: crate::config::ModelSettings,
     mut approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
+    mut asks: tokio::sync::mpsc::Receiver<crate::tools::approval::TextRequest>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let session = Arc::new(AsyncMutex::new(session));
@@ -1257,6 +1281,20 @@ async fn run_loop(
                 );
                 app.status = "y = once · a = always this session · n = no".into();
                 app.pending_approval = Some(req);
+                if app.follow { app.scroll_up = 0; }
+                app.dirty = true;
+            }
+
+            // A pairing checkpoint. The turn is blocked on it, but the user is
+            // free to ignore it — Esc skips, and the work carries on without
+            // their answer rather than stalling.
+            Some(req) = asks.recv(), if app.pending_ask.is_none() => {
+                app.push(
+                    Kind::Pair,
+                    format!("{}\n  {}", req.subject, req.question),
+                );
+                app.status = "type your answer · Enter to send · Esc to skip".into();
+                app.pending_ask = Some(req);
                 if app.follow { app.scroll_up = 0; }
                 app.dirty = true;
             }
@@ -1612,7 +1650,14 @@ async fn handle_key(
         }
         KeyCode::Char('g') if ctrl => return Ok(Flow::ExternalEdit),
         KeyCode::Esc => {
-            if app.running {
+            // Skipping a checkpoint outranks the other Esc meanings: the turn
+            // is blocked on it, and "abort the turn" is not what someone who
+            // just wants to move on is reaching for.
+            if let Some(req) = app.pending_ask.take() {
+                app.push(Kind::Pair, "skipped".to_string());
+                app.status = "/help for keys and commands".into();
+                req.answer(None);
+            } else if app.running {
                 cancel.cancel();
                 app.status = "aborting…".into();
             } else if app.input.is_empty() {
@@ -1646,6 +1691,16 @@ async fn handle_key(
             let raw = app.take_input();
             let input = raw.trim().to_string();
             if input.is_empty() {
+                return Ok(Flow::Continue);
+            }
+
+            // Answering a checkpoint, not starting a turn. Checked before the
+            // command dispatch below so an answer that happens to start with a
+            // slash is still an answer.
+            if let Some(req) = app.pending_ask.take() {
+                app.push(Kind::Pair, format!("you ▸ {input}"));
+                app.status = "/help for keys and commands".into();
+                req.answer(Some(input));
                 return Ok(Flow::Continue);
             }
 
@@ -1762,6 +1817,9 @@ MODEL
   /fast [on|off|auto]                 answer without thinking first
   /think [on|off|auto|low|high|<n>]   how hard to think: a level or a token budget
   /route [throughput|latency|price]   which provider serves you (OpenRouter)
+  /pair [on|off]                      stop at decisions: ask you, tell you why,
+                                      or hand you the hard part. Main loop only —
+                                      spawned workers never interrupt you.
 
 MEMORY
   /memory                             list what is remembered
@@ -1791,6 +1849,7 @@ PROJECT
 
 TERMINAL
   /mouse [on|off]                     wheel scrolling vs. selecting text to copy
+                                      default; Shift+drag still selects text)
 
 Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     .to_string(),
@@ -2040,6 +2099,28 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     );
                 }
             }
+        }
+        "pair" => {
+            let on = match parts.next() {
+                None => !agent.pairing_on(),
+                Some("on") => true,
+                Some("off") => false,
+                Some(other) => {
+                    app.push(Kind::Error, format!("usage: /pair [on|off] (got {other})"));
+                    return Ok(true);
+                }
+            };
+            agent.set_pairing(on);
+            app.push(
+                Kind::Notice,
+                if on {
+                    "pairing on — the loop will stop at decisions worth your say. Spawned \
+                     workers never will."
+                        .to_string()
+                } else {
+                    "pairing off — the checkpoint is no longer offered to the model".to_string()
+                },
+            );
         }
         "route" => {
             // Deliberately not folded into /fast. `sort` changes *which
@@ -2451,6 +2532,9 @@ fn describe(ev: &Event) -> String {
             "usage: {completion_tokens} tok ({reasoning_tokens} reasoning), finish={}",
             finish_reason.as_deref().unwrap_or("none")
         ),
+        Event::Checkpoint { kind, subject, .. } => {
+            format!("◆ checkpoint ({kind}): {}", truncate(subject.trim(), 50))
+        }
         Event::Nudge { reason } => format!("↻ nudge: {}", truncate(reason.trim(), 60)),
         Event::Validation { ok, detail } => {
             format!("{} validation: {detail}", if *ok { "✓" } else { "✗" })
@@ -3218,6 +3302,9 @@ fn item_rows(
             Kind::Tool => (Style::default().fg(Color::Yellow), "⚙ "),
             Kind::ToolResult => (Style::default().fg(Color::DarkGray), "→ "),
             Kind::Notice => (Style::default().fg(Color::Blue), ""),
+            Kind::Pair => {
+                (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
+            }
             Kind::Error => (Style::default().fg(Color::Red), "! "),
             Kind::Diff => unreachable!("diffs are rendered above"),
         };
@@ -3271,6 +3358,8 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     // of waiting for a keypress nobody knew was wanted.
     let title = if app.pending_approval.is_some() {
         " APPROVE?  y = once · a = always this session · n = no ".to_string()
+    } else if app.pending_ask.is_some() {
+        " CHECKPOINT  Enter answers · Esc skips ".to_string()
     } else if app.mode == Mode::Normal {
         // The single worst modal failure is not knowing which mode you are in.
         match &app.search {
@@ -3430,7 +3519,7 @@ fn footer_string(app: &App) -> String {
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let left = footer_string(app);
     // While a turn runs, show an animated spinner + elapsed seconds.
-    let status = if app.pending_approval.is_some() {
+    let status = if app.pending_approval.is_some() || app.pending_ask.is_some() {
         // No spinner: nothing is happening, and an animation would say it is.
         format!("⏸ waiting for you  {}", app.status)
     } else if app.running {
@@ -3784,6 +3873,90 @@ mod tests {
 
         a.pending_approval.take().unwrap().answer(crate::tools::approval::Approval::Once);
         assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Once);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_answer_goes_to_the_question_not_into_a_new_turn() {
+        let (asker, mut rx) = crate::tools::approval::ChannelAsker::new();
+        let h = tokio::spawn(async move {
+            use crate::tools::approval::Asker;
+            asker.ask_text("Pin the worker model", "pin or retarget?").await
+        });
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req.subject, "Pin the worker model");
+
+        let mut a = app();
+        a.running = true; // the turn is blocked on the answer
+        a.pending_ask = Some(req);
+        a.insert_str("Pin it.");
+
+        // Unlike an approval, the composer stays a composer — typing works,
+        // and only Enter is routed somewhere else. This covers that routing
+        // decision, not the key dispatch: the Enter handler needs the whole
+        // turn's context (agent, session, workers) to call directly.
+        assert_eq!(a.input, "Pin it.");
+        let input = a.take_input().trim().to_string();
+        a.pending_ask.take().unwrap().answer(Some(input));
+
+        assert_eq!(h.await.unwrap().as_deref(), Some("Pin it."));
+        assert!(a.input.is_empty(), "the answer left the composer");
+    }
+
+    #[tokio::test]
+    async fn a_pending_checkpoint_stops_the_spinner_claiming_to_be_busy() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (asker, mut rx) = crate::tools::approval::ChannelAsker::new();
+        let h = tokio::spawn(async move {
+            use crate::tools::approval::Asker;
+            asker.ask_text("Pin the worker model", "pin or retarget?").await
+        });
+        let req = rx.recv().await.unwrap();
+
+        let mut a = app();
+        a.running = true;
+        a.status = "type your answer · Enter to send · Esc to skip".into();
+        a.pending_ask = Some(req);
+        a.ensure_rows(78);
+
+        let mut term = Terminal::new(TestBackend::new(78, 12)).unwrap();
+        term.draw(|f| ui(f, &a)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("CHECKPOINT"), "the composer says what it wants: {screen}");
+        assert!(screen.contains("Esc skips"), "and that ignoring it is allowed: {screen}");
+        assert!(screen.contains("waiting for you"), "no spinner while it waits: {screen}");
+
+        // Esc answers None, and the work carries on.
+        a.pending_ask.take().unwrap().answer(None);
+        assert_eq!(h.await.unwrap(), None);
+    }
+
+    #[test]
+    fn a_checkpoint_is_its_own_channel_not_a_notice() {
+        let mut a = app();
+        a.apply_event(Event::Checkpoint {
+            kind: "yours".into(),
+            subject: "ActiveModel::from_override".into(),
+            detail: "stubbed at llm/mod.rs:440 — must reset sampling".into(),
+        });
+        assert!(matches!(a.items[0].kind, Kind::Pair), "a checkpoint is not machinery chatter");
+        assert!(a.items[0].text.contains("yours — ActiveModel::from_override"));
+
+        // An `ask` renders when its answer lands, not when it is raised: the
+        // question is already on screen in the composer's prompt.
+        let mut b = app();
+        b.apply_event(Event::Checkpoint {
+            kind: "ask".into(),
+            subject: "Pin the worker model".into(),
+            detail: "pin or retarget?".into(),
+        });
+        assert!(b.items.is_empty(), "the question is not printed twice");
     }
 
     #[test]

@@ -196,12 +196,25 @@ async fn run(args: Args) -> Result<()> {
             (Arc::new(worksmith::tools::approval::RefuseWhenUnattended), None)
         };
 
+    // Checkpoints only exist where somebody is watching. Unattended, `NoOneToAsk`
+    // skips them and the work carries on — the opposite direction from
+    // approval, and deliberately so.
+    let (asker, asks): (Arc<dyn worksmith::tools::approval::Asker>, _) = if mode == OutputMode::Tui
+    {
+        let (a, rx) = worksmith::tools::approval::ChannelAsker::new();
+        (Arc::new(a), Some(rx))
+    } else {
+        (Arc::new(worksmith::tools::approval::NoOneToAsk), None)
+    };
+
     let tool_ctx = ToolContext {
         cwd: cwd.clone(),
         session_id: session.id.clone(),
         bash_timeout: Duration::from_secs(config.bash_timeout_secs()),
         is_worker: false,
         approver,
+        asker,
+        decisions_dir: config.decisions_dir(),
         ..Default::default()
     };
 
@@ -226,7 +239,8 @@ async fn run(args: Args) -> Result<()> {
         resolved.settings.top_p,
         resolved.settings.top_k,
     )
-    .with_thinking(thinking);
+    .with_thinking(thinking)
+    .with_pairing(config.pair() && mode == OutputMode::Tui);
 
     // Validation command: --until overrides the configured default.
     let validate_cmd = args.until.clone().or_else(|| config.validate_command().map(String::from));
@@ -251,6 +265,7 @@ async fn run(args: Args) -> Result<()> {
             config.clone(),
             resolved.settings.clone(),
             approvals.expect("the TUI branch always builds an approval channel"),
+            asks.expect("the TUI branch always builds a checkpoint channel"),
         )
         .await;
     }

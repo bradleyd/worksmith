@@ -37,6 +37,10 @@ pub enum Event {
         /// Why the completion stopped — `"length"` means it was cut off.
         finish_reason: Option<String>,
     },
+    /// The loop stopped to bring the user in — a pairing checkpoint. Recorded
+    /// like anything else structural, so `/history` shows where the user had a
+    /// say and where they were only told.
+    Checkpoint { kind: String, subject: String, detail: String },
     /// The supervisor/loop nudged the model back on track (stuck detection).
     Nudge { reason: String },
     /// Old history was summarized to stay under the context limit.

@@ -31,6 +31,11 @@ pub struct Config {
     /// costs, how it should be sampled, and (later) which models `/model`
     /// offers. Splitting them would mean writing the same list three times.
     pub models: HashMap<String, ModelSettings>,
+    /// Where pairing checkpoints file decisions, relative to the project root.
+    /// Defaults inside `.worksmith/` because that is worksmith's own namespace
+    /// in someone else's repo — `docs/` is this project's convention, not every
+    /// project's. Set it to wherever a project already keeps its ADRs.
+    pub decisions_dir: Option<PathBuf>,
     /// Set when this project has a config that has not been decided about. The
     /// caller asks and reloads; nothing was applied from it.
     #[serde(skip)]
@@ -161,6 +166,11 @@ pub struct AgentConfig {
     /// its own cap so it cannot consume all of `max-tokens` and leave nothing
     /// for the answer.
     pub thinking: Option<ThinkingSetting>,
+    /// Offer the pairing checkpoint — the loop stopping to put a decision to
+    /// you, tell you why it did something, or hand you the hard part. Off by
+    /// default: it is an interrupt, and an interrupt nobody asked for is a
+    /// nuisance. `/pair` toggles it for a session.
+    pub pair: Option<bool>,
 }
 
 /// `thinking = "off"`, `thinking = "on"`, or `thinking = 2000`. TOML gives us
@@ -381,6 +391,16 @@ impl Config {
 
     pub fn context_limit(&self) -> usize {
         self.agent.context_limit.unwrap_or(128_000)
+    }
+
+    /// Where decisions are filed. Relative paths resolve against the project.
+    pub fn decisions_dir(&self) -> PathBuf {
+        self.decisions_dir.clone().unwrap_or_else(|| PathBuf::from(".worksmith/decisions"))
+    }
+
+    /// Whether pairing checkpoints start switched on.
+    pub fn pair(&self) -> bool {
+        self.agent.pair.unwrap_or(false)
     }
 
     pub fn keep_recent_turns(&self) -> usize {

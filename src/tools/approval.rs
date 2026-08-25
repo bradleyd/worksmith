@@ -140,6 +140,77 @@ impl Approver for ChannelApprover {
     }
 }
 
+/// Asking the user a question that has an *answer*, not a yes/no.
+///
+/// Deliberately not folded into [`Approver`]. That trait guards actions, and
+/// its failure direction is refusal: nobody to ask means deny, because a
+/// headless agent that pushes unasked is the harm the layer exists to prevent.
+/// A checkpoint is the opposite — it is pedagogy, and refusing to work because
+/// no human was there to be taught would break every eval and `--print` run.
+/// So nobody to ask means **skip and carry on**, and `None` is that answer.
+#[async_trait]
+pub trait Asker: Send + Sync {
+    /// `subject` is what the question is about (a file, a symbol, a decision);
+    /// `question` is the question itself. `None` means nobody answered.
+    async fn ask_text(&self, subject: &str, question: &str) -> Option<String>;
+}
+
+/// Nobody is watching, so every checkpoint is skipped. The default, and what
+/// the eval harness and `--print` runs get.
+pub struct NoOneToAsk;
+
+#[async_trait]
+impl Asker for NoOneToAsk {
+    async fn ask_text(&self, _subject: &str, _question: &str) -> Option<String> {
+        None
+    }
+}
+
+/// One checkpoint question, waiting for an answer.
+pub struct TextRequest {
+    pub subject: String,
+    pub question: String,
+    reply: tokio::sync::oneshot::Sender<Option<String>>,
+}
+
+impl TextRequest {
+    /// Answer it. `None` — or dropping the request — means skipped, which for a
+    /// checkpoint is a normal outcome rather than a failure.
+    pub fn answer(self, text: Option<String>) {
+        let _ = self.reply.send(text);
+    }
+}
+
+/// Hands the question to the front end's event loop and waits, the way
+/// [`ChannelApprover`] does. Same reason: the agent runs on its own task and
+/// cannot read a key.
+pub struct ChannelAsker {
+    tx: tokio::sync::mpsc::Sender<TextRequest>,
+}
+
+impl ChannelAsker {
+    pub fn new() -> (Self, tokio::sync::mpsc::Receiver<TextRequest>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        (Self { tx }, rx)
+    }
+}
+
+#[async_trait]
+impl Asker for ChannelAsker {
+    async fn ask_text(&self, subject: &str, question: &str) -> Option<String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let req = TextRequest {
+            subject: subject.to_string(),
+            question: question.to_string(),
+            reply,
+        };
+        if self.tx.send(req).await.is_err() {
+            return None; // no UI listening — skip, don't stall
+        }
+        answer.await.unwrap_or(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

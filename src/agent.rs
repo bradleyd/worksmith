@@ -9,7 +9,7 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -216,6 +216,13 @@ pub struct Agent {
     thinking: ThinkingMode,
     /// Provider routing preference, changeable mid-session with `/route`.
     route: Arc<Mutex<Option<String>>>,
+    /// Whether the pairing checkpoint is offered at all (`/pair`). Off means
+    /// the tool is not advertised rather than refused when called: `defs()`
+    /// rides every request, and a schema for a tool that will never fire is
+    /// real money in a 32k window.
+    ///
+    /// Unlike `route`, a fork does **not** share this. See `fork_with`.
+    pairing: Arc<AtomicBool>,
     /// The provider's prompt-token count for the most recent completion — what
     /// the next request will cost, as opposed to what we estimate it costs.
     last_prompt_tokens: AtomicU32,
@@ -257,8 +264,15 @@ impl Agent {
             steering: Steering::new(),
             thinking: ThinkingMode::default(),
             route: Arc::new(Mutex::new(None)),
+            pairing: Arc::new(AtomicBool::new(false)),
             last_prompt_tokens: AtomicU32::new(0),
         }
+    }
+
+    /// Offer the pairing checkpoint, or stop offering it (`[agent] pair`).
+    pub fn with_pairing(mut self, on: bool) -> Self {
+        self.pairing = Arc::new(AtomicBool::new(on));
+        self
     }
 
     /// Ask the model to skip its reasoning pass. On a small Qwen this is the
@@ -322,6 +336,15 @@ impl Agent {
         self.active.lock().unwrap().clone()
     }
 
+    /// Turn pairing checkpoints on or off for subsequent requests (`/pair`).
+    pub fn set_pairing(&self, on: bool) {
+        self.pairing.store(on, Ordering::Relaxed);
+    }
+
+    pub fn pairing_on(&self) -> bool {
+        self.pairing.load(Ordering::Relaxed)
+    }
+
     pub fn thinking_mode(&self) -> ThinkingMode {
         self.thinking.clone()
     }
@@ -356,6 +379,18 @@ impl Agent {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.session_id = session_id;
         tool_ctx.is_worker = true;
+        // A worker never checkpoints. Nobody is watching a background task —
+        // `/agents tail` is opt-in — so a blocking question would stall it
+        // against a user who does not know it was asked, and a fan-out of five
+        // would queue five questions behind one composer. It is also the
+        // cheapest model in the session (`agents.model`) being asked to make
+        // the most judgment-heavy call in the harness.
+        //
+        // Same rule the memory layer already follows: a worker proposes, the
+        // parent decides (§8, `is_worker`). Escalation is the channel that
+        // exists for a worker that genuinely needs a human.
+        tool_ctx.asker = Arc::new(crate::tools::approval::NoOneToAsk);
+        tool_ctx.checkpoints_left = Arc::new(AtomicUsize::new(0));
         // Inheriting (`None`) takes the *value* of the current model, not the
         // `Arc`: unlike `route`, a fork does not share it. A worker that
         // started on model A finishes on model A — a later `/model` must not
@@ -385,6 +420,9 @@ impl Agent {
             // the parent later shouldn't retroactively change a running worker.
             thinking: ThinkingMode::new(self.thinking.get()),
             route: self.route.clone(),
+            // Not `self.pairing.clone()`: `/pair` in the session must not start
+            // interrupting background work, and a worker must never inherit it.
+            pairing: Arc::new(AtomicBool::new(false)),
             // Its own context, so its own accounting.
             last_prompt_tokens: AtomicU32::new(0),
         }
@@ -404,6 +442,11 @@ impl Agent {
         self.emit(session, Event::UserMessage {
             text: user_input.to_string(),
         });
+        // Checkpoints are budgeted per turn, so the budget refills here. A
+        // running total would let one long turn spend the whole session's.
+        self.tool_ctx
+            .checkpoints_left
+            .store(crate::tools::CHECKPOINTS_PER_TURN, Ordering::Relaxed);
 
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
@@ -567,7 +610,7 @@ impl Agent {
                 let req = ChatRequest {
                     model: active.model.clone(),
                     messages: messages.clone(),
-                    tools: self.registry.defs(),
+                    tools: self.advertised_tools(),
                     temperature: active.temperature,
                     top_p: active.top_p,
                     top_k: active.top_k,
@@ -744,6 +787,23 @@ impl Agent {
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                 });
+                // A checkpoint is addressed to the *user*, not to the model, so
+                // it gets its own event rather than living inside a tool result
+                // the front end renders as machinery. Emitted here rather than
+                // from the tool because the session write needs the lock the
+                // agent is holding.
+                if call.name == "checkpoint"
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                {
+                    let field = |k: &str| {
+                        v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+                    };
+                    self.emit(session, Event::Checkpoint {
+                        kind: field("kind"),
+                        subject: field("subject"),
+                        detail: field("detail"),
+                    });
+                }
 
                 let (ok, fatal, raw) =
                     match serde_json::from_str::<serde_json::Value>(&call.arguments) {
@@ -821,6 +881,17 @@ impl Agent {
     fn working_tokens(&self, session: &Session) -> usize {
         let reported = self.last_prompt_tokens.load(Ordering::Relaxed) as usize;
         reported.max(estimate_tokens(session.messages()))
+    }
+
+    /// Tool schemas for a request. `checkpoint` is dropped unless pairing is
+    /// on — not advertising it is what makes `/pair off` free rather than
+    /// merely polite.
+    pub fn advertised_tools(&self) -> Vec<crate::llm::ToolDef> {
+        let mut defs = self.registry.defs();
+        if !self.pairing_on() {
+            defs.retain(|d| d.name != "checkpoint");
+        }
+        defs
     }
 
     /// One model call: forwards stream events to the bus and brackets it with
