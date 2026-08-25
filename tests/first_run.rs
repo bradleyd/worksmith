@@ -55,3 +55,42 @@ fn a_stream_idle_timeout_is_per_provider_with_a_generous_default() {
     assert_eq!(c.providers["local"].stream_idle_timeout, None, "falls back to the default");
     assert_eq!(c.providers["remote"].stream_idle_timeout, Some(90));
 }
+
+/// The window the server serves and the window the config claims are two
+/// different numbers, and a mismatch is invisible until a turn has already gone
+/// badly — silent when it is too low, late when it is too high.
+#[tokio::test]
+async fn a_context_mismatch_is_reported_in_both_directions() {
+    use worksmith::llm::warn_on_context_mismatch;
+
+    let http = reqwest::Client::new();
+    // No server: best-effort, never an error, never a false alarm.
+    let none = warn_on_context_mismatch(
+        &http,
+        "http://127.0.0.1:1/v1",
+        "some/model",
+        65_536,
+    )
+    .await;
+    assert!(none.is_none(), "an unreachable server is not a misconfiguration");
+}
+
+#[test]
+fn a_context_mismatch_is_caught_in_both_directions() {
+    use worksmith::llm::context_mismatch;
+
+    // The real case: vLLM serving 65536 while the config claimed 128000, which
+    // halved the footer's gauge and made compaction look early.
+    let over = context_mismatch("m", 65_536, 128_000).expect("over-declared must warn");
+    assert!(over.contains("65536"), "names the number to use: {over}");
+    assert!(over.contains("rejected"), "says what goes wrong: {over}");
+
+    let under = context_mismatch("m", 65_536, 32_768).expect("under-declared must warn");
+    assert!(under.contains("65536"), "names the number to use: {under}");
+    assert!(under.contains("compaction fires early"), "says what goes wrong: {under}");
+
+    // Rounding is not a mismatch: 128000 against a served 131072 is someone
+    // being approximate, not someone being wrong.
+    assert!(context_mismatch("m", 131_072, 128_000).is_none(), "128000 vs 131072 is fine");
+    assert!(context_mismatch("m", 65_536, 65_536).is_none(), "exact agreement is fine");
+}

@@ -901,6 +901,8 @@ pub async fn run_tui(
     config: Config,
     // Prices and sampling for the session's model, for the footer's cost.
     model_settings: crate::config::ModelSettings,
+    // The server disagreeing with the configured window, when it does.
+    context_warning: Option<String>,
     // Questions from the agent's task: "may I run this?". The agent blocks on
     // the answer, so this loop must always send one.
     approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
@@ -923,6 +925,7 @@ pub async fn run_tui(
         synthesize,
         config,
         model_settings,
+        context_warning,
         approvals,
         asks,
     )
@@ -989,6 +992,8 @@ async fn run_loop(
     config: Config,
     // Prices and sampling for the session's model, for the footer's cost.
     model_settings: crate::config::ModelSettings,
+    // The server disagreeing with the configured window, when it does.
+    context_warning: Option<String>,
     mut approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
     mut asks: tokio::sync::mpsc::Receiver<crate::tools::approval::TextRequest>,
 ) -> Result<()> {
@@ -1032,6 +1037,9 @@ async fn run_loop(
     app.push(Kind::Notice, format!("cwd: {}", cwd.display()));
     if !crate::config::load_project_instructions(&cwd).trim().is_empty() {
         app.push(Kind::Notice, "loaded project instructions (AGENTS.md/CLAUDE.md)".to_string());
+    }
+    if let Some(w) = context_warning {
+        app.push(Kind::Notice, format!("⚠ {w}"));
     }
     if let Some(c) = app.validate_cmd.clone() {
         app.push(Kind::Notice, format!("validation: {c}"));

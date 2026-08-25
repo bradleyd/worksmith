@@ -448,6 +448,62 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
     }
 }
 
+/// Ask an openai-compat server what window it actually serves, and say so when
+/// the config disagrees.
+///
+/// Both directions are worth catching and neither announces itself today.
+/// Over-declaring is loud but late: compaction waits for a trigger the server
+/// rejects the request long before reaching (`config.rs`). Under-declaring is
+/// *silent* and expensive — compaction fires early, throws away tool results
+/// the model was working from, the model re-reads the same files, and the turn
+/// runs out of steps. From the outside that is indistinguishable from a model
+/// that is simply bad at the task, and it took a session-file autopsy to tell
+/// the difference.
+///
+/// Best-effort: many servers do not publish `max_model_len`, and one that does
+/// not is not a problem. Never fails a request.
+pub async fn warn_on_context_mismatch(
+    http: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    configured: usize,
+) -> Option<String> {
+    let resp = http.get(format!("{base_url}/models")).send().await.ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let served = body
+        .get("data")?
+        .as_array()?
+        .iter()
+        .find(|m| m.get("id").and_then(|i| i.as_str()) == Some(model))?
+        .get("max_model_len")?
+        .as_u64()? as usize;
+
+    context_mismatch(model, served, configured)
+}
+
+/// The comparison, without the network. Separated so it can be tested: the
+/// interesting part is the judgement, and a test that re-derives the arithmetic
+/// proves only that it can do arithmetic.
+pub fn context_mismatch(model: &str, served: usize, configured: usize) -> Option<String> {
+    // A little slack: a config rounded to 128000 against a served 131072 is
+    // someone being approximate, not someone being wrong.
+    let slack = served / 20;
+    if configured > served + slack {
+        Some(format!(
+            "`{model}` serves {served} tokens but `context` is set to {configured}. Requests \
+             will be rejected before compaction ever fires — lower it to {served}."
+        ))
+    } else if configured + slack < served {
+        Some(format!(
+            "`{model}` serves {served} tokens but `context` is set to {configured}, so part of \
+             the window goes unused and compaction fires early — which throws away work the \
+             model then has to redo. Raise it to {served}."
+        ))
+    } else {
+        None
+    }
+}
+
 /// A worker's model, resolved and ready: the client that speaks to it and the
 /// model name to ask for. Kept together because a cheaper model often lives
 /// behind a different provider, not just a different name.

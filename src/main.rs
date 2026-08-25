@@ -247,6 +247,28 @@ async fn run(args: Args) -> Result<()> {
     let bash_timeout = Duration::from_secs(config.bash_timeout_secs());
 
     // TUI owns its own rendering (it subscribes to the bus directly) and takes
+    // Does the server agree with the configured window? Best-effort and off the
+    // hot path — a wrong `context` is silent in one direction and late in the
+    // other, and neither shows up until a turn has already gone badly.
+    let context_warning = {
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .build()
+            .ok();
+        match http {
+            Some(h) => {
+                worksmith::llm::warn_on_context_mismatch(
+                    &h,
+                    resolved.provider.base_url.trim_end_matches('/'),
+                    &resolved.model,
+                    resolved.settings.context.unwrap_or_else(|| config.context_limit()),
+                )
+                .await
+            }
+            None => None,
+        }
+    };
+
     // ownership of the agent/session, so handle it before wiring the renderer.
     if mode == OutputMode::Tui {
         return run_tui(
@@ -257,13 +279,19 @@ async fn run(args: Args) -> Result<()> {
             resolved.model.clone(),
             validate_cmd,
             bash_timeout,
-            config.context_limit(),
+            // The model's window, not the global fallback. These are two
+            // different numbers whenever `[models."…"].context` is set, and the
+            // footer was showing the wrong one: a 64k session read as 128k, so
+            // the gauge said 11% when the truth was 22% and compaction arrived
+            // at what looked like a third of the way in.
+            resolved.settings.context.unwrap_or_else(|| config.context_limit()),
             config.agents_max(),
             config.supervisor(),
             config.fanout_auto(),
             config.synthesize(),
             config.clone(),
             resolved.settings.clone(),
+            context_warning,
             approvals.expect("the TUI branch always builds an approval channel"),
             asks.expect("the TUI branch always builds a checkpoint channel"),
         )
@@ -271,6 +299,9 @@ async fn run(args: Args) -> Result<()> {
     }
 
     // Workers need a shared handle to the agent; the TUI path already owns it.
+    if let Some(w) = &context_warning {
+        eprintln!("warning: {w}");
+    }
     let agent = Arc::new(agent);
     let renderer = spawn_renderer(bus.subscribe(), mode);
     bus.emit(Event::SessionStarted { id: session.id.clone() });
