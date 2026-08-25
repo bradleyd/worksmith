@@ -168,20 +168,48 @@ enum IdleReason {
     Aborted,
 }
 
+/// What one model *is*, as far as a request is concerned. Swapped as a set:
+/// a new model with the old context window is a request that gets rejected.
+#[derive(Clone)]
+pub struct ActiveModel {
+    pub client: Arc<dyn LlmClient>,
+    pub model: String,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
+    pub context_limit: usize,
+}
+
+impl From<ModelOverride> for ActiveModel {
+    /// A resolved override *is* an active model — it already carries the
+    /// window and sampling its own `[models."…"]` entry asks for. Going
+    /// through here is what stops a fork from running a new model on the
+    /// previous one's numbers.
+    fn from(o: ModelOverride) -> ActiveModel {
+        ActiveModel {
+            client: o.client,
+            model: o.model,
+            temperature: o.temperature,
+            top_p: o.settings.top_p,
+            top_k: o.settings.top_k,
+            context_limit: o.context_limit,
+        }
+    }
+}
+
 /// Drives one or more turns against a model + tools.
 pub struct Agent {
-    client: Arc<dyn LlmClient>,
     registry: Arc<ToolRegistry>,
     bus: EventBus,
-    model: String,
-    temperature: Option<f64>,
-    top_p: Option<f64>,
-    top_k: Option<u32>,
+    /// The model the session currently runs on, swapped as a set with
+    /// `set_model`. `&self` + interior mutability so a front-end holding
+    /// `&Arc<Agent>` (TUI) or an owned `Agent` (REPL) can both switch it,
+    /// exactly like `route`.
+    active: Arc<Mutex<ActiveModel>>,
     max_tokens: Option<u32>,
     max_steps: usize,
     max_retries: usize,
     stuck_threshold: u32,
-    context_limit: usize,
     keep_recent_turns: usize,
     tool_ctx: ToolContext,
     steering: Steering,
@@ -210,18 +238,20 @@ impl Agent {
         tool_ctx: ToolContext,
     ) -> Self {
         Self {
-            client,
             registry,
             bus,
-            model,
-            temperature,
-            top_p: None,
-            top_k: None,
+            active: Arc::new(Mutex::new(ActiveModel {
+                client,
+                model,
+                temperature,
+                top_p: None,
+                top_k: None,
+                context_limit,
+            })),
             max_tokens,
             max_steps,
             max_retries,
             stuck_threshold,
-            context_limit,
             keep_recent_turns,
             tool_ctx,
             steering: Steering::new(),
@@ -237,12 +267,17 @@ impl Agent {
     /// Sampling the model asks for (`[models."provider/model"]`). Unset fields
     /// leave the server's own defaults alone, which is what every request did
     /// before this table existed.
-    pub fn with_sampling(mut self, temperature: Option<f64>, top_p: Option<f64>, top_k: Option<u32>) -> Self {
-        if temperature.is_some() {
-            self.temperature = temperature;
+    pub fn with_sampling(self, temperature: Option<f64>, top_p: Option<f64>, top_k: Option<u32>) -> Self {
+        {
+            let mut active = self.active.lock().unwrap();
+            // Same precedence as startup: an entry's temperature overrides only
+            // when it is set; top_p/top_k are taken unconditionally (None clears).
+            if let Some(t) = temperature {
+                active.temperature = Some(t);
+            }
+            active.top_p = top_p;
+            active.top_k = top_k;
         }
-        self.top_p = top_p;
-        self.top_k = top_k;
         self
     }
 
@@ -264,6 +299,27 @@ impl Agent {
     /// Set the provider routing preference for subsequent requests.
     pub fn set_route(&self, sort: Option<String>) {
         *self.route.lock().unwrap() = sort;
+    }
+
+    /// Swap the model the session runs on. `&self` + interior mutability so it
+    /// works from the TUI (`&Arc<Agent>`) and the REPL (owned `Agent`) alike,
+    /// exactly like `set_route`.
+    ///
+    /// `last_prompt_tokens` is zeroed with the model: it is the *provider's*
+    /// count for the previous model — a different tokenizer, over a different
+    /// system prompt. Carrying a 200k-model count into a 32k model saturates
+    /// `room` to zero and makes compaction fire every step, forever. Reset to
+    /// 0 and let `estimate_tokens` carry it until the new model reports a
+    /// number of its own.
+    pub fn set_model(&self, active: ActiveModel) {
+        self.last_prompt_tokens.store(0, Ordering::Relaxed);
+        *self.active.lock().unwrap() = active;
+    }
+
+    /// The model the session currently runs on. Cheap to clone: the client is
+    /// an `Arc`.
+    pub fn current(&self) -> ActiveModel {
+        self.active.lock().unwrap().clone()
     }
 
     pub fn thinking_mode(&self) -> ThinkingMode {
@@ -300,23 +356,27 @@ impl Agent {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.session_id = session_id;
         tool_ctx.is_worker = true;
-        let (client, model) = match model {
-            Some(o) => (o.client, o.model),
-            None => (self.client.clone(), self.model.clone()),
+        // Inheriting (`None`) takes the *value* of the current model, not the
+        // `Arc`: unlike `route`, a fork does not share it. A worker that
+        // started on model A finishes on model A — a later `/model` must not
+        // retarget a request already in flight in a worker.
+        let active = match model {
+            // The whole override, not just its client and name. Taking only
+            // those two left a worker running a cheap 32k model on the
+            // session's 128k window, so compaction never fired and the server
+            // rejected the request — the failure `ModelSettings.context`
+            // exists to prevent.
+            Some(o) => ActiveModel::from(o),
+            None => self.current(),
         };
         Agent {
-            client,
             registry: self.registry.clone(),
             bus,
-            model,
-            temperature: self.temperature,
-            top_p: self.top_p,
-            top_k: self.top_k,
+            active: Arc::new(Mutex::new(active)),
             max_tokens: self.max_tokens,
             max_steps: self.max_steps,
             max_retries: self.max_retries,
             stuck_threshold: self.stuck_threshold,
-            context_limit: self.context_limit,
             keep_recent_turns: self.keep_recent_turns,
             tool_ctx,
             // A fork gets a fresh mailbox — its supervisor attaches its own.
@@ -347,10 +407,15 @@ impl Agent {
 
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
+        // Snapshot the model once, at the top. A switch landing mid-turn must
+        // not change the model out from under an in-flight step, or hand the
+        // clamp a context limit the current prompt was not built for. It lands
+        // on the next turn.
+        let active = self.current();
 
         let outcome = loop {
             let idle = self
-                .run_until_idle(session, system_prompt, &mut final_text, &cancel)
+                .run_until_idle(session, system_prompt, &mut final_text, &cancel, &active)
                 .await?;
 
             match idle {
@@ -415,6 +480,7 @@ impl Agent {
         system_prompt: &str,
         final_text: &mut String,
         cancel: &CancellationToken,
+        active: &ActiveModel,
     ) -> Result<IdleReason> {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut nudged: HashSet<String> = HashSet::new();
@@ -442,7 +508,7 @@ impl Agent {
             // every real request. It therefore reads low, by a margin that grows
             // with the toolset, so trust the provider's own count once we have
             // one and keep the estimate only for the first step of a session.
-            if self.working_tokens(session) > self.compaction_trigger() {
+            if self.working_tokens(session) > compaction_trigger(active.context_limit) {
                 let before = session.messages().len();
                 if let Err(e) = self.compact(session).await {
                     // Compaction is best-effort; a failure shouldn't kill the turn.
@@ -476,7 +542,7 @@ impl Agent {
             // fail by a single token: 24577 prompt + 8192 output against a
             // 32768 model. Compaction is the real defence, but it gates on a
             // *configured* limit that can be wrong, and this cannot be.
-            let room = self
+            let room = active
                 .context_limit
                 .saturating_sub(self.working_tokens(session))
                 .saturating_sub(CONTEXT_RESERVE);
@@ -499,17 +565,17 @@ impl Agent {
             let mut compacted_here = false;
             let completion = loop {
                 let req = ChatRequest {
-                    model: self.model.clone(),
+                    model: active.model.clone(),
                     messages: messages.clone(),
                     tools: self.registry.defs(),
-                    temperature: self.temperature,
-                    top_p: self.top_p,
-                    top_k: self.top_k,
+                    temperature: active.temperature,
+                    top_p: active.top_p,
+                    top_k: active.top_k,
                     max_tokens: attempt_tokens,
                     thinking: self.thinking.get(),
                     sort: self.route.lock().unwrap().clone(),
                 };
-                let result = self.call_model(session, req, cancel).await;
+                let result = self.call_model(session, req, cancel, &active.client).await;
                 let Err(e) = result else {
                     break result;
                 };
@@ -543,7 +609,7 @@ impl Agent {
                     }
                     messages.truncate(1);
                     messages.extend(session.messages().iter().cloned());
-                    let room = self
+                    let room = active
                         .context_limit
                         .saturating_sub(self.working_tokens(session))
                         .saturating_sub(CONTEXT_RESERVE);
@@ -610,7 +676,7 @@ impl Agent {
                 .with_trace(
                     completion.reasoning.clone(),
                     completion.finish_reason.clone(),
-                    Some(self.model.clone()),
+                    Some(active.model.clone()),
                 );
             session.append_message(assistant)?;
 
@@ -757,11 +823,6 @@ impl Agent {
         reported.max(estimate_tokens(session.messages()))
     }
 
-    fn compaction_trigger(&self) -> usize {
-        // Compact at 75% of the context limit, leaving headroom for the reply.
-        self.context_limit * 3 / 4
-    }
-
     /// One model call: forwards stream events to the bus and brackets it with
     /// the in-flight markers the supervisor reads.
     async fn call_model(
@@ -769,6 +830,7 @@ impl Agent {
         session: &mut Session,
         req: ChatRequest,
         cancel: &CancellationToken,
+        client: &Arc<dyn LlmClient>,
     ) -> Result<crate::llm::Completion> {
         for attempt in 0..TRANSPORT_ATTEMPTS {
             let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
@@ -795,7 +857,7 @@ impl Agent {
             });
 
             self.emit(session, Event::ModelCallStarted);
-            let completion = self.client.stream(req.clone(), tx, cancel.clone()).await;
+            let completion = client.stream(req.clone(), tx, cancel.clone()).await;
             let _ = forwarder.await;
             self.emit(session, Event::ModelCallFinished);
 
@@ -842,13 +904,14 @@ impl Agent {
     /// the call structurally impossible to satisfy, and it comes back empty
     /// every time. That is how memory extraction silently produced nothing.
     pub async fn ask(&self, system: &str, user: &str, max_tokens: u32) -> Result<String> {
+        let active = self.current();
         let req = ChatRequest {
-            model: self.model.clone(),
+            model: active.model.clone(),
             messages: vec![Message::system(system), Message::user(user)],
             tools: vec![],
             temperature: Some(0.2),
-            top_p: self.top_p,
-            top_k: self.top_k,
+            top_p: active.top_p,
+            top_k: active.top_k,
             max_tokens: Some(max_tokens),
             thinking: Some(Thinking::Off),
             sort: self.route.lock().unwrap().clone(),
@@ -856,7 +919,7 @@ impl Agent {
         // Drain the stream sink; we only want the assembled text.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let completion = self.client.stream(req, tx, CancellationToken::new()).await?;
+        let completion = active.client.stream(req, tx, CancellationToken::new()).await?;
         let _ = drain.await;
         let text = completion.content.unwrap_or_default();
         if text.trim().is_empty() {
@@ -876,6 +939,7 @@ impl Agent {
     /// verbatim, shrinking the working context. The full transcript stays in the
     /// session JSONL. Public so `/compact` can force it.
     pub async fn compact(&self, session: &mut Session) -> Result<()> {
+        let active = self.current();
         // Gather what we need, then drop the borrow before the await.
         let (before, tokens_before, split, transcript) = {
             let msgs = session.messages();
@@ -892,7 +956,7 @@ impl Agent {
             let overhead = self
                 .working_tokens(session)
                 .saturating_sub(estimate_tokens(session.messages()));
-            let keep = (self.context_limit / 3).saturating_sub(overhead).max(1_024);
+            let keep = (active.context_limit / 3).saturating_sub(overhead).max(1_024);
             let split = compaction_split(msgs, self.keep_recent_turns, keep);
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
@@ -980,6 +1044,11 @@ fn truncate_error(err: &anyhow::Error) -> String {
     } else {
         line
     }
+}
+
+/// Compact at 75% of the context limit, leaving headroom for the reply.
+fn compaction_trigger(context_limit: usize) -> usize {
+    context_limit * 3 / 4
 }
 
 /// Rough token estimate (~4 chars/token) over messages: content + tool-call

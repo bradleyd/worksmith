@@ -57,6 +57,24 @@ impl LlmClient for ScriptedClient {
     }
 }
 
+
+/// A test override. Settings are what a model with no `[models."…"]` entry
+/// resolves to, so these tests exercise the plain case; the fields exist
+/// because a model is not just a name — see `ModelOverride`.
+fn over(
+    client: std::sync::Arc<dyn worksmith::llm::LlmClient>,
+    model: &str,
+) -> worksmith::llm::ModelOverride {
+    worksmith::llm::ModelOverride {
+        client,
+        model: model.into(),
+        settings: Default::default(),
+        context_limit: 128_000,
+        temperature: None,
+        missing_key_env: None,
+    }
+}
+
 fn agent_with(client: Arc<dyn LlmClient>, cwd: &std::path::Path) -> Agent {
     Agent::new(
         client,
@@ -231,10 +249,7 @@ async fn workers_run_on_the_overridden_model() {
     let cheap = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
     let agent = Arc::new(agent_with(parent.clone(), dir.path()));
 
-    let over = worksmith::llm::ModelOverride {
-        client: cheap.clone(),
-        model: "cheap-model".into(),
-    };
+    let over = over(cheap.clone(), "cheap-model");
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
         .with_default_model(Some(over.clone()));
 
@@ -276,19 +291,13 @@ async fn a_per_spawn_model_beats_the_default_and_queued_work_keeps_it() {
 
     // Cap of 1 so the second and third tasks queue and must carry the override.
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1)
-        .with_default_model(Some(worksmith::llm::ModelOverride {
-            client: default_m.clone(),
-            model: "default-model".into(),
-        }));
+        .with_default_model(Some(over(default_m.clone(), "default-model")));
 
     let report = mgr.spawn_many_on(
         vec!["a".into(), "b".into(), "c".into()],
         "system".into(),
         "three drafts".into(),
-        Some(worksmith::llm::ModelOverride {
-            client: chosen.clone(),
-            model: "chosen-model".into(),
-        }),
+        Some(over(chosen.clone(), "chosen-model")),
     );
     assert_eq!(report.started.len(), 1, "cap of 1");
     assert_eq!(report.queued, 2);

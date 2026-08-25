@@ -430,6 +430,22 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
 pub struct ModelOverride {
     pub client: std::sync::Arc<dyn LlmClient>,
     pub model: String,
+    /// Sampling and prices for *this* model, already resolved against the
+    /// config. Carried because a model is not just a name: switching to one
+    /// and keeping the previous model's temperature or context window is the
+    /// half-swap that makes a request the server rejects.
+    pub settings: crate::config::ModelSettings,
+    /// This model's window, `[models."…"].context` falling back to the global
+    /// `agent.context-limit` — the same expression startup uses, so a model
+    /// reached this way is configured exactly as one started on.
+    pub context_limit: usize,
+    /// Sampling temperature after the same precedence startup applies: the
+    /// model's own entry wins, the global `temperature` is the fallback.
+    pub temperature: Option<f64>,
+    /// Set when `api-key-env` names a variable that is not exported. The
+    /// caller should surface it — in a TUI as a notice, never as `eprintln!`,
+    /// which paints over the frame.
+    pub missing_key_env: Option<String>,
 }
 
 impl ModelOverride {
@@ -437,6 +453,13 @@ impl ModelOverride {
     /// configured) against the config.
     pub fn resolve(config: &crate::config::Config, spec: &str) -> anyhow::Result<ModelOverride> {
         let resolved = config.resolve_model(Some(spec))?;
-        Ok(ModelOverride { client: client_for(&resolved)?, model: resolved.model })
+        Ok(ModelOverride {
+            client: client_for(&resolved)?,
+            model: resolved.model,
+            context_limit: resolved.settings.context.unwrap_or_else(|| config.context_limit()),
+            temperature: resolved.settings.temperature.or(config.temperature),
+            settings: resolved.settings,
+            missing_key_env: resolved.missing_key_env,
+        })
     }
 }
