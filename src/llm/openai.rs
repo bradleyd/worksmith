@@ -167,6 +167,11 @@ impl LlmClient for OpenAiCompatClient {
         }
 
         let mut stream = resp.bytes_stream();
+        // Bounded: `buf` holds one not-yet-complete SSE line, and a peer that
+        // never sends a newline would otherwise grow it until the process dies.
+        // A real `data:` line carries one delta and runs to hundreds of bytes;
+        // even a whole completion in a single line stays far under this.
+        const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::new();
         let mut acc = Accumulator::default();
 
@@ -178,6 +183,13 @@ impl LlmClient for OpenAiCompatClient {
             let Some(chunk) = next else { break };
             let bytes = chunk.context("reading stream chunk")?;
             buf.extend_from_slice(&bytes);
+            if buf.len() > MAX_SSE_LINE {
+                bail!(
+                    "LLM stream error: {} bytes with no line break; giving up rather than \
+                     growing without bound",
+                    buf.len()
+                );
+            }
 
             // Process complete newline-delimited SSE lines. Splitting on '\n'
             // (ASCII) never bisects a multibyte char, so lossy decode is safe.
@@ -456,6 +468,19 @@ struct CompletionTokensDetails {
     reasoning_tokens: u32,
 }
 
+/// Most parallel tool calls one completion may accumulate.
+///
+/// `index` arrives from the network and is fed straight to `resize_with`, so
+/// without a ceiling one chunk saying `{"index": 100000000}` asks for a 7 GB
+/// allocation, and `usize::MAX` overflows capacity outright. Either kills the
+/// process. A hostile endpoint is not a stretch here: `trust.rs` exists because
+/// a project config can point `base-url` anywhere, and a merely buggy provider
+/// gets there by accident.
+///
+/// 64 is far past what any model emits in one turn, so a legitimate stream
+/// never meets it.
+const MAX_TOOL_CALLS: usize = 64;
+
 #[derive(Default)]
 struct AccTool {
     id: String,
@@ -521,6 +546,18 @@ impl Accumulator {
             }
             for dtc in choice.delta.tool_calls {
                 let idx = dtc.index;
+                if idx >= MAX_TOOL_CALLS {
+                    // Say so rather than dropping it silently: a real stream
+                    // never gets here, so this is a provider misbehaving and
+                    // the completion that follows will be missing a call.
+                    let _ = sink
+                        .send(StreamEvent::Warning(format!(
+                            "provider sent tool_call index {idx}; ignoring it \
+                             (more than {MAX_TOOL_CALLS} parallel calls)"
+                        )))
+                        .await;
+                    continue;
+                }
                 if self.tools.len() <= idx {
                     self.tools.resize_with(idx + 1, AccTool::default);
                 }
@@ -609,6 +646,57 @@ mod thinking_tests {
             thinking,
             sort: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_wild_tool_call_index_does_not_size_an_allocation() {
+        // `index` comes off the wire and used to be handed straight to
+        // `resize_with`. One chunk claiming index 100_000_000 asks for ~7 GB;
+        // usize::MAX overflows capacity. Either one kills the process, and a
+        // project config can point base-url at anything (see trust.rs).
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut acc = Accumulator::default();
+
+        let chunk: ChunkResp = serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[
+                 {"index": 100000000, "id":"x","function":{"name":"read","arguments":"{}"}}]}}]}"#,
+        )
+        .unwrap();
+        acc.apply(chunk, &tx).await;
+
+        assert!(acc.tools.is_empty(), "nothing was allocated for it");
+        drop(tx);
+        let mut warned = false;
+        while let Some(ev) = rx.recv().await {
+            if let StreamEvent::Warning(m) = ev {
+                assert!(m.contains("100000000"), "{m}");
+                warned = true;
+            }
+        }
+        assert!(warned, "a dropped call is said out loud, not swallowed");
+    }
+
+    #[tokio::test]
+    async fn ordinary_parallel_tool_calls_still_accumulate() {
+        // The cap must not touch a normal stream: two calls, arguments arriving
+        // in fragments the way providers actually send them.
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut acc = Accumulator::default();
+        for body in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"read","arguments":"{\"pa"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"grep","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"x\"}"}}]}}]}"#,
+        ] {
+            acc.apply(serde_json::from_str(body).unwrap(), &tx).await;
+        }
+        drop(tx);
+        while rx.recv().await.is_some() {}
+
+        let c = acc.into_completion();
+        assert_eq!(c.tool_calls.len(), 2);
+        assert_eq!(c.tool_calls[0].name, "read");
+        assert_eq!(c.tool_calls[0].arguments, r#"{"path":"x"}"#, "fragments joined in order");
+        assert_eq!(c.tool_calls[1].name, "grep");
     }
 
     #[test]
