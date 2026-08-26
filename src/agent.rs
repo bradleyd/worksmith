@@ -481,6 +481,7 @@ impl Agent {
 
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
+        let mut failures = 0usize;
         // Snapshot the model once, at the top. A switch landing mid-turn must
         // not change the model out from under an in-flight step, or hand the
         // clamp a context limit the current prompt was not built for. It lands
@@ -495,7 +496,32 @@ impl Agent {
             match idle {
                 IdleReason::Aborted => break TurnOutcome::Aborted,
                 IdleReason::MaxSteps => break TurnOutcome::MaxSteps(self.max_steps),
-                IdleReason::Stuck(r) => break TurnOutcome::Stuck(r),
+                IdleReason::Stuck(r) => {
+                    // Going in circles is the other thing the harness knows
+                    // without judging anything. Ask before ending the turn: a
+                    // sentence from the user is worth more here than the whole
+                    // re-plan machinery, and the alternative is stopping.
+                    match self
+                        .harness_checkpoint(
+                            session,
+                            "Going in circles",
+                            &format!(
+                                "{r}\n\nIt is repeating itself and the turn is about to end. \
+                                 What should it do differently? (Enter to answer, Esc to stop \
+                                 the turn.)"
+                            ),
+                        )
+                        .await
+                    {
+                        Some(a) => {
+                            session.append_message(Message::user(format!(
+                                "You were repeating yourself ({r}). The user says:\n\n{a}\n\n\
+                                 Follow that."
+                            )))?;
+                        }
+                        None => break TurnOutcome::Stuck(r),
+                    }
+                }
                 IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
                 IdleReason::ModelDone => {
                     let Some(v) = validator else {
@@ -519,12 +545,43 @@ impl Agent {
                                 break TurnOutcome::ValidationFailed(reason);
                             }
                             retries_left -= 1;
-                            let directive = format!(
-                                "The validation check {} did not pass:\n\n{}\n\nRevise your \
-                                 approach and fix the underlying problem, then finish.",
-                                v.describe(),
-                                reason
-                            );
+                            failures += 1;
+                            // One failure is the loop working — that is the
+                            // whole differentiator. Two in a row is the loop
+                            // not converging, and a second identical re-plan
+                            // directive is unlikely to be the thing that turns
+                            // it around. Ask once, here, and only here.
+                            let steer = if failures == 2 {
+                                self.harness_checkpoint(
+                                    session,
+                                    &format!("`{}` has failed twice", v.describe()),
+                                    &format!(
+                                        "The check keeps failing:\n\n{}\n\nRe-planning has not \
+                                         moved it. What should it do differently? (Enter to \
+                                         answer, Esc to let it keep trying.)",
+                                        truncate_reason(&reason)
+                                    ),
+                                )
+                                .await
+                            } else {
+                                None
+                            };
+                            let directive = match steer {
+                                Some(a) => format!(
+                                    "The validation check {} did not pass:\n\n{}\n\nThe user \
+                                     was asked what to do differently and said:\n\n{}\n\nFollow \
+                                     that.",
+                                    v.describe(),
+                                    reason,
+                                    a
+                                ),
+                                None => format!(
+                                    "The validation check {} did not pass:\n\n{}\n\nRevise your \
+                                     approach and fix the underlying problem, then finish.",
+                                    v.describe(),
+                                    reason
+                                ),
+                            };
                             self.emit(session, Event::Nudge {
                                 reason: format!(
                                     "validation failed; re-planning ({retries_left} retries left)"
@@ -914,6 +971,49 @@ impl Agent {
         reported.max(estimate_tokens(session.messages()))
     }
 
+    /// Put a question to the user *from the harness*, and feed their answer back
+    /// to the model as a directive.
+    ///
+    /// The model deciding when to checkpoint does not work: given the tool and
+    /// told plainly when to use it, a 27B made twenty edits across fifty steps
+    /// and never called it once. Judging "was that worth interrupting a human
+    /// for" competes with the task, and the task wins.
+    ///
+    /// So the harness raises it, at the two points where it *already knows*
+    /// something is wrong and needs no judgement to see it. The model cannot
+    /// decline, forget, or be too busy.
+    ///
+    /// Returns the answer, or `None` when nobody is there or they skipped —
+    /// which must carry on exactly as before. A checkpoint is pedagogy; an eval
+    /// run has nobody to teach and still has to do the work.
+    async fn harness_checkpoint(
+        &self,
+        session: &mut Session,
+        subject: &str,
+        question: &str,
+    ) -> Option<String> {
+        if !self.pairing_on() {
+            return None;
+        }
+        self.emit(session, Event::Checkpoint {
+            kind: "ask".to_string(),
+            subject: subject.to_string(),
+            detail: question.to_string(),
+        });
+        // Deliberately not spending `checkpoints_left`. That cap exists to stop
+        // a model being chatty; this fires at most once per validation retry
+        // and once per stuck turn, and it is the high-value one — being crowded
+        // out by three notes would be exactly backwards.
+        let answer = self.tool_ctx.asker.ask_text(subject, question).await;
+        let answer = answer.filter(|a| !a.trim().is_empty())?;
+        self.emit(session, Event::Checkpoint {
+            kind: "answered".to_string(),
+            subject: subject.to_string(),
+            detail: answer.clone(),
+        });
+        Some(answer)
+    }
+
     /// Tool schemas for a request. `checkpoint` is dropped unless pairing is
     /// on — not advertising it is what makes `/pair off` free rather than
     /// merely polite.
@@ -1149,6 +1249,17 @@ fn truncate_error(err: &anyhow::Error) -> String {
 }
 
 /// Compact at 75% of the context limit, leaving headroom for the reply.
+/// Keep a checkpoint question readable. The full failure output is already in
+/// the directive the model gets; the person only needs enough to recognise it.
+fn truncate_reason(r: &str) -> String {
+    const MAX: usize = 600;
+    if r.chars().count() <= MAX {
+        return r.to_string();
+    }
+    let head: String = r.chars().take(MAX).collect();
+    format!("{head}\n[…]")
+}
+
 fn compaction_trigger(context_limit: usize) -> usize {
     context_limit * 3 / 4
 }

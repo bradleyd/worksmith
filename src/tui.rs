@@ -836,7 +836,11 @@ impl App {
                 // printing it twice reads as the loop stuttering.
                 let head = match kind.as_str() {
                     "yours" => format!("yours — {subject}"),
-                    "ask" => return,
+                    // Both halves of a question are already on screen: the
+                    // composer prompt asked it, and answering echoed it back.
+                    // These events exist for the session log, /history and
+                    // --mode json, not to be printed a second time here.
+                    "ask" | "answered" => return,
                     _ => subject.clone(),
                 };
                 self.push(Kind::Pair, format!("{head}\n  {detail}"));

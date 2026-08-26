@@ -30,11 +30,25 @@ An 8B cannot reliably judge "was that load-bearing" — it will checkpoint on
 every match arm or on none, which is the load the eval says belongs in the
 harness (`worksmith-differentiator-eval-finding`). So:
 
-- **v0 trigger: a marker in the plan doc.** Zero code. The plan already names
-  the judgment calls and often writes the question out verbatim. The model looks
-  it up rather than deriving it.
-- **v0.1 triggers, mechanical, no judgment:** a `--until` check failing twice;
-  `stuck_threshold` / `Event::Nudge`.
+- **v0 trigger: a marker in the plan doc.** *Tested, does not work.* A 27B with
+  the tool available and the plan in context made twenty edits across fifty
+  steps and never called it once. A marker was not worth a separate run:
+  `MODEL_SWITCH_PLAN.md` §7 is titled "settle before coding" and ends "Confirm
+  before implementing", the model read the plan twice, and it still never asked.
+- **v0.1 triggers, mechanical, no judgment — built 2026-08-26.** A `--until`
+  check that has failed twice, and a turn about to end as stuck. Both are points
+  where the harness already knows something is wrong and needs no judgment to
+  see it, so the model cannot decline, forget, or be too busy. The answer is fed
+  back as a directive: a checkpoint that changes nothing is not a checkpoint.
+
+  A harness-raised checkpoint does **not** file a decision record, unlike the
+  `ask` tool — "try X instead" is a course correction, not an architectural
+  decision, and filing those into `docs/decisions/` would devalue the ones that
+  are. It is recorded as an `Event::Checkpoint` and reaches `/history`.
+
+  It also does not spend the per-turn cap. That cap stops a model being chatty;
+  this fires at most once per validation retry and once per stuck turn, and
+  being crowded out by three notes would be exactly backwards.
 
 A hard per-turn cap lives in code, not prose: a model can ignore a paragraph and
 cannot ignore a tool that refuses the fourth call.

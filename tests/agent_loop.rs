@@ -1097,3 +1097,150 @@ fn a_turn_that_ends_badly_says_what_to_do_next() {
     assert!(TurnOutcome::Done.advice().is_none());
     assert!(TurnOutcome::Aborted.advice().is_none(), "do not narrate what they just did");
 }
+
+// ---- harness-raised checkpoints -------------------------------------------
+
+/// An asker that answers once, and records what it was asked.
+struct Scripted {
+    answer: Option<String>,
+    asked: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait]
+impl worksmith::tools::approval::Asker for Scripted {
+    async fn ask_text(&self, subject: &str, question: &str) -> Option<String> {
+        self.asked.lock().unwrap().push((subject.into(), question.into()));
+        self.answer.clone()
+    }
+}
+
+fn agent_pairing(client: MockClient, cwd: &std::path::Path, asker: Arc<Scripted>) -> Agent {
+    Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        1_000_000,
+        6,
+        ToolContext {
+            cwd: cwd.to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            asker,
+            ..Default::default()
+        },
+    )
+    .with_pairing(true)
+}
+
+/// The model deciding when to checkpoint does not work — a 27B with the tool
+/// available made twenty edits and never called it. So the harness raises one
+/// where it already knows something is wrong, and the model cannot decline.
+#[tokio::test]
+async fn a_check_failing_twice_asks_the_user_and_follows_the_answer() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let mut script = Vec::new();
+    for _ in 0..8 {
+        script.push(tool_call("write", r#"{"path":"out.txt","content":"bad"}"#));
+        script.push(done("done"));
+    }
+    let asker = Arc::new(Scripted {
+        answer: Some("write the word good, not bad".into()),
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
+    let validator = CommandValidator::new(
+        r#"test "$(cat out.txt)" = good"#,
+        dir.path().to_path_buf(),
+        Duration::from_secs(10),
+    );
+
+    let _ = agent
+        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let asked = asker.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1, "asked once, on the second failure — not every time");
+    assert!(asked[0].0.contains("failed twice"), "subject: {}", asked[0].0);
+
+    // The answer has to reach the model, or the checkpoint was theatre.
+    let transcript: String =
+        session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    assert!(
+        transcript.contains("write the word good, not bad"),
+        "the user's answer never reached the model"
+    );
+}
+
+#[tokio::test]
+async fn a_skipped_or_unwatched_checkpoint_changes_nothing() {
+    // The direction that matters: an eval run has nobody to teach and still has
+    // to do the work. Skipping must leave the loop exactly as it was.
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let mut script = Vec::new();
+    for _ in 0..8 {
+        script.push(tool_call("write", r#"{"path":"out.txt","content":"bad"}"#));
+        script.push(done("done"));
+    }
+    let asker = Arc::new(Scripted { answer: None, asked: Mutex::new(Vec::new()) });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
+    let validator = CommandValidator::new(
+        r#"test "$(cat out.txt)" = good"#,
+        dir.path().to_path_buf(),
+        Duration::from_secs(10),
+    );
+
+    let result = agent
+        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(asker.asked.lock().unwrap().len(), 1, "it still asked");
+    assert!(
+        matches!(result.outcome, TurnOutcome::ValidationFailed(_)),
+        "a skip leaves the outcome alone: {:?}",
+        result.outcome
+    );
+}
+
+#[tokio::test]
+async fn pairing_off_never_interrupts() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let mut script = Vec::new();
+    for _ in 0..8 {
+        script.push(tool_call("write", r#"{"path":"out.txt","content":"bad"}"#));
+        script.push(done("done"));
+    }
+    let asker = Arc::new(Scripted { answer: Some("x".into()), asked: Mutex::new(Vec::new()) });
+    // Same agent, pairing left off.
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
+    agent.set_pairing(false);
+    let validator = CommandValidator::new(
+        r#"test "$(cat out.txt)" = good"#,
+        dir.path().to_path_buf(),
+        Duration::from_secs(10),
+    );
+
+    let _ = agent
+        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(asker.asked.lock().unwrap().is_empty(), "/pair off means never asked");
+}
