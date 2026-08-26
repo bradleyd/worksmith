@@ -63,16 +63,40 @@ fn a_stream_idle_timeout_is_per_provider_with_a_generous_default() {
 async fn a_context_mismatch_is_reported_in_both_directions() {
     use worksmith::llm::warn_on_context_mismatch;
 
-    let http = reqwest::Client::new();
     // No server: best-effort, never an error, never a false alarm.
-    let none = warn_on_context_mismatch(
-        &http,
-        "http://127.0.0.1:1/v1",
-        "some/model",
-        65_536,
-    )
-    .await;
+    let http = reqwest::Client::new();
+    let none =
+        warn_on_context_mismatch(&http, "http://127.0.0.1:1/v1", "some/model", 65_536).await;
     assert!(none.is_none(), "an unreachable server is not a misconfiguration");
+}
+
+/// Building a `reqwest::Client` is synchronous and, with rustls-native-certs on
+/// macOS, reads the system keychain — 8 seconds cold, with the runtime blocked
+/// throughout, so no timer can interrupt it. The probe therefore takes a client
+/// instead of building one, and startup spawns it rather than awaiting it.
+#[tokio::test]
+async fn the_probe_reuses_a_client_and_never_builds_its_own() {
+    use tokio::net::TcpListener;
+    use worksmith::llm::warn_on_context_mismatch;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+
+    // A caller-supplied client carries the caller's timeouts; a silent server
+    // is answered with None, not a hang and not a false alarm.
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let out =
+        warn_on_context_mismatch(&http, &format!("http://127.0.0.1:{port}/v1"), "m", 65_536).await;
+    assert!(out.is_none(), "a silent server is not a misconfiguration");
 }
 
 #[test]

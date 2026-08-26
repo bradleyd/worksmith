@@ -396,6 +396,18 @@ const _: () = assert!(
 /// session and by workers running on a different (usually cheaper) model, so
 /// there's one place that knows how a provider becomes a client.
 pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std::sync::Arc<dyn LlmClient>> {
+    client_and_http(resolved).map(|(c, _)| c)
+}
+
+/// As [`client_for`], but also hands back the underlying HTTP client.
+///
+/// Anything else that needs to talk to the same provider must reuse this one.
+/// Building a second is not a small waste: it is synchronous and reads the
+/// macOS keychain, which cost 8 seconds cold and blocked the runtime while it
+/// did — no timer fires through it.
+pub fn client_and_http(
+    resolved: &crate::config::ResolvedModel,
+) -> anyhow::Result<(std::sync::Arc<dyn LlmClient>, reqwest::Client)> {
     use anyhow::{Context, bail};
     // `read_timeout`, not `timeout`. A total cap would kill a legitimate long
     // generation — a 515s call is a measurement here, not a hypothetical. This
@@ -430,7 +442,7 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
     match resolved.provider.kind.as_str() {
         "openai-compat" => {
             let mut c = openai::OpenAiCompatClient::new(
-                http,
+                http.clone(),
                 resolved.provider.base_url.clone(),
                 resolved.api_key.clone(),
             );
@@ -442,7 +454,7 @@ pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std
                 .with_budget_param(resolved.provider.reasoning_budget_param.clone())
                 .with_sort(resolved.provider.sort.clone())
                 .with_stream_idle(idle);
-            Ok(std::sync::Arc::new(c))
+            Ok((std::sync::Arc::new(c), http))
         }
         other => bail!("provider type `{other}` is not supported (use `openai-compat`)"),
     }
@@ -468,6 +480,12 @@ pub async fn warn_on_context_mismatch(
     model: &str,
     configured: usize,
 ) -> Option<String> {
+    // Takes a client rather than building one. Building a `reqwest::Client` is
+    // *synchronous* and, with `rustls-native-certs` on macOS, reads the system
+    // keychain — measured at 8 seconds cold on a real machine. A second client
+    // built at startup for this check meant worksmith sat there before drawing
+    // the TUI, and because the cost is synchronous no timer could interrupt it:
+    // a `tokio::time::timeout` around the whole thing did not fire.
     let resp = http.get(format!("{base_url}/models")).send().await.ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
     let served = body

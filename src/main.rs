@@ -154,7 +154,10 @@ async fn run(args: Args) -> Result<()> {
     let config = resolve_project_trust(Config::load(&cwd)?, &cwd, &args)?;
     let resolved = config.resolve_model(args.model.as_deref())?;
 
-    let client = worksmith::llm::client_for(&resolved)?;
+    // One HTTP client for this provider, shared by the agent and the context
+    // probe below. Building a second is synchronous and reads the macOS
+    // keychain — 8 seconds cold, with the runtime blocked throughout.
+    let (client, http) = worksmith::llm::client_and_http(&resolved)?;
 
     let registry = Arc::new(ToolRegistry::with_builtins());
     let bus = EventBus::new();
@@ -247,27 +250,25 @@ async fn run(args: Args) -> Result<()> {
     let bash_timeout = Duration::from_secs(config.bash_timeout_secs());
 
     // TUI owns its own rendering (it subscribes to the bus directly) and takes
-    // Does the server agree with the configured window? Best-effort and off the
-    // hot path — a wrong `context` is silent in one direction and late in the
-    // other, and neither shows up until a turn has already gone badly.
-    let context_warning = {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .build()
-            .ok();
-        match http {
-            Some(h) => {
-                worksmith::llm::warn_on_context_mismatch(
-                    &h,
-                    resolved.provider.base_url.trim_end_matches('/'),
-                    &resolved.model,
-                    resolved.settings.context.unwrap_or_else(|| config.context_limit()),
-                )
-                .await
+    // Does the server agree with the configured window? Emitted from a
+    // background task rather than awaited: startup must never wait on a
+    // diagnostic, and this one talks to a server that may be a slow tunnel.
+    // `Event::Warning` is already rendered by every front end, so it needs no
+    // plumbing of its own.
+    {
+        let http = http.clone();
+        let bus = bus.clone();
+        let base = resolved.provider.base_url.trim_end_matches('/').to_string();
+        let model = resolved.model.clone();
+        let configured = resolved.settings.context.unwrap_or_else(|| config.context_limit());
+        tokio::spawn(async move {
+            if let Some(w) =
+                worksmith::llm::warn_on_context_mismatch(&http, &base, &model, configured).await
+            {
+                bus.emit(Event::Warning { message: w });
             }
-            None => None,
-        }
-    };
+        });
+    }
 
     // ownership of the agent/session, so handle it before wiring the renderer.
     if mode == OutputMode::Tui {
@@ -291,7 +292,6 @@ async fn run(args: Args) -> Result<()> {
             config.synthesize(),
             config.clone(),
             resolved.settings.clone(),
-            context_warning,
             approvals.expect("the TUI branch always builds an approval channel"),
             asks.expect("the TUI branch always builds a checkpoint channel"),
         )
@@ -299,9 +299,6 @@ async fn run(args: Args) -> Result<()> {
     }
 
     // Workers need a shared handle to the agent; the TUI path already owns it.
-    if let Some(w) = &context_warning {
-        eprintln!("warning: {w}");
-    }
     let agent = Arc::new(agent);
     let renderer = spawn_renderer(bus.subscribe(), mode);
     bus.emit(Event::SessionStarted { id: session.id.clone() });
