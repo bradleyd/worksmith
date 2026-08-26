@@ -1216,14 +1216,43 @@ impl Agent {
             (msgs.len(), estimate_tokens(msgs), split, render_transcript(&msgs[..split]))
         };
 
-        let sys = "You are compacting a coding-agent conversation. Summarize the \
-                   exchange below into concise notes a future agent needs to \
-                   continue: decisions made, files created or edited, key facts \
-                   learned, and any unfinished work. Preserve specifics (paths, \
-                   names, values). Omit chatter.";
+        // Ask for a *document*, with required headings, not for a summary.
+        //
+        // The old prompt asked politely for "concise notes" and named the right
+        // contents. A 27B answered it conversationally: measured summaries of
+        // 101 and 99 characters, both of the form "Let me look at the REPL's
+        // handle_command next" — its next intention, not what it had learned.
+        // Every file and line number it had gathered was traded for a sentence
+        // about what it planned to do, and then it re-read all of it. That is
+        // the whole re-reading problem, and it was compaction causing it.
+        //
+        // `plan_fanout` learned this already: "'No preamble' is a request a
+        // weak model ignores... A required prefix makes the shape checkable
+        // instead of hoped for." Same trick, applied here at last.
+        let sys = "You are writing handover notes for a coding agent that is about to lose \
+                   this conversation. It keeps only what you write.\n\n\
+                   Output ONLY the notes, under these four headings, exactly:\n\
+                   ## Goal\n## Locations\n## Established\n## Unfinished\n\n\
+                   Under Locations, list every file and line range that mattered, one per \
+                   line, as `path:line — what is there`. Under Established, list facts already \
+                   proven, so nobody looks them up twice. Under Unfinished, what is left.\n\n\
+                   Write no preamble, no reasoning, and nothing about what you intend to do \
+                   next. Do not address the reader. This is a document, not a reply.";
         let summary = self.ask(sys, &transcript, 1024).await?;
-        if summary.trim().is_empty() {
-            return Ok(()); // don't discard history for an empty summary
+
+        // A summary that is not one is worse than not compacting. Trading the
+        // whole working context for a sentence loses every location the model
+        // was working from, and it re-reads the files to get them back — which
+        // costs more than the compaction saved. Keeping the history and meeting
+        // the real context wall is the better failure: the wall is loud.
+        if let Some(why) = unusable_summary(&summary) {
+            self.emit(session, Event::Warning {
+                message: format!(
+                    "skipped compaction: the summarizer {why}. Keeping the history instead \
+                     — a bad summary costs more than it saves."
+                ),
+            });
+            return Ok(());
         }
 
         session.compact(&summary, split)?;
@@ -1299,6 +1328,39 @@ fn truncate_error(err: &anyhow::Error) -> String {
 }
 
 /// Compact at 75% of the context limit, leaving headroom for the reply.
+/// Why a compaction summary should be thrown away, or `None` if it looks like
+/// handover notes.
+///
+/// Deliberately crude. It is not judging quality — it is catching the one
+/// observed failure, a model continuing the conversation instead of writing a
+/// document, which is cheap to spot and expensive to accept.
+fn unusable_summary(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Some("returned nothing".to_string());
+    }
+    // A weak backstop only. The headings below are the actual contract — a
+    // conversational reply fails those regardless of length — and an absolute
+    // character floor cannot know how much there was to summarize. This just
+    // catches a truncated or one-word answer.
+    const MIN_CHARS: usize = 120;
+    if t.chars().count() < MIN_CHARS {
+        return Some(format!("returned {} characters, too little to be notes", t.chars().count()));
+    }
+    // The observed shape: "Let me look at the REPL's handle_command next."
+    let head = t.chars().take(40).collect::<String>().to_ascii_lowercase();
+    for opener in ["let me", "i'll ", "i will", "now i", "sure", "okay", "here's what i"] {
+        if head.starts_with(opener) {
+            return Some("answered conversationally instead of writing notes".to_string());
+        }
+    }
+    // The headings are the checkable part of the contract.
+    if !t.contains("## Locations") && !t.contains("## Established") {
+        return Some("did not use the required headings".to_string());
+    }
+    None
+}
+
 /// Keep a checkpoint question readable. The full failure output is already in
 /// the directive the model gets; the person only needs enough to recognise it.
 fn truncate_reason(r: &str) -> String {

@@ -42,6 +42,58 @@ impl LlmClient for MockClient {
     }
 }
 
+/// Handover notes as a plain string, for clients that reply with one directly.
+const HANDOVER_NOTES: &str = "## Goal\nCarry the session across a compaction.\n\
+     ## Locations\nsrc/agent.rs:1219 — the compaction prompt\n\
+     ## Established\nThe JSONL keeps everything.\n## Unfinished\nNothing.";
+
+/// A summary shaped like the handover notes compaction now asks for. The old
+/// fixtures were one-liners, which is exactly the failure the guard exists to
+/// catch — the summarizer answering conversationally and taking every file and
+/// line number down with it.
+/// An agent whose window is small enough that compaction actually cuts. With
+/// build_agent's 1,000,000 the keep budget swallows the whole history, split is
+/// 0, and `compact` returns having done nothing — which quietly makes any test
+/// of compaction pass for the wrong reason.
+fn agent_small_window(client: MockClient, cwd: &std::path::Path) -> Agent {
+    Agent::new(
+        Arc::new(client),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        2_000, // window: keep budget ~666 tokens, so a long history is cut
+        1,
+        ToolContext {
+            cwd: cwd.to_path_buf(),
+            session_id: "test".into(),
+            bash_timeout: Duration::from_secs(10),
+            is_worker: false,
+            ..Default::default()
+        },
+    )
+}
+
+fn handover(marker: &str) -> Completion {
+    done(&format!(
+        "## Goal\n{marker}\n\n\
+         ## Locations\n\
+         src/agent.rs:1219 — the compaction prompt\n\
+         src/session.rs:216 — Session::compact, which swaps the messages\n\
+         src/tools/mod.rs:88 — MAX_TOOL_RESULT_BYTES, the per-result cap\n\n\
+         ## Established\n\
+         {marker}\n\
+         The working set is replaced by these notes; the JSONL keeps everything.\n\
+         Compaction fires at 75% of the model's context window.\n\n\
+         ## Unfinished\n\
+         Nothing outstanding for this fixture."
+    ))
+}
+
 fn tool_call(name: &str, args: &str) -> Completion {
     Completion {
         content: None,
@@ -332,7 +384,7 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
     }
 
     // First stream call = the summarization pass; second = the actual turn.
-    let client = MockClient::new(vec![done("SUMMARY: earlier work"), done("final answer")]);
+    let client = MockClient::new(vec![handover("SUMMARY: earlier work"), done("final answer")]);
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -563,7 +615,7 @@ async fn helper_calls_never_inherit_the_session_thinking_budget() {
     // memory store empty while looking like "nothing worth saving".
     let client = RecordingClient {
         seen: seen.clone(),
-        reply: "summary".into(),
+        reply: HANDOVER_NOTES.into(),
         prompt_tokens: 0,
     };
     let agent = build_agent_with_client(Arc::new(client), dir.path(), 3)
@@ -593,7 +645,9 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
     }
 
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let client = RecordingClient { seen, reply: "answer".into(), prompt_tokens: 900 };
+    // The same client answers the turn *and* the summary call, so the reply has
+    // to be shaped like handover notes or compaction refuses it.
+    let client = RecordingClient { seen, reply: HANDOVER_NOTES.into(), prompt_tokens: 900 };
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -659,7 +713,7 @@ async fn compaction_cuts_deeper_when_overhead_dwarfs_the_estimate() {
     // Provider reports 900 against a 1000 window: trigger (750) fires, and the
     // overhead is 900 − ~300 = ~600 — bigger than the naive keep budget of 333.
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let client = RecordingClient { seen, reply: "SUMMARY".into(), prompt_tokens: 900 };
+    let client = RecordingClient { seen, reply: HANDOVER_NOTES.into(), prompt_tokens: 900 };
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -708,7 +762,7 @@ async fn a_compacted_session_stays_compacted_when_reopened() {
         session.append_message(Message::assistant(Some("y".repeat(300)), vec![])).unwrap();
     }
 
-    let client = MockClient::new(vec![done("SUMMARY: earlier work"), done("final answer")]);
+    let client = MockClient::new(vec![handover("SUMMARY: earlier work"), done("final answer")]);
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -1028,7 +1082,7 @@ async fn one_long_turn_can_still_be_compacted() {
     }
     let before = session.messages().len();
 
-    let client = MockClient::new(vec![done("SUMMARY: read forty files"), done("chapter written")]);
+    let client = MockClient::new(vec![handover("SUMMARY: read forty files"), done("chapter written")]);
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -1303,4 +1357,75 @@ async fn a_turn_that_wrote_something_is_not_interrupted_at_the_cap() {
 
     assert!(asker.asked.lock().unwrap().is_empty(), "it wrote something; do not interrupt");
     assert!(matches!(result.outcome, TurnOutcome::MaxSteps(_)), "{:?}", result.outcome);
+}
+
+// ---- compaction refuses to trade context for a sentence --------------------
+
+/// Compaction was silently destroying context on every fire. The summarizer,
+/// asked politely for "concise notes", answered conversationally: measured
+/// summaries of 101 and 99 characters, both "Let me look at X next" — the
+/// model's next intention, not what it had learned. Every file and line number
+/// went with it, and it re-read them all.
+#[tokio::test]
+async fn a_summary_that_is_not_one_is_refused_and_the_history_kept() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Enough history that compaction has something to bite on, then a
+    // summarizer that replies the way the real one did.
+    for i in 0..12 {
+        session.append_message(Message::user(format!("do part {i}: {}", "x".repeat(400)))).unwrap();
+        session
+            .append_message(Message::assistant(Some(format!("did part {i}")), vec![]))
+            .unwrap();
+    }
+    let before = session.messages().len();
+
+    let agent = agent_small_window(
+        MockClient::new(vec![done("Let me look at the REPL's handle_command next.")]),
+        dir.path(),
+    );
+    agent.compact(&mut session).await.unwrap();
+
+    assert_eq!(
+        session.messages().len(),
+        before,
+        "a one-line 'let me look at X' is not notes; keep the history rather than trade \
+         every location for it"
+    );
+}
+
+#[tokio::test]
+async fn real_handover_notes_are_accepted() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+    for i in 0..12 {
+        session.append_message(Message::user(format!("do part {i}: {}", "x".repeat(400)))).unwrap();
+        session
+            .append_message(Message::assistant(Some(format!("did part {i}")), vec![]))
+            .unwrap();
+    }
+    let before = session.messages().len();
+
+    let notes = "## Goal\nAdd Event::ModelChanged.\n\n## Locations\n\
+                 src/event.rs:14 — the Event enum\n\
+                 src/tui.rs:859 — App::apply, exhaustive\n\
+                 src/tui.rs:2476 — the /history renderer, exhaustive\n\n\
+                 ## Established\nActiveModel and set_model already exist; steps 1 and 2 are done.\n\
+                 The three matches are exhaustive and fail to compile until updated.\n\n\
+                 ## Unfinished\nThe /model command itself, and the REPL.";
+    let agent = agent_small_window(MockClient::new(vec![done(notes)]), dir.path());
+    agent.compact(&mut session).await.unwrap();
+
+    assert!(
+        session.messages().len() < before,
+        "real notes compact the history: {} -> {}",
+        before,
+        session.messages().len()
+    );
+    let kept: String =
+        session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    assert!(kept.contains("src/tui.rs:2476"), "the locations survive, which is the point");
 }
