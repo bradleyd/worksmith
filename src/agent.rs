@@ -482,6 +482,17 @@ impl Agent {
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
         let mut failures = 0usize;
+        // Whether the turn has actually changed anything. Fifty steps and no
+        // edits is the harness knowing the loop is not working, with nothing
+        // to judge — the sharpest mechanical signal of the three.
+        let edits = std::sync::Arc::new(AtomicUsize::new(0));
+        // Offered once per turn, across *both* the stuck and step-limit
+        // triggers. Without this, answering "it is going in circles" put the
+        // model straight back into the same circle, which asked again, forever:
+        // a loop the user could only leave by pressing Esc, which is worse than
+        // a turn that ends. If one answer does not get it moving, a second ask
+        // will not either.
+        let mut offered_a_way_in = false;
         // Snapshot the model once, at the top. A switch landing mid-turn must
         // not change the model out from under an in-flight step, or hand the
         // clamp a context limit the current prompt was not built for. It lands
@@ -490,17 +501,50 @@ impl Agent {
 
         let outcome = loop {
             let idle = self
-                .run_until_idle(session, system_prompt, &mut final_text, &cancel, &active)
+                .run_until_idle(session, system_prompt, &mut final_text, &cancel, &active, &edits)
                 .await?;
 
             match idle {
                 IdleReason::Aborted => break TurnOutcome::Aborted,
-                IdleReason::MaxSteps => break TurnOutcome::MaxSteps(self.max_steps),
+                IdleReason::MaxSteps => {
+                    // The cap on its own is not evidence of trouble — a long
+                    // job can legitimately want another turn. The cap reached
+                    // with *nothing written* is: it read and searched for fifty
+                    // steps and never started. Measured: 46 reads, 21 greps,
+                    // one file opened seventeen times, zero edits.
+                    if edits.load(Ordering::Relaxed) == 0
+                        && !offered_a_way_in
+                        && let Some(a) = self
+                            .harness_checkpoint(
+                                session,
+                                "Fifty steps, nothing written",
+                                &format!(
+                                    "It has used all {} steps without editing anything — it is \
+                                     still trying to understand the code. Point it at the right \
+                                     place, or say what to do first. (Enter to answer, Esc to \
+                                     end the turn.)",
+                                    self.max_steps
+                                ),
+                            )
+                            .await
+                    {
+                        offered_a_way_in = true;
+                        session.append_message(Message::user(format!(
+                            "You used every step without changing anything. The user says:\n\n\
+                             {a}\n\nStart there."
+                        )))?;
+                        continue;
+                    }
+                    break TurnOutcome::MaxSteps(self.max_steps);
+                }
                 IdleReason::Stuck(r) => {
                     // Going in circles is the other thing the harness knows
                     // without judging anything. Ask before ending the turn: a
                     // sentence from the user is worth more here than the whole
                     // re-plan machinery, and the alternative is stopping.
+                    if offered_a_way_in {
+                        break TurnOutcome::Stuck(r);
+                    }
                     match self
                         .harness_checkpoint(
                             session,
@@ -514,6 +558,7 @@ impl Agent {
                         .await
                     {
                         Some(a) => {
+                            offered_a_way_in = true;
                             session.append_message(Message::user(format!(
                                 "You were repeating yourself ({r}). The user says:\n\n{a}\n\n\
                                  Follow that."
@@ -605,6 +650,7 @@ impl Agent {
 
     /// Inner loop: run model↔tool steps until the model stops calling tools,
     /// gets stuck, hits the step cap, or is cancelled.
+    #[allow(clippy::too_many_arguments)]
     async fn run_until_idle(
         &self,
         session: &mut Session,
@@ -612,6 +658,7 @@ impl Agent {
         final_text: &mut String,
         cancel: &CancellationToken,
         active: &ActiveModel,
+        edits: &std::sync::Arc<AtomicUsize>,
     ) -> Result<IdleReason> {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut nudged: HashSet<String> = HashSet::new();
@@ -893,6 +940,9 @@ impl Agent {
                     });
                 }
 
+                if matches!(call.name.as_str(), "write" | "edit") {
+                    edits.fetch_add(1, Ordering::Relaxed);
+                }
                 let (ok, fatal, raw) =
                     match serde_json::from_str::<serde_json::Value>(&call.arguments) {
                         Ok(v) => {

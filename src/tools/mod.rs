@@ -120,12 +120,32 @@ fn cap(mut out: ToolOutput) -> ToolOutput {
         end -= 1;
     }
     out.content.truncate(end);
-    out.content.push_str(&format!(
-        "\n\n[…{omitted} more bytes not shown. This is a cap on how much one result may take \
-         from the context window, not the end of the content. Read the rest in slices with \
-         `offset`/`limit`, or narrow the command — searching for what you need beats pulling \
-         the whole thing in.]"
-    ));
+    // How many more calls would it take to page through the rest at this cap?
+    // Below a handful, slicing is fine and is the obvious advice. Past that it
+    // is a trap: a 4,848-line file needs ~24 reads, which does not fit in a 64k
+    // window beside everything else, and compaction then deletes the slices
+    // already gathered so the count starts again. Observed: fifty steps, 46
+    // reads, seventeen of them the same file, and not one edit — while the
+    // model dutifully followed this very message and used offset/limit for 41
+    // of them. Advice that leads somewhere unreachable is worse than none.
+    let more_reads = omitted.div_ceil(MAX_TOOL_RESULT_BYTES);
+    const TOO_MANY_TO_PAGE: usize = 4;
+    if more_reads > TOO_MANY_TO_PAGE {
+        out.content.push_str(&format!(
+            "\n\n[…{omitted} more bytes not shown, about {more_reads} further reads at this cap. \
+             Do NOT page through it: that many results will not fit alongside your work, and \
+             compaction will discard the earlier ones before you reach the end. Find the part \
+             you need instead — `grep` for a symbol or phrase, then read the lines around the \
+             hit with `offset`/`limit`.]"
+        ));
+    } else {
+        out.content.push_str(&format!(
+            "\n\n[…{omitted} more bytes not shown. This is a cap on how much one result may take \
+             from the context window, not the end of the content. Read the rest in slices with \
+             `offset`/`limit`, or narrow the command — searching for what you need beats pulling \
+             the whole thing in.]"
+        ));
+    }
     if !outline.is_empty() {
         out.content.push_str("\n[the full content is organized under these headings:\n");
         for h in outline {

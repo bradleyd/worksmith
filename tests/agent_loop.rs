@@ -1244,3 +1244,63 @@ async fn pairing_off_never_interrupts() {
 
     assert!(asker.asked.lock().unwrap().is_empty(), "/pair off means never asked");
 }
+
+/// The cap on its own is not trouble — a long job can want another turn. The
+/// cap reached with *nothing written* is: measured at 50 steps, 46 reads, 21
+/// greps, one file opened seventeen times, and not one edit.
+#[tokio::test]
+async fn burning_every_step_without_writing_anything_asks_for_a_way_in() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // Reads forever, never writes — the observed failure, in miniature.
+    // Distinct calls, so this reaches the step cap rather than tripping the
+    // stuck detector — the observed run searched widely and never repeated
+    // itself into a corner; it simply never started.
+    let script: Vec<_> = (0..80)
+        .map(|i| tool_call("bash", &format!(r#"{{"command":"echo reading part {i}"}}"#)))
+        .collect();
+    let asker = Arc::new(Scripted {
+        answer: Some("edit src/event.rs, the enum is at the top".into()),
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
+
+    let _ = agent
+        .run_turn(&mut session, "do the thing", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let asked = asker.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1, "asked once, not once per exhausted budget");
+    assert!(asked[0].0.contains("nothing written"), "subject: {}", asked[0].0);
+
+    let transcript: String =
+        session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    assert!(transcript.contains("the enum is at the top"), "the answer must reach the model");
+}
+
+#[tokio::test]
+async fn a_turn_that_wrote_something_is_not_interrupted_at_the_cap() {
+    // Hitting the cap after real work is a long job, not a stuck one. Asking
+    // there would be an interruption with nothing behind it.
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let mut script = vec![tool_call("write", r#"{"path":"a.txt","content":"x"}"#)];
+    script.extend(
+        (0..80).map(|i| tool_call("bash", &format!(r#"{{"command":"echo part {i}"}}"#))),
+    );
+    let asker = Arc::new(Scripted { answer: Some("x".into()), asked: Mutex::new(Vec::new()) });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
+
+    let result = agent
+        .run_turn(&mut session, "do the thing", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(asker.asked.lock().unwrap().is_empty(), "it wrote something; do not interrupt");
+    assert!(matches!(result.outcome, TurnOutcome::MaxSteps(_)), "{:?}", result.outcome);
+}
