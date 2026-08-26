@@ -3427,39 +3427,79 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         " message · Enter send · Alt+Enter newline ".to_string()
     };
 
-    let (crow, ccol) = cursor_rowcol(&app.input, app.cursor);
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let (rows, crow, ccol) = wrap_input(&app.input, inner_w, app.cursor);
     let inner_h = area.height.saturating_sub(2) as usize;
     // Vertical scroll so the cursor's row stays visible.
     let scroll = (crow + 1).saturating_sub(inner_h.max(1)) as u16;
 
-    // No wrap: keeps cursor row/col math exact (long lines clip at the edge).
-    let para = Paragraph::new(app.input.as_str())
+    // Breaks are already in the text, so ratatui must not add its own.
+    let para = Paragraph::new(rows.join("\n"))
         .block(Block::default().borders(Borders::ALL).title(title))
         .scroll((scroll, 0));
     f.render_widget(para, area);
 
-    let inner_w = area.width.saturating_sub(2);
-    let x = area.x + 1 + (ccol as u16).min(inner_w.saturating_sub(1));
+    let x = area.x + 1 + (ccol as u16).min(inner_w.saturating_sub(1) as u16);
     let y = area.y + 1 + (crow as u16).saturating_sub(scroll);
     f.set_cursor_position((x, y));
 }
 
-/// Cursor (row, col) in logical lines for a char index into `input`.
-fn cursor_rowcol(input: &str, cursor: usize) -> (usize, usize) {
+/// Hard-wrap the composer to `width`, and say where the cursor lands in the
+/// wrapped text.
+///
+/// One function for both, because the composer did not wrap at all before this:
+/// wrapping and cursor position were two calculations that could disagree, so
+/// the safe move was to clip. Clipping meant a pasted `/spawn` line vanished
+/// past the right edge with the cursor pinned there, typing blind.
+///
+/// The breaks are inserted here rather than left to ratatui's `Wrap`, which
+/// breaks on word boundaries — no char-index arithmetic can predict where those
+/// land, which is the disagreement the clipping avoided. Hard breaks are ugly
+/// mid-word and exactly predictable, and predictable is what a cursor needs.
+fn wrap_input(input: &str, width: usize, cursor: usize) -> (Vec<String>, usize, usize) {
+    let w = width.max(1);
+    let mut rows: Vec<String> = vec![String::new()];
     let (mut row, mut col) = (0usize, 0usize);
+    let (mut crow, mut ccol) = (0usize, 0usize);
+    let mut n = 0usize;
+
     for (i, ch) in input.chars().enumerate() {
+        // Wrap before placing the cursor, so a cursor sitting exactly on a
+        // break belongs to the start of the next row and not to a column that
+        // is off the edge.
+        if ch != '\n' && col == w {
+            rows.push(String::new());
+            row += 1;
+            col = 0;
+        }
         if i == cursor {
-            break;
+            crow = row;
+            ccol = col;
         }
         if ch == '\n' {
+            rows.push(String::new());
             row += 1;
             col = 0;
         } else {
+            rows[row].push(ch);
             col += 1;
         }
+        n = i + 1;
     }
-    (row, col)
+    // Cursor past the last char — the common case, since it usually trails the
+    // text being typed.
+    if cursor >= n {
+        if col == w {
+            rows.push(String::new());
+            row += 1;
+            col = 0;
+        }
+        crow = row;
+        ccol = col;
+    }
+    (rows, crow, ccol)
 }
+
 
 /// Render a unified diff with per-line color (summary yellow, `+` green, `-`
 /// red, `@@` cyan, context dim), wrapped to width and capped when collapsed.
@@ -3991,6 +4031,91 @@ mod tests {
     }
 
     #[test]
+    fn the_end_of_a_long_paste_is_actually_on_screen() {
+        // The rendered proof, not just the arithmetic: paste a long /spawn line
+        // and the tail has to be visible somewhere in the composer.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut a = app();
+        a.insert_str(
+            "/spawn -n 3 --until \"cd docs && zola check\" Write ONE Zola content page and \
+             only that page, do not touch another worker's file. ENDMARKER",
+        );
+        a.ensure_rows(40);
+
+        let mut term = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        term.draw(|f| ui(f, &a)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("ENDMARKER"),
+            "the tail of a pasted line must be reachable on screen:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_pasted_line_wraps_instead_of_vanishing_past_the_edge() {
+        // The bug: a long `/spawn` line clipped at the right edge with no
+        // horizontal scroll, so everything past ~76 columns was invisible and
+        // the cursor pinned to the edge — typing blind.
+        let long = "x".repeat(30);
+        let (rows, crow, ccol) = wrap_input(&long, 10, 30);
+        assert_eq!(rows, vec!["xxxxxxxxxx", "xxxxxxxxxx", "xxxxxxxxxx", ""]);
+        assert_eq!((crow, ccol), (3, 0), "the cursor follows onto a fresh row");
+    }
+
+    #[test]
+    fn the_cursor_and_the_breaks_cannot_disagree() {
+        // They were separate calculations before, which is why the composer
+        // clipped rather than wrapped.
+        let text = "abcdefghij";
+        // Sitting exactly on a break belongs to the next row, not to a column
+        // off the edge.
+        let (rows, crow, ccol) = wrap_input(text, 5, 5);
+        assert_eq!(rows, vec!["abcde", "fghij"]);
+        assert_eq!((crow, ccol), (1, 0));
+
+        // And every earlier position lands where the character is drawn.
+        for c in 0..5 {
+            let (_, r, col) = wrap_input(text, 5, c);
+            assert_eq!((r, col), (0, c), "cursor {c}");
+        }
+    }
+
+    #[test]
+    fn explicit_newlines_survive_wrapping() {
+        // Alt+Enter inserts a newline; those are real rows, not wrap points.
+        let (rows, crow, ccol) = wrap_input("ab\ncdefgh", 4, 3);
+        assert_eq!(rows, vec!["ab", "cdef", "gh"]);
+        assert_eq!((crow, ccol), (1, 0), "just after the newline");
+
+        // An empty trailing line is a row of its own.
+        let (rows, crow, _) = wrap_input("ab\n", 8, 3);
+        assert_eq!(rows, vec!["ab", ""]);
+        assert_eq!(crow, 1);
+    }
+
+    #[test]
+    fn wrapping_counts_characters_not_bytes() {
+        // Multibyte input must not split a char or miscount the column.
+        let (rows, crow, ccol) = wrap_input("日本語テスト", 3, 4);
+        assert_eq!(rows, vec!["日本語", "テスト"]);
+        assert_eq!((crow, ccol), (1, 1));
+    }
+
+    #[test]
+    fn an_empty_composer_has_one_row_and_a_cursor_at_the_start() {
+        let (rows, crow, ccol) = wrap_input("", 20, 0);
+        assert_eq!(rows, vec![""]);
+        assert_eq!((crow, ccol), (0, 0));
+    }
+
+    #[test]
     fn a_checkpoint_is_its_own_channel_not_a_notice() {
         let mut a = app();
         a.apply_event(Event::Checkpoint {
@@ -4055,7 +4180,7 @@ mod tests {
         a.insert_str("line1\nline2\nline3");
         assert_eq!(a.input.split('\n').count(), 3);
         assert_eq!(a.cursor, a.char_len());
-        let (row, _col) = cursor_rowcol(&a.input, a.cursor);
+        let (_, row, _col) = wrap_input(&a.input, 80, a.cursor);
         assert_eq!(row, 2, "cursor should be on the last pasted line");
     }
 
