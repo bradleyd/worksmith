@@ -209,7 +209,7 @@ One table, because prices, sampling, and window all want the same key.
 | `stuck-timeout` | `120` | Seconds of idle **between steps** before a nudge. Time waiting on a model call does not count. |
 | `max-nudges` | `3` | Nudges before escalating. |
 | `repeat-threshold` | `4` | Repeated identical calls before the supervisor acts. |
-| `token-budget` | unset | Completion tokens a worker may spend before escalating. Unset means no budget. |
+| `token-budget` | unset | Completion tokens a worker may spend before escalating. Unset means no budget. A runaway guard, not a work cap — one docs page measured ~10k, so a low value stops real work and reports it as `aborted`. |
 | `request-timeout` | `600` | How long the supervisor waits on an in-flight worker call before escalating. **Workers only** — the main loop's stall guard is `stream-idle-timeout`. |
 | `fanout` | — | Whether a bare `/spawn` plans a fan-out or runs one worker. |
 | `synthesize` | `true` | After a fan-out group reports, ask the session's model to combine the results. |

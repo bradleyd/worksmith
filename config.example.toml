@@ -173,7 +173,11 @@ supervisor = "rules"
 stuck-timeout = 120         # seconds with no worker event before a nudge
 max-nudges = 3              # nudges before the supervisor stops the worker
 repeat-threshold = 4        # identical tool calls (whole run) before a nudge
-# token-budget = 200000     # completion tokens a worker may spend before it's stopped
+# Completion tokens a worker may spend before the supervisor stops it. A runaway
+# guard, not a work cap: set it well above real work or it kills the job it was
+# meant to protect, and reports "aborted" — which reads like the user pressed
+# Esc. For scale, a worker writing one documentation page measured 9.5k-10.7k.
+# token-budget = 200000
 # How long one model call may take before the worker is stopped as hung.
 # Separate from stuck-timeout on purpose: that one is about the loop spinning
 # between steps, this is about a server that never answered. Three workers
