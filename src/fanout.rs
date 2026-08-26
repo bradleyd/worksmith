@@ -24,6 +24,36 @@ pub struct PendingFanOut {
     pub validate: Option<String>,
 }
 
+/// Take one flag value off the front of `rest`: a quoted string, or a single
+/// whitespace-delimited token.
+///
+/// `--until` is a *shell command* and every real one is multi-word — `cargo
+/// test`, `zola check`, `npm run lint`. Taking a single token meant
+/// `--until "cd docs && zola check"` set the check to the literal `"cd` and
+/// silently swallowed the rest into the task text. The failure surfaced fifteen
+/// steps later inside a worker as `bash: unexpected EOF while looking for
+/// matching "`, which reads as the task failing rather than the harness never
+/// having run a check at all.
+///
+/// Deliberately not a shell lexer: no escapes, no nesting. It takes a quoted
+/// run verbatim, which is what a person typing a command into a prompt means.
+fn take_value(rest: &str) -> Result<(String, &str), String> {
+    let rest = rest.trim_start();
+    let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+        return Ok(match rest.split_once(char::is_whitespace) {
+            Some((v, a)) => (v.to_string(), a.trim_start()),
+            None => (rest.to_string(), ""),
+        });
+    };
+    let body = &rest[quote.len_utf8()..];
+    match body.find(quote) {
+        Some(end) => Ok((body[..end].to_string(), body[end + quote.len_utf8()..].trim_start())),
+        // Loudly, and now: the alternative is a broken command discovered by a
+        // worker minutes later, wearing the costume of a failing task.
+        None => Err(format!("has an unterminated {quote} quote")),
+    }
+}
+
 /// How `/spawn` was asked to divide the work.
 pub enum FanOut {
     /// Planner decides how many (usually one).
@@ -46,7 +76,10 @@ pub struct SpawnRequest {
 
 pub const SPAWN_USAGE: &str =
     "usage: /spawn [-n N | --each-files <regex>] [--model <provider/model>] \
-     [--until <check>] <task>";
+     [--until <check>] <task>\n\
+     Quote a multi-word check: --until \"cargo test\". A fan-out's check runs in \
+     every worker at once, in one directory, so it must be read-only — \
+     `zola check`, not `zola build`.";
 
 /// Parse leading flags off a `/spawn` line; everything after them is the task,
 /// verbatim. Flags take a single token, so no quoting rules are needed.
@@ -70,10 +103,8 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
             rest = after;
             break;
         }
-        let (value, after) = match after.split_once(char::is_whitespace) {
-            Some((v, a)) => (v, a.trim_start()),
-            None => (after, ""),
-        };
+        let (value, after) = take_value(after).map_err(|e| format!("/spawn: {flag} {e}"))?;
+        let value = value.as_str();
         match flag {
             "-n" | "--count" => {
                 if explicit {
@@ -101,6 +132,15 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
             "--until" | "-u" => {
                 if value.is_empty() {
                     return Err("/spawn: --until wants a shell command".into());
+                }
+                // The same regexes `bash` already refuses, applied at the one
+                // other place worksmith runs a shell. Not a new gate: a
+                // validation command runs unattended after every turn *and*
+                // every retry, so a mistyped one runs on a loop, and a
+                // validator cannot stop to ask. Refusing here is the only
+                // moment it can be reported to the person who typed it.
+                if let Some(reason) = crate::tools::dangerous_command(value) {
+                    return Err(format!("/spawn: --until refused — {reason}"));
                 }
                 validate = Some(value.to_string());
             }
@@ -375,6 +415,66 @@ pub fn parse_subtasks(text: &str, want: Option<usize>, max: usize) -> Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn until_takes_a_whole_shell_command() {
+        // The bug: a single-token value made the check the literal `"cd` and
+        // swallowed the rest of the command into the task, so the fan-out ran
+        // unchecked and said nothing about it.
+        let r = parse_spawn(
+            r#"-n 3 --until "cd docs && zola check --skip-external-links" Write the docs"#,
+            true,
+        )
+        .unwrap();
+        assert_eq!(r.validate.as_deref(), Some("cd docs && zola check --skip-external-links"));
+        assert_eq!(r.task, "Write the docs", "the task is not eaten by the flag");
+        assert!(matches!(r.fanout, FanOut::Count(3)));
+    }
+
+    #[test]
+    fn quoting_is_optional_and_both_quotes_work() {
+        let bare = parse_spawn("--until cargo do the thing", false).unwrap();
+        assert_eq!(bare.validate.as_deref(), Some("cargo"));
+        assert_eq!(bare.task, "do the thing");
+
+        let single = parse_spawn("--until 'cargo test --all' do the thing", false).unwrap();
+        assert_eq!(single.validate.as_deref(), Some("cargo test --all"));
+
+        // Both flags quoted, in either order, with the task intact after.
+        let both = parse_spawn(
+            r#"--model "openrouter/qwen/qwen3.8-27b" --until "cargo test" fix it"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(both.model.as_deref(), Some("openrouter/qwen/qwen3.8-27b"));
+        assert_eq!(both.validate.as_deref(), Some("cargo test"));
+        assert_eq!(both.task, "fix it");
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_a_parse_error_not_a_broken_command() {
+        // Loudly and now, rather than as `bash: unexpected EOF` fifteen steps
+        // deep in a worker, wearing the costume of a failing task.
+        let Err(e) = parse_spawn(r#"--until "cargo test do the thing"#, false) else {
+            panic!("an unterminated quote must not parse")
+        };
+        assert!(e.contains("unterminated"), "{e}");
+        assert!(e.contains("--until"), "says which flag: {e}");
+    }
+
+    #[test]
+    fn a_check_that_bash_would_refuse_is_refused_here_too() {
+        // A validation command runs unattended after every turn and every
+        // retry, and cannot stop to ask — so parse time is the only moment a
+        // refusal reaches the person who typed it.
+        let Err(e) = parse_spawn(r#"--until "rm -rf /" do the thing"#, false) else {
+            panic!("a refused command must not parse")
+        };
+        assert!(e.contains("refused"), "{e}");
+
+        // And an ordinary check is untouched.
+        assert!(parse_spawn(r#"--until "cargo test" go"#, false).is_ok());
+    }
 
     #[test]
     fn spawn_parses_flags_then_takes_the_rest_verbatim() {

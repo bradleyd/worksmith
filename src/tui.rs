@@ -1376,6 +1376,17 @@ async fn run_loop(
                                 }
                             }
                         }
+                        // Say the check out loud. A fan-out ran unchecked for
+                        // weeks because a broken `--until` was silently dropped
+                        // — nobody misses a check they were never shown.
+                        app.push(
+                            Kind::Notice,
+                            match &validate {
+                                Some(c) => format!("  check: {c}"),
+                                None => "  check: none — nothing verifies these workers"
+                                    .to_string(),
+                            },
+                        );
                         let report =
                             workers.spawn_many_checked(plan.tasks, system, request, over, validate);
                         app.push(Kind::Notice, fanout_notice(&report));
@@ -1897,6 +1908,8 @@ KNOWLEDGE & SKILLS
 
 WORKERS
   /spawn [-n N | --each-files <re>] [--model <spec>] [--until <check>] <task>
+        quote a multi-word check: --until `cargo test`. A fan-out check runs in
+        every worker at once in one directory, so it must be read-only.
   /agents                             list them
   /agents tail <id>                   watch one work, live
   /agents show <id>                   its result once finished
