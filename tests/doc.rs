@@ -128,6 +128,33 @@ async fn an_oversized_result_is_capped_and_says_so() {
     assert!(out.content.contains("offset"), "and points at the way to get the rest");
 }
 
+/// When the remainder needs many reads to page through, the cap message stops
+/// recommending `offset`/`limit` and points at `grep` instead — paging a 4,848-line
+/// file is a trap the model dutifully fell into (fifty steps, 46 reads, no edits).
+#[tokio::test]
+async fn a_very_oversized_result_stops_advising_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    // 100kB: 92kB omitted, ~12 further reads at the 8kB cap — past the threshold
+    // where slicing stops being the obvious advice.
+    let big = "x".repeat(100_000);
+    std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+
+    let registry = worksmith::tools::ToolRegistry::with_builtins();
+    let out = registry
+        .run("read", serde_json::json!({"path": "big.txt"}), &ctx(dir.path()))
+        .await;
+
+    assert!(!out.is_error, "a big file is readable, just not all at once");
+    assert!(out.content.contains("not shown"), "{}", &out.content[out.content.len() - 200..]);
+    assert!(out.content.contains("further reads"), "names how many reads remain: {}", out.content);
+    assert!(out.content.contains("Do NOT page through it"), "refuses the paging trap: {}", out.content);
+    assert!(out.content.contains("grep"), "points at the escape hatch: {}", out.content);
+    assert!(
+        !out.content.contains("Read the rest in slices"),
+        "the paging advice is gone when paging is the trap"
+    );
+}
+
 /// When capped content has headings, the notice names them — turning "read it
 /// again" into "fetch the one section you need".
 #[tokio::test]
