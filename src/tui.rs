@@ -901,8 +901,6 @@ pub async fn run_tui(
     config: Config,
     // Prices and sampling for the session's model, for the footer's cost.
     model_settings: crate::config::ModelSettings,
-    // The server disagreeing with the configured window, when it does.
-    context_warning: Option<String>,
     // Questions from the agent's task: "may I run this?". The agent blocks on
     // the answer, so this loop must always send one.
     approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
@@ -925,7 +923,6 @@ pub async fn run_tui(
         synthesize,
         config,
         model_settings,
-        context_warning,
         approvals,
         asks,
     )
@@ -992,8 +989,6 @@ async fn run_loop(
     config: Config,
     // Prices and sampling for the session's model, for the footer's cost.
     model_settings: crate::config::ModelSettings,
-    // The server disagreeing with the configured window, when it does.
-    context_warning: Option<String>,
     mut approvals: tokio::sync::mpsc::Receiver<crate::tools::approval::ApprovalRequest>,
     mut asks: tokio::sync::mpsc::Receiver<crate::tools::approval::TextRequest>,
 ) -> Result<()> {
@@ -1037,9 +1032,6 @@ async fn run_loop(
     app.push(Kind::Notice, format!("cwd: {}", cwd.display()));
     if !crate::config::load_project_instructions(&cwd).trim().is_empty() {
         app.push(Kind::Notice, "loaded project instructions (AGENTS.md/CLAUDE.md)".to_string());
-    }
-    if let Some(w) = context_warning {
-        app.push(Kind::Notice, format!("⚠ {w}"));
     }
     if let Some(c) = app.validate_cmd.clone() {
         app.push(Kind::Notice, format!("validation: {c}"));
@@ -1352,16 +1344,25 @@ async fn run_loop(
                             // Every task repeats the same setup, because each has
                             // to stand alone. Say it once, so the truncation falls
                             // on the shared half rather than the distinct one.
+                            // Size the cut to the terminal, not to a constant.
+                            // 100 columns was invisible on a narrow terminal and
+                            // threw away half a wide one — and the tail is the
+                            // part that distinguishes one task from another.
+                            // Two rows' worth, so a long task still says
+                            // something without the list becoming the screen.
+                            let budget = (app.cache_width.max(40) as usize)
+                                .saturating_sub(6)
+                                .saturating_mul(2);
                             match common_opening(&plan.tasks) {
                                 Some((shared, tails)) => {
                                     app.push(
                                         Kind::Notice,
-                                        format!("  all: {}…", truncate(&shared, 100)),
+                                        format!("  all: {}…", truncate(&shared, budget)),
                                     );
                                     for (i, t) in tails.iter().enumerate() {
                                         app.push(
                                             Kind::Notice,
-                                            format!("  {}. …{}", i + 1, truncate(t, 100)),
+                                            format!("  {}. …{}", i + 1, truncate(t, budget)),
                                         );
                                     }
                                 }
@@ -1369,7 +1370,7 @@ async fn run_loop(
                                     for (i, t) in plan.tasks.iter().enumerate() {
                                         app.push(
                                             Kind::Notice,
-                                            format!("  {}. {}", i + 1, truncate(t, 100)),
+                                            format!("  {}. {}", i + 1, truncate(t, budget)),
                                         );
                                     }
                                 }
@@ -1733,6 +1734,12 @@ async fn handle_key(
         KeyCode::Right => app.move_right(),
         KeyCode::Home => app.move_home(),
         KeyCode::End => app.move_end(),
+        // Readline bindings, because every other text box in a terminal has
+        // them and the hands go there without asking. Ctrl+U and Ctrl+D are
+        // already transcript scrolling, so the kill-line pair is deliberately
+        // absent rather than fighting over the keys.
+        KeyCode::Char('a') if ctrl => app.move_home(),
+        KeyCode::Char('e') if ctrl => app.move_end(),
         KeyCode::Char('w') if ctrl => app.delete_word(),
         KeyCode::Backspace => app.backspace(),
         // Alt/Shift+Enter inserts a newline; plain Enter sends.
@@ -4182,6 +4189,29 @@ mod tests {
         assert_eq!(a.cursor, a.char_len());
         let (_, row, _col) = wrap_input(&a.input, 80, a.cursor);
         assert_eq!(row, 2, "cursor should be on the last pasted line");
+    }
+
+    #[test]
+    fn readline_keys_move_the_cursor_in_the_composer() {
+        // Ctrl+W was bound and Ctrl+A was not, so the hands went to a key that
+        // did nothing. These are asserted on the App methods the key handler
+        // calls; the handler itself needs the whole turn's context to invoke.
+        let mut a = app();
+        a.insert_str("hello world");
+        assert_eq!(a.cursor, 11);
+
+        a.move_home(); // Ctrl+A
+        assert_eq!(a.cursor, 0);
+        a.move_end(); // Ctrl+E
+        assert_eq!(a.cursor, 11);
+
+        // Home/End work per logical line, so a multi-line paste stays sane.
+        a.clear_input();
+        a.insert_str("one\ntwo");
+        a.move_home();
+        assert_eq!(a.cursor, 4, "start of the line the cursor is on, not of the buffer");
+        a.move_end();
+        assert_eq!(a.cursor, 7);
     }
 
     #[test]
