@@ -20,6 +20,10 @@ pub enum Event {
     /// sharing one local server is enough to trip a 20s timeout on prefill.
     ModelCallStarted,
     ModelCallFinished,
+    /// The session's active model changed mid-run. The session log is the only
+    /// place the switch is visible afterwards — the transcript alone cannot say
+    /// which model answered which part of the turn.
+    ModelChanged { from: String, to: String },
     /// A streamed chunk of model reasoning/thinking (display-only).
     Thinking { text: String },
     /// A streamed chunk of assistant text.

@@ -815,6 +815,9 @@ impl App {
             }
             // Bookkeeping for the supervisor's idle rule; nothing to draw.
             Event::ModelCallStarted | Event::ModelCallFinished => {}
+            Event::ModelChanged { from, to } => {
+                self.push(Kind::Notice, format!("model changed: {from} → {to}"));
+            }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
             Event::ToolCall { name, arguments, .. } => {
                 self.push(Kind::Tool, tool_summary(&name, &arguments));
@@ -2605,6 +2608,7 @@ fn describe(ev: &Event) -> String {
         ),
         Event::ModelCallStarted => "model call →".to_string(),
         Event::ModelCallFinished => "model call ←".to_string(),
+        Event::ModelChanged { from, to } => format!("model changed: {from} → {to}"),
         Event::Usage { completion_tokens, reasoning_tokens, finish_reason, .. } => format!(
             "usage: {completion_tokens} tok ({reasoning_tokens} reasoning), finish={}",
             finish_reason.as_deref().unwrap_or("none")

@@ -927,6 +927,33 @@ async fn the_session_records_what_the_loop_did() {
     assert_eq!(reopened.messages().len(), session.messages().len());
 }
 
+/// A model switch recorded in the session must read back after the process
+/// that wrote it has exited. `Event` is `Deserialize` as well as `Serialize`
+/// for exactly this: old sessions stay readable as the enum grows, and a
+/// `ModelChanged` written by one run is visible to the next.
+#[test]
+fn a_model_change_round_trips_through_the_session_jsonl() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+
+    let ev = worksmith::event::Event::ModelChanged {
+        from: "big/model".to_string(),
+        to: "cheap/model".to_string(),
+    };
+    session.append_event(&ev).unwrap();
+
+    let events = worksmith::session::events(&path).unwrap();
+    assert_eq!(events.len(), 1, "the event entry is in the file: {events:?}");
+    assert!(
+        matches!(&events[0].event, worksmith::event::Event::ModelChanged { from, to }
+            if from == "big/model" && to == "cheap/model"),
+        "the switch reads back with both sides intact: {:?}",
+        events[0].event
+    );
+}
+
 #[tokio::test]
 async fn output_tokens_are_clamped_to_what_the_window_can_hold() {
     common::isolate_home();

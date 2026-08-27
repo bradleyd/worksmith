@@ -151,12 +151,15 @@ it there too.)
 Add `Event::ModelChanged { from: String, to: String }` (`event.rs:14`) and emit
 it through `Agent::emit` so it lands in the session JSONL and `/history`.
 
-Three matches are exhaustive and will fail to compile until updated — that is
-the feature, not a chore:
+**Two** matches are exhaustive and fail to compile until updated — that is the
+feature, not a chore. Both are in `tui.rs`: `App::apply_event` (the transcript)
+and `describe` (the `/history` line). This section said three and named
+`main.rs` as the other; `render_activity` there has a `_ => {}` wildcard and
+compiles untouched. Worksmith found that by letting the compiler name them
+instead of trusting this list — which is what the list should have said.
 
-- `App::apply` (`tui.rs:859`)
-- the `/history` renderer (`tui.rs:2476`)
-- `main.rs:1326` area (`--mode json` / print mode)
+Line numbers are omitted deliberately. Every one this document carried had
+drifted within two days.
 
 Per-message provenance already exists: `with_trace(…, Some(model))`
 (`agent.rs:613`) stamps every assistant message with the model that produced it,
