@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::supervisor::{Mode, SupervisorConfig};
 
 /// Merged Worksmith configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct Config {
     /// Default model as `provider/model` (or bare `model` if one provider).
@@ -61,7 +61,7 @@ impl WebProvider {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct WebConfig {
     /// `brave` | `tavily` | `searxng`. Unset = web search is unavailable.
@@ -79,7 +79,7 @@ pub struct ResolvedWeb {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct AgentsConfig {
     /// Max concurrently-running spawned workers.
@@ -113,7 +113,7 @@ pub struct AgentsConfig {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ProviderConfig {
     /// `openai-compat` (default) or `anthropic` (later).
@@ -159,7 +159,7 @@ fn default_provider_kind() -> String {
     "openai-compat".to_string()
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct AgentConfig {
     pub max_steps: Option<usize>,
@@ -190,14 +190,14 @@ pub struct AgentConfig {
 /// `thinking = "off"`, `thinking = "on"`, or `thinking = 2000`. TOML gives us
 /// either a string or an integer, so accept both rather than making the budget
 /// a quoted number.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ThinkingSetting {
     Budget(u32),
     Mode(String),
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct ToolsConfig {
     pub bash_timeout_secs: Option<u64>,
@@ -208,7 +208,7 @@ pub struct ToolsConfig {
 /// Sampling lives here rather than as a global default because the right
 /// numbers are the model's, not the harness's: Qwen asks for 0.6 with thinking
 /// on and 0.7 with it off, and those are Qwen's numbers, not universal ones.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct ModelSettings {
     /// USD per million input (prompt) tokens.
@@ -236,7 +236,7 @@ impl ModelSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct TuiConfig {
     /// Two characters that, typed in quick succession, leave the composer for
@@ -321,6 +321,18 @@ impl Config {
     }
 
     /// Field-level merge; `other` (higher priority) wins where set.
+    ///
+    /// **Every `Option` field must appear here.** A field added to the structs
+    /// and forgotten here parses, validates, and is then silently dropped — the
+    /// project sets it, the effective config does not have it, and nothing
+    /// complains. `deny_unknown_fields` cannot catch it, because the key is
+    /// valid; only the merge loses it.
+    ///
+    /// That is not hypothetical: `agent.pair` and `decisions-dir` were both
+    /// added and both missed, so `pair = true` in a project config did nothing
+    /// for two days and every pairing experiment in that time ran against a
+    /// feature that was switched off. `every_config_field_survives_the_merge`
+    /// exists so the next one fails a test instead of a dogfooding session.
     fn merge(&mut self, other: Config) {
         if other.model.is_some() {
             self.model = other.model;
@@ -358,6 +370,8 @@ impl Config {
         take(&mut self.agent.context_limit, other.agent.context_limit);
         take(&mut self.agent.keep_recent_turns, other.agent.keep_recent_turns);
         take(&mut self.agent.thinking, other.agent.thinking);
+        take(&mut self.agent.pair, other.agent.pair);
+        take(&mut self.decisions_dir, other.decisions_dir);
         take(&mut self.tools.bash_timeout_secs, other.tools.bash_timeout_secs);
         take(&mut self.web.provider, other.web.provider);
         take(&mut self.web.api_key_env, other.web.api_key_env);
@@ -741,4 +755,133 @@ pub fn load_project_instructions(start: &Path) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every key a project config sets must survive the merge.
+    ///
+    /// Generic on purpose. The obvious version of this test is a hand-written
+    /// list of accessors, which is the same list `merge` already has and fails
+    /// the same way: add a field, forget both, learn nothing. This one
+    /// serializes the project config and the merged result and compares them
+    /// key by key, so a field added to the structs is covered without anyone
+    /// remembering to cover it.
+    ///
+    /// It exists because `agent.pair` and `decisions-dir` were both added to
+    /// the structs and both missed in `merge`. They parsed, validated, and were
+    /// silently dropped: `pair = true` did nothing for two days, and every
+    /// pairing experiment in that window ran against a switched-off feature.
+    /// `deny_unknown_fields` cannot catch that — the key is valid; only the
+    /// merge loses it.
+    #[test]
+    fn every_config_field_survives_the_merge() {
+        // One value per key, all different from the defaults so a dropped field
+        // cannot pass by coincidence.
+        let project: Config = toml::from_str(
+            r#"
+            model = "p/m"
+            temperature = 0.11
+            max-tokens = 111
+            decisions-dir = "docs/decisions"
+
+            [providers.p]
+            base-url = "http://p/v1"
+            api-key-env = "P_KEY"
+            thinking-param = "reasoning"
+            reasoning-budget-param = "thinking_budget"
+            stream-idle-timeout = 111
+            sort = "latency"
+
+            [agent]
+            max-steps = 11
+            max-retries = 11
+            stuck-threshold = 11
+            validate = "check me"
+            context-limit = 11111
+            keep-recent-turns = 11
+            thinking = 111
+            pair = true
+
+            [agents]
+            max = 11
+            supervisor = "off"
+            stuck-timeout = 11
+            max-nudges = 11
+            repeat-threshold = 11
+            token-budget = 11111
+            request-timeout = 11
+            fanout = "off"
+            synthesize = false
+            validate = "worker check"
+            model = "p/worker"
+
+            [tools]
+            bash-timeout-secs = 11
+
+            [web]
+            provider = "tavily"
+            api-key-env = "W_KEY"
+            base-url = "http://w"
+
+            [tui]
+            insert-escape = "jj"
+            insert-escape-ms = 11
+
+            [models."p/m"]
+            input = 0.11
+            output = 0.11
+            temperature = 0.11
+            top-p = 0.11
+            top-k = 11
+            context = 11111
+            "#,
+        )
+        .expect("the fixture itself must parse");
+
+        let mut merged = Config::default();
+        merged.merge(project.clone());
+
+        let want: toml::Value = toml::Value::try_from(&project).unwrap();
+        let got: toml::Value = toml::Value::try_from(&merged).unwrap();
+        let mut lost = Vec::new();
+        walk(&want, &got, String::new(), &mut lost);
+        assert!(lost.is_empty(), "these keys did not survive `merge`: {lost:?}");
+    }
+
+    /// Compare `want` against `got`, collecting the paths of anything missing or
+    /// changed. Recurses so a table added later is covered too.
+    fn walk(want: &toml::Value, got: &toml::Value, path: String, lost: &mut Vec<String>) {
+        match want {
+            toml::Value::Table(t) => {
+                for (k, v) in t {
+                    let here = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    match got.get(k) {
+                        Some(g) => walk(v, g, here, lost),
+                        None => lost.push(here),
+                    }
+                }
+            }
+            other => {
+                if got != other {
+                    lost.push(format!("{path} (got {got}, wanted {other})"));
+                }
+            }
+        }
+    }
+
+    /// The one the generic test cannot express: the *direction* of the merge.
+    #[test]
+    fn the_project_wins_and_unset_keys_leave_the_global_alone() {
+        let mut global: Config =
+            toml::from_str("model = \"g/m\"\n[agent]\nmax-steps = 99\npair = false\n").unwrap();
+        let project: Config = toml::from_str("[agent]\npair = true\n").unwrap();
+        global.merge(project);
+
+        assert!(global.pair(), "the project's `pair` must win");
+        assert_eq!(global.max_steps(), 99, "a key the project omits keeps the global value");
+        assert_eq!(global.model.as_deref(), Some("g/m"));
+    }
 }
