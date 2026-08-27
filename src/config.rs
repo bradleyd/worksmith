@@ -259,6 +259,35 @@ pub struct ResolvedModel {
     pub missing_key_env: Option<String>,
 }
 
+impl ProviderConfig {
+    /// Field-level merge; `other` (the project's) wins where set.
+    ///
+    /// `base_url` and `kind` are not optional, so the project's block always
+    /// carries them and they always win. Everything else only wins when the
+    /// project actually said something — which is the whole point: naming a
+    /// provider to change its URL must not silently drop how it spells
+    /// "don't think".
+    fn merge(&mut self, other: ProviderConfig) {
+        self.kind = other.kind;
+        self.base_url = other.base_url;
+        if other.api_key_env.is_some() {
+            self.api_key_env = other.api_key_env;
+        }
+        if other.thinking_param.is_some() {
+            self.thinking_param = other.thinking_param;
+        }
+        if other.reasoning_budget_param.is_some() {
+            self.reasoning_budget_param = other.reasoning_budget_param;
+        }
+        if other.stream_idle_timeout.is_some() {
+            self.stream_idle_timeout = other.stream_idle_timeout;
+        }
+        if other.sort.is_some() {
+            self.sort = other.sort;
+        }
+    }
+}
+
 impl Config {
     /// Load `~/.worksmith/config.toml`, then overlay `<project>/.worksmith/config.toml`.
     pub fn load(project_dir: &Path) -> Result<Config> {
@@ -343,8 +372,20 @@ impl Config {
         if other.max_tokens.is_some() {
             self.max_tokens = other.max_tokens;
         }
+        // Field by field, like everything else — and like this file's own header
+        // promises. Whole-entry replacement meant a project block that named
+        // only `base-url` silently deleted the global's `thinking-param` and
+        // `reasoning-budget-param`, so the dialect fell back to a guess and the
+        // reasoning budget was dropped. The warning that surfaced said the
+        // provider "has no reasoning budget", which was true of the effective
+        // config and not of what anyone had written.
         for (k, v) in other.providers {
-            self.providers.insert(k, v);
+            match self.providers.get_mut(&k) {
+                Some(mine) => mine.merge(v),
+                None => {
+                    self.providers.insert(k, v);
+                }
+            }
         }
         // `take` keeps `other`'s value when set, otherwise leaves ours alone.
         fn take<T>(mine: &mut Option<T>, theirs: Option<T>) {
@@ -870,6 +911,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Naming a provider in a project config to change its URL must not delete
+    /// the rest of it.
+    ///
+    /// Observed: a project block with only type/base-url/api-key-env wiped the
+    /// global's `thinking-param` and `reasoning-budget-param`. The dialect then
+    /// fell back to a guess off the hostname, the reasoning budget was dropped,
+    /// and worksmith reported that the provider "has no reasoning budget" —
+    /// true of the effective config, and not of anything anyone had written.
+    #[test]
+    fn a_project_provider_block_does_not_delete_the_globals_fields() {
+        let mut global: Config = toml::from_str(
+            r#"
+            [providers.omlx]
+            base-url = "http://127.0.0.1:8000/v1"
+            api-key-env = "OMLX_API_KEY"
+            thinking-param = "chat-template"
+            reasoning-budget-param = "thinking_budget"
+            sort = "latency"
+            "#,
+        )
+        .unwrap();
+        let project: Config = toml::from_str(
+            r#"
+            [providers.omlx]
+            base-url = "http://127.0.0.1:8100/v1"
+            "#,
+        )
+        .unwrap();
+        global.merge(project);
+
+        let p = &global.providers["omlx"];
+        assert_eq!(p.base_url, "http://127.0.0.1:8100/v1", "the project's URL wins");
+        assert_eq!(
+            p.reasoning_budget_param.as_deref(),
+            Some("thinking_budget"),
+            "the budget field survives a block that did not mention it"
+        );
+        assert_eq!(p.thinking_param.as_deref(), Some("chat-template"));
+        assert_eq!(p.api_key_env.as_deref(), Some("OMLX_API_KEY"));
+        assert_eq!(p.sort.as_deref(), Some("latency"));
+    }
+
+    #[test]
+    fn a_project_provider_still_overrides_what_it_does_set() {
+        let mut global: Config = toml::from_str(
+            r#"
+            [providers.p]
+            base-url = "http://a/v1"
+            thinking-param = "chat-template"
+            "#,
+        )
+        .unwrap();
+        let project: Config = toml::from_str(
+            r#"
+            [providers.p]
+            base-url = "http://b/v1"
+            thinking-param = "reasoning"
+            "#,
+        )
+        .unwrap();
+        global.merge(project);
+        let p = &global.providers["p"];
+        assert_eq!(p.base_url, "http://b/v1");
+        assert_eq!(p.thinking_param.as_deref(), Some("reasoning"));
     }
 
     /// The one the generic test cannot express: the *direction* of the merge.

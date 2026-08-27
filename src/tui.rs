@@ -1705,7 +1705,7 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
-        KeyCode::Tab => complete(app, cwd, mem),
+        KeyCode::Tab => complete(app, cwd, mem, config),
         KeyCode::Char('o') if ctrl => {
             app.collapse_tools = !app.collapse_tools;
             // Changes how *every* item renders, not just the tail.
@@ -3002,7 +3002,7 @@ fn tool_summary(name: &str, arguments: &str) -> String {
 
 /// Tab-complete the current token: `/command` in command position, or `@path`
 /// file references anywhere. Repeated Tab cycles the candidates.
-fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore) {
+fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore, config: &Config) {
     if let Some(c) = &mut app.completion {
         if c.candidates.len() > 1 {
             c.idx = (c.idx + 1) % c.candidates.len();
@@ -3015,7 +3015,7 @@ fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore) {
         return;
     }
 
-    let Some((start, candidates)) = compute_completions(&app.input, cwd, mem) else {
+    let Some((start, candidates)) = compute_completions(&app.input, cwd, mem, config) else {
         return;
     };
     app.input.truncate(start);
@@ -3041,7 +3041,12 @@ fn completion_status(c: &Completion) -> String {
 
 /// Compute completion candidates for the current (last) token. Returns the byte
 /// offset where the token starts and the replacement strings.
-fn compute_completions(input: &str, cwd: &Path, mem: &MemoryStore) -> Option<(usize, Vec<String>)> {
+fn compute_completions(
+    input: &str,
+    cwd: &Path,
+    mem: &MemoryStore,
+    config: &Config,
+) -> Option<(usize, Vec<String>)> {
     let token_start = input.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
     let token = &input[token_start..];
 
@@ -3070,11 +3075,12 @@ fn compute_completions(input: &str, cwd: &Path, mem: &MemoryStore) -> Option<(us
         return None;
     }
     let prev = input[..token_start].split_whitespace().count();
-    let cands = arg_completions(first, prev, token, &tokens, cwd, mem)?;
+    let cands = arg_completions(first, prev, token, &tokens, cwd, mem, config)?;
     (!cands.is_empty()).then_some((token_start, cands))
 }
 
 /// Complete a subcommand or argument for a `/command`.
+#[allow(clippy::too_many_arguments)]
 fn arg_completions(
     first: &str,
     prev: usize,
@@ -3082,6 +3088,7 @@ fn arg_completions(
     tokens: &[&str],
     cwd: &Path,
     mem: &MemoryStore,
+    config: &Config,
 ) -> Option<Vec<String>> {
     let opts: &[&str] = match first.trim_start_matches('/') {
         "agents" | "workers" if prev == 1 => {
@@ -3096,6 +3103,22 @@ fn arg_completions(
             // Servers disagree about which levels exist: OpenRouter documents
             // minimal..max, and some vLLM builds accept only xhigh/medium/low.
             &["on", "off", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "2000"]
+        }
+        "model" if prev == 1 => {
+            // Config-driven, so it cannot go stale the way a hardcoded list
+            // would. `default` is offered alongside, since reverting is the
+            // other thing you do with this command.
+            let mut names: Vec<String> = config
+                .models
+                .keys()
+                .filter(|k| k.starts_with(token))
+                .cloned()
+                .collect();
+            if "default".starts_with(token) {
+                names.push("default".to_string());
+            }
+            names.sort();
+            return Some(names);
         }
         "mouse" if prev == 1 => &["on", "off"],
         "route" if prev == 1 => &["throughput", "latency", "price", "auto"],
@@ -4308,6 +4331,32 @@ mod tests {
     }
 
     #[test]
+    fn model_completes_from_the_configured_models() {
+        // Config-driven rather than a hardcoded list, so it cannot go stale the
+        // way the other arg tables can.
+        let cfg: Config = toml::from_str(
+            r#"
+            [models."openrouter/qwen/qwen3.8-27b"]
+            input = 0.2
+            [models."vllm/local-model"]
+            temperature = 0.6
+            "#,
+        )
+        .unwrap();
+
+        let (_, all) =
+            compute_completions("/model ", Path::new("."), &probe_store(), &cfg).unwrap();
+        assert!(all.contains(&"openrouter/qwen/qwen3.8-27b".to_string()), "{all:?}");
+        assert!(all.contains(&"vllm/local-model".to_string()), "{all:?}");
+        assert!(all.contains(&"default".to_string()), "reverting is offered too: {all:?}");
+
+        // And it filters on the prefix typed so far.
+        let (_, some) =
+            compute_completions("/model vllm/", Path::new("."), &probe_store(), &cfg).unwrap();
+        assert_eq!(some, vec!["vllm/local-model".to_string()]);
+    }
+
+    #[test]
     fn a_checkpoint_is_its_own_channel_not_a_notice() {
         let mut a = app();
         a.apply_event(Event::Checkpoint {
@@ -4948,37 +4997,37 @@ mod tests {
 
     #[test]
     fn completes_slash_commands() {
-        let (start, c) = compute_completions("/me", Path::new("."), &probe_store()).unwrap();
+        let (start, c) = compute_completions("/me", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(start, 0);
         assert_eq!(c, vec!["/memory ".to_string()]);
 
-        let (_, all) = compute_completions("/", Path::new("."), &probe_store()).unwrap();
+        let (_, all) = compute_completions("/", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert!(all.len() >= 5);
 
         // Not in command position → no command completion.
-        assert!(compute_completions("hi /me", Path::new("."), &probe_store()).is_none());
+        assert!(compute_completions("hi /me", Path::new("."), &probe_store(), &Config::default()).is_none());
     }
 
     #[test]
     fn completes_subcommands_and_args() {
         // /agents subcommands
-        let (_, c) = compute_completions("/agents ", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/agents ", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert!(c.contains(&"list ".to_string()) && c.contains(&"kill ".to_string()), "{c:?}");
-        let (_, c) = compute_completions("/agents k", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/agents k", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(c, vec!["kill ".to_string()]);
 
         // /memory subcommands, then add's scope + kind
-        let (_, c) = compute_completions("/memory ", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/memory ", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert!(c.contains(&"forget ".to_string()) && c.contains(&"add ".to_string()), "{c:?}");
-        let (_, c) = compute_completions("/memory add ", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/memory add ", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(c, vec!["global ".to_string(), "project ".to_string()]);
-        let (_, c) = compute_completions("/memory add project ", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/memory add project ", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert!(c.contains(&"decision ".to_string()) && c.contains(&"lesson ".to_string()), "{c:?}");
 
         // /help has one subcommand: footer.
-        let (_, c) = compute_completions("/help ", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/help ", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(c, vec!["footer ".to_string()]);
-        let (_, c) = compute_completions("/help f", Path::new("."), &probe_store()).unwrap();
+        let (_, c) = compute_completions("/help f", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(c, vec!["footer ".to_string()]);
     }
 
@@ -4989,13 +5038,13 @@ mod tests {
         std::fs::write(dir.path().join("main.rs"), "").unwrap();
         std::fs::write(dir.path().join("mod.rs"), "").unwrap();
 
-        let (start, c) = compute_completions("@m", dir.path(), &probe_store()).unwrap();
+        let (start, c) = compute_completions("@m", dir.path(), &probe_store(), &Config::default()).unwrap();
         assert_eq!(start, 0);
         assert!(c.contains(&"@main.rs".to_string()), "{c:?}");
         assert!(c.contains(&"@mod.rs".to_string()), "{c:?}");
 
         // Directories get a trailing slash.
-        let (_, d) = compute_completions("@s", dir.path(), &probe_store()).unwrap();
+        let (_, d) = compute_completions("@s", dir.path(), &probe_store(), &Config::default()).unwrap();
         assert!(d.contains(&"@src/".to_string()), "{d:?}");
     }
 
