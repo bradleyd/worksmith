@@ -1,5 +1,7 @@
 //! The session's model as a swappable set.
 
+mod common;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -87,4 +89,28 @@ fn a_fork_does_not_share_the_parents_model_cell() {
     assert_eq!(worker.current().model, "test/model", "a running worker keeps its model");
     assert_eq!(worker.current().context_limit, 32_000);
     assert_eq!(parent.current().model, "other/model");
+}
+
+/// The TUI swaps the model with `set_model` and then records the change with
+/// `note_model_change`. The transcript alone cannot say which model answered
+/// which part of the turn, so the switch must land in the session log as a
+/// `ModelChanged` with both sides intact — the same entry `/history` renders.
+#[test]
+fn note_model_change_records_a_model_changed_entry() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = worksmith::session::Session::create_at(&path, dir.path()).unwrap();
+
+    let agent = agent(ToolContext::default());
+    agent.note_model_change(&mut session, "big/model", "cheap/model");
+
+    let events = worksmith::session::events(&path).unwrap();
+    assert_eq!(events.len(), 1, "the switch is the only entry: {events:?}");
+    assert!(
+        matches!(&events[0].event, worksmith::event::Event::ModelChanged { from, to }
+            if from == "big/model" && to == "cheap/model"),
+        "the switch reads back with both sides intact: {:?}",
+        events[0].event
+    );
 }

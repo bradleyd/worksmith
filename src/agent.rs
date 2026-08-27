@@ -367,6 +367,19 @@ impl Agent {
         self.active.lock().unwrap().clone()
     }
 
+    /// Record that the session's model changed mid-run. The TUI swaps the model
+    /// with `set_model` and then calls this so the change lands in the session
+    /// log and the event bus like any other structural event — the transcript
+    /// alone cannot say which model answered which part of the turn. A narrow
+    /// method rather than exposing `emit` (which is private, and takes a
+    /// `&mut Session` the TUI only holds behind an `AsyncMutex`).
+    pub fn note_model_change(&self, session: &mut Session, from: &str, to: &str) {
+        self.emit(
+            session,
+            Event::ModelChanged { from: from.to_string(), to: to.to_string() },
+        );
+    }
+
     /// Turn pairing checkpoints on or off for subsequent requests (`/pair`).
     pub fn set_pairing(&self, on: bool) {
         self.pairing.store(on, Ordering::Relaxed);

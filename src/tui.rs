@@ -28,7 +28,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, TurnResult};
+use crate::agent::{ActiveModel, Agent, TurnResult};
 use crate::event::{Event, EventBus};
 use crate::llm::Thinking;
 use crate::memory::{IdMatch, MemoryStore, Scope, short_id};
@@ -140,6 +140,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/fast", "answer without thinking first"),
     ("/think", "how hard to think: a level or a token budget"),
     ("/route", "which provider serves you (OpenRouter)"),
+    ("/model", "switch model for this session (or list the configured ones)"),
     ("/pair", "stop at decisions so you learn the code being written"),
     ("/mouse", "wheel scrolls the transcript (off: the terminal keeps the wheel)"),
     ("/trust", "is this project's own config in effect?"),
@@ -1894,6 +1895,7 @@ MODEL
   /fast [on|off|auto]                 answer without thinking first
   /think [on|off|auto|low|high|<n>]   how hard to think: a level or a token budget
   /route [throughput|latency|price]   which provider serves you (OpenRouter)
+  /model [provider/model|default]     switch model for this session (or list)
   /pair [on|off]                      stop at decisions: ask you, tell you why,
                                       or hand you the hard part. Main loop only —
                                       spawned workers never interrupt you.
@@ -2235,6 +2237,48 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 ),
             }
         }
+        "model" => {
+            // A session-scoped switch: it retargets the running agent and the
+            // footer's model/window/prices, but never writes config.toml. The
+            // model is swapped as a *set* (client + window + sampling), so a
+            // new model never runs on the previous one's numbers — the same
+            // half-swap `ModelOverride::resolve` guards against at startup.
+            //
+            // The switch records into the session, so it takes the lock; a turn
+            // holds that lock for its whole life, and awaiting it here would
+            // freeze the loop (the same trap /new and /history hit).
+            if app.running {
+                app.status = "can't switch model while a turn is running".into();
+                return Ok(true);
+            }
+            match parts.next() {
+                None => {
+                    let lines = model_list(&app.model, &config.models);
+                    if lines.is_empty() {
+                        app.push(
+                            Kind::Notice,
+                            "no [models.\"] entries configured — /model <provider/model> \
+                             switches to one that is"
+                                .to_string(),
+                        );
+                    } else {
+                        app.push(Kind::Notice, lines.join("\n"));
+                    }
+                }
+                Some("default") => {
+                    // Revert to the configured default, whatever it is.
+                    let Some(spec) = config.model.clone() else {
+                        app.push(
+                            Kind::Error,
+                            "no default model configured — set `model` in config.toml".to_string(),
+                        );
+                        return Ok(true);
+                    };
+                    switch_model(app, agent, session, config, &spec).await;
+                }
+                Some(spec) => switch_model(app, agent, session, config, spec).await,
+            }
+        }
         "mouse" => {
             let want = match parts.next() {
                 Some("on") => true,
@@ -2294,6 +2338,82 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         }
     }
     Ok(true)
+}
+
+/// The lines for a bare `/model`: the configured `provider/model` entries,
+/// sorted, with the one serving the session marked `*`.
+///
+/// `App.model` holds the bare model name (the part after the "/") — the
+/// footer shows `resolved.model`, not the key — so an entry is marked when
+/// its model part matches. If two providers shared a bare name both would be
+/// marked: a degenerate config, and marking both is more honest than
+/// guessing. Empty when nothing is configured; the caller then reports that.
+fn model_list(current: &str, models: &std::collections::HashMap<String, crate::config::ModelSettings>) -> Vec<String> {
+    let mut specs: Vec<&String> = models.keys().collect();
+    specs.sort();
+    specs
+        .iter()
+        .map(|spec| {
+            let is_current = spec.split_once('/').map(|(_, m)| m) == Some(current);
+            let mark = if is_current { "*" } else { " " };
+            format!("{mark} {spec}")
+        })
+        .collect()
+}
+
+/// Switch the session's model to `spec` (`provider/model`, or a bare model
+/// when one provider is configured). Session-scoped: it retargets the running
+/// agent and the footer's model/window/prices, but never writes config.toml.
+///
+/// The model is swapped as a *set* (client + window + sampling) via
+/// `ActiveModel::from`, so a new model never runs on the previous one's
+/// numbers — the same half-swap `ModelOverride::resolve` guards against at
+/// startup. `last_prompt_tokens` is zeroed with the model, both on the agent
+/// (which `set_model` does) and on the footer's copy here: a 200k-model count
+/// carried into a 32k model saturates the gauge and makes compaction fire
+/// every step.
+///
+/// A resolve failure leaves the model unchanged and reports the error. A
+/// missing API key is a warning, not a failure: `client_for` builds the client
+/// anyway and the request simply goes out unauthenticated, exactly as at
+/// startup.
+async fn switch_model(
+    app: &mut App,
+    agent: &Arc<Agent>,
+    session: &Arc<AsyncMutex<Session>>,
+    config: &Config,
+    spec: &str,
+) {
+    let over = match ModelOverride::resolve(config, spec) {
+        Ok(o) => o,
+        Err(e) => {
+            app.push(Kind::Error, format!("model: {e:#}"));
+            return;
+        }
+    };
+    let from = agent.current().model;
+    let to = over.model.clone();
+    let context_limit = over.context_limit;
+    let prices = over.settings.clone();
+    let missing = over.missing_key_env.clone();
+    agent.set_model(ActiveModel::from(over));
+    // The footer's copy of the model's numbers: `set_model` retargets the
+    // agent, but the footer reads from `app`, so both must move together.
+    app.model = to.clone();
+    app.context_limit = context_limit;
+    app.prices = prices;
+    app.last_prompt_tokens = 0;
+    // Record the change in the session log and bus. The run loop drains the
+    // bus right after a command, so `apply_event` renders the
+    // "model changed: from → to" notice — this must not push its own.
+    let mut s = session.lock().await;
+    agent.note_model_change(&mut s, &from, &to);
+    if let Some(var) = missing {
+        app.push(
+            Kind::Notice,
+            format!("⚠ ${var} is not set, so requests to this model go out with no API key"),
+        );
+    }
 }
 
 /// Resolve a user-typed id, which is normally an 8-character prefix. Reports
@@ -3800,6 +3920,50 @@ mod tests {
     }
 
     #[test]
+    fn model_list_marks_the_entry_serving_the_session() {
+        use std::collections::HashMap;
+        let mut models = HashMap::new();
+        models.insert("big/27b".to_string(), crate::config::ModelSettings::default());
+        models.insert("cheap/7b".to_string(), crate::config::ModelSettings::default());
+
+        // `App.model` is the bare name, so "big/27b" is marked, not "cheap/7b".
+        // An unmarked line is the mark's space plus the separator's space.
+        let lines = model_list("27b", &models);
+        assert_eq!(lines, vec!["* big/27b".to_string(), "  cheap/7b".to_string()]);
+    }
+
+    #[test]
+    fn model_list_marks_both_when_two_share_a_bare_name() {
+        // Degenerate config: two providers, same bare model name. Marking both
+        // is more honest than guessing which one the session is on.
+        use std::collections::HashMap;
+        let mut models = HashMap::new();
+        models.insert("a/27b".to_string(), crate::config::ModelSettings::default());
+        models.insert("b/27b".to_string(), crate::config::ModelSettings::default());
+
+        let lines = model_list("27b", &models);
+        assert_eq!(lines, vec!["* a/27b".to_string(), "* b/27b".to_string()]);
+    }
+
+    #[test]
+    fn model_list_is_empty_when_nothing_is_configured() {
+        use std::collections::HashMap;
+        let models = HashMap::new();
+        assert!(model_list("27b", &models).is_empty());
+    }
+
+    #[test]
+    fn model_list_sorts_the_keys() {
+        use std::collections::HashMap;
+        let mut models = HashMap::new();
+        models.insert("zeta/7b".to_string(), crate::config::ModelSettings::default());
+        models.insert("alpha/27b".to_string(), crate::config::ModelSettings::default());
+
+        let lines = model_list("27b", &models);
+        assert_eq!(lines, vec!["* alpha/27b".to_string(), "  zeta/7b".to_string()]);
+    }
+
+    #[test]
     fn streaming_deltas_coalesce_per_channel() {
         let mut a = app();
         a.apply_event(Event::UserMessage { text: "hi".into() });
@@ -4639,8 +4803,8 @@ mod tests {
         let mut a = app();
         a.set_input("/m".into());
         a.refresh_hint();
-        a.hint.as_mut().unwrap().move_by(1); // highlight /mouse
-        assert_eq!(a.hint.as_ref().unwrap().chosen().as_deref(), Some("/mouse"));
+        a.hint.as_mut().unwrap().move_by(1); // highlight /model
+        assert_eq!(a.hint.as_ref().unwrap().chosen().as_deref(), Some("/model"));
 
         // One more character narrows the list; the selection must stay valid
         // rather than pointing past the end or silently resetting.
