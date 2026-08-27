@@ -7,6 +7,12 @@ list that otherwise lives only in someone's head or a chat log.
 Each entry says what is wrong and how it was found, because "how it was found"
 is usually the fastest route back in.
 
+**Closed since this list was written:** `agent.pair` / `decisions-dir` /
+provider tables / model tables all merged field-by-field (four separate keys
+that parsed, validated, and were then silently dropped); `worksmith config
+check` built, which found the fourth itself on its first run; `/model` steps 3
+and 4a; compaction no longer trades the whole context for a sentence.
+
 ## Bugs
 
 - **`/pair` bare toggles instead of reporting.** Every other state command
@@ -51,6 +57,13 @@ is usually the fastest route back in.
   for the TUI, where re-streaming would double the visible text; much weaker for
   a worker nobody is watching.
 
+- **`config check` exits non-zero for unexported keys of providers you do not
+  use.** Correct by the letter, but it means the check is red on a healthy
+  machine, which is how checks come to be ignored. An unexported key for the
+  *session's* provider is a problem; for an idle one it is a note. Its result
+  also varies by shell, since it reads the live environment — true and
+  occasionally confusing.
+
 ## Gaps in what shipped
 
 - **A blocking checkpoint has no timeout.** It waits on `pending_ask`
@@ -66,6 +79,14 @@ is usually the fastest route back in.
   each compaction summarizes the previous notes plus new messages, so knowledge
   carries forward — but nothing forces it to *absorb* new findings rather than
   re-emit the old ones.
+
+- **Thinking cannot be both capped and steered.** `Thinking` is an enum, so
+  `Budget(n)` and `Effort(level)` are exclusive: a budget sends
+  `thinking_token_budget` (a hard server-side cap) and an effort sends
+  `reasoning_effort` (a hint the model may ignore). "Think hard, but never more
+  than 2k" is inexpressible, though vLLM would accept both fields. Measured: a
+  2000 budget lands between 2,175 and 2,356 in practice — the stop is a
+  boundary, not a line.
 
 - **A fan-out runs its `--until` in every worker at once, in one directory.**
   `zola check` is safe, `zola build` deletes its output directory first, and
@@ -105,6 +126,22 @@ is usually the fastest route back in.
 - **Docs Phase 0.5** (`DOCS_PLAN.md` §7) — `config schema --json`,
   `tools list --json`, worker lifecycle events on the parent bus, session id
   printed on exit, shell completions.
+
+## Worth knowing, not broken
+
+- **Bigger context is right locally and wrong on a billed API.** On the A40 with
+  KV headroom, tokens are free and a larger window means fewer compactions, each
+  of which otherwise costs a full re-prefill (visible in vLLM's log as prompt
+  throughput spiking after every rewrite). On OpenRouter the whole prompt is
+  billed on every step, so a larger window costs money and compaction *saves* it.
+  Same mechanism, opposite conclusion. `[models."…"].context` should be a
+  deliberate number per model, not an inherited default.
+
+- **The wall clock is the card, not the harness.** The A40 generates ~31 tok/s
+  on this model at 100% utilization and 299 of 300W. A turn producing 52k output
+  tokens takes half an hour and no prompt will change that. Everything here
+  reduces *wasted* tokens; only MTP / speculative decoding attacks the rate
+  itself.
 
 ## Ideas, not commitments
 
