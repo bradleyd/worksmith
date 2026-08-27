@@ -129,6 +129,29 @@ enum Cmd {
         /// The task to delegate.
         task: String,
     },
+
+    /// Report on the running config: which files loaded, the effective value
+    /// of every setting and where it came from, and what is wrong with it.
+    /// No model call; the only network is the optional `--probe`.
+    Config {
+        #[command(subcommand)]
+        sub: ConfigSub,
+    },
+}
+
+/// The `config` subcommand. `check` reports on the running config; `schema`
+/// (planned, DOCS_PLAN.md §0) will describe the static one.
+#[derive(Subcommand, Debug)]
+enum ConfigSub {
+    /// What the effective config is, where every key came from, and what is
+    /// wrong with it. Exits non-zero if any flag fires, so it is CI-usable.
+    Check {
+        /// Ask the configured provider for its `max_model_len` and compare it
+        /// to `context`. The one network call this subcommand makes; off by
+        /// default so an unattended run is not blocked on a slow server.
+        #[arg(long)]
+        probe: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,6 +174,20 @@ async fn main() -> Result<()> {
 
 async fn run(args: Args) -> Result<()> {
     let cwd = std::env::current_dir().context("getting current directory")?;
+
+    // `config check` is a report on the running config, not a run: no model
+    // resolution, no HTTP client, no session. It must not inherit the
+    // interactive trust prompt either — a `config check` in CI that stops to
+    // ask "trust this project's config?" would hang. It reports the config as
+    // `Config::load` reads it, and the file line says whether the project one
+    // is applied.
+    if let Some(Cmd::Config {
+        sub: ConfigSub::Check { probe },
+    }) = &args.cmd
+    {
+        return run_config_check(&cwd, *probe, args.mode.as_deref() == Some("json")).await;
+    }
+
     let config = resolve_project_trust(Config::load(&cwd)?, &cwd, &args)?;
     let resolved = config.resolve_model(args.model.as_deref())?;
 
@@ -1433,6 +1470,21 @@ fn resolve_thinking(
             )
         })?;
     Ok(Some(Thinking::Budget(budget)))
+}
+
+/// `worksmith config check`: report on the running config and exit non-zero if
+/// any flag fires. Runs before the agent machinery, so it needs no model and
+/// makes no network call except the opt-in `--probe`.
+async fn run_config_check(cwd: &Path, probe: bool, json: bool) -> Result<()> {
+    use worksmith::check::{Check, render, render_json};
+    let check = Check::run(cwd, probe).await?;
+    // `--mode json` is the global flag; a script can parse the same report.
+    let out = if json { render_json(&check) } else { render(&check) };
+    print!("{out}");
+    if !check.flags.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Ask about a project's own config the first time worksmith sees it.

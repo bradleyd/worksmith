@@ -234,6 +234,30 @@ impl ModelSettings {
         let (i, o) = (self.input?, self.output?);
         Some((prompt_tokens as f64 * i + completion_tokens as f64 * o) / 1_000_000.0)
     }
+
+    /// Field-level merge; `other` (the project's) wins where set. Every field
+    /// is optional, so a project block that names only `input` must not reset
+    /// the global's `temperature`/`top-p`/`top-k` for the same model.
+    fn merge(&mut self, other: ModelSettings) {
+        if other.input.is_some() {
+            self.input = other.input;
+        }
+        if other.output.is_some() {
+            self.output = other.output;
+        }
+        if other.temperature.is_some() {
+            self.temperature = other.temperature;
+        }
+        if other.top_p.is_some() {
+            self.top_p = other.top_p;
+        }
+        if other.top_k.is_some() {
+            self.top_k = other.top_k;
+        }
+        if other.context.is_some() {
+            self.context = other.context;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -418,7 +442,17 @@ impl Config {
         take(&mut self.web.api_key_env, other.web.api_key_env);
         take(&mut self.web.base_url, other.web.base_url);
         for (k, v) in other.models {
-            self.models.insert(k, v);
+            // Field by field, like `providers` above: a project block that names
+            // only `input` must not delete the global's `temperature`, `top-p`,
+            // and `top-k` for the same model. Whole-entry replacement meant a
+            // project that tuned one sampling number silently reset the rest to
+            // the model's defaults.
+            match self.models.get_mut(&k) {
+                Some(mine) => mine.merge(v),
+                None => {
+                    self.models.insert(k, v);
+                }
+            }
         }
         take(&mut self.tui.insert_escape, other.tui.insert_escape);
         take(&mut self.tui.insert_escape_ms, other.tui.insert_escape_ms);
@@ -644,6 +678,22 @@ impl Config {
         let settings = self.models.get(&format!("{provider_name}/{model}")).cloned().unwrap_or_default();
         Ok(ResolvedModel { provider, model, api_key, missing_key_env, settings })
     }
+}
+
+/// The raw TOML of a config file, as a `toml::Value`. `read_toml` returns a
+/// deserialized `Config`, which has already filled in defaults and so cannot
+/// tell "the file set this key" from "it is the default" — the source table
+/// in `check.rs` needs the raw value for exactly that distinction.
+pub fn read_toml_value(path: &Path) -> Result<toml::Value> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    // `from_str`, not `text.parse()`: the latter parses a single TOML *value*,
+    // so a config file (a *document* of top-level keys) fails to parse. `Value`
+    // deserializes a whole document into a table.
+    let value: toml::Value = toml::from_str(&text).with_context(|| {
+        format!("parsing config {} (is it valid TOML?)", path.display())
+    })?;
+    Ok(value)
 }
 
 fn read_toml(path: &Path) -> Result<Config> {
@@ -990,5 +1040,59 @@ mod tests {
         assert!(global.pair(), "the project's `pair` must win");
         assert_eq!(global.max_steps(), 99, "a key the project omits keeps the global value");
         assert_eq!(global.model.as_deref(), Some("g/m"));
+    }
+
+    /// Naming a model in a project config to set its price must not delete the
+    /// rest of it. The `models` map was the one left on whole-entry replacement
+    /// after the `providers` merge went field by field: a project block that set
+    /// only `input`/`output` silently reset the global's `temperature`, `top-p`,
+    /// and `top-k` for the same model back to the model's defaults.
+    #[test]
+    fn a_project_model_block_does_not_delete_the_globals_fields() {
+        let mut global: Config = toml::from_str(
+            r#"
+            [models."p/m"]
+            input = 0.5
+            output = 1.5
+            temperature = 0.6
+            top-p = 0.95
+            top-k = 20
+            context = 32000
+            "#,
+        )
+        .unwrap();
+        let project: Config = toml::from_str(
+            r#"
+            [models."p/m"]
+            input = 0.3
+            output = 1.2
+            "#,
+        )
+        .unwrap();
+        global.merge(project);
+
+        let m = &global.models["p/m"];
+        assert_eq!(m.input, Some(0.3), "the project's price wins");
+        assert_eq!(m.output, Some(1.2), "the project's price wins");
+        assert_eq!(m.temperature, Some(0.6), "a field the block omits keeps the global value");
+        assert_eq!(m.top_p, Some(0.95));
+        assert_eq!(m.top_k, Some(20));
+        assert_eq!(m.context, Some(32000));
+    }
+
+    /// A model block only in the project (no global entry) must still apply in
+    /// full, not be dropped by the merge.
+    #[test]
+    fn a_project_only_model_block_applies() {
+        let mut global: Config = Config::default();
+        let project: Config =
+            toml::from_str("[models.\"p/m\"]\ninput = 0.3\noutput = 1.2\ntemperature = 0.6\n")
+                .unwrap();
+        global.merge(project);
+
+        let m = &global.models["p/m"];
+        assert_eq!(m.input, Some(0.3));
+        assert_eq!(m.output, Some(1.2));
+        assert_eq!(m.temperature, Some(0.6));
     }
 }

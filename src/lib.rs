@@ -4,6 +4,7 @@
 //! SDK or spawned workers) can drive the same agent loop. See `PLAN.md`.
 
 pub mod agent;
+pub mod check;
 pub mod config;
 pub mod event;
 pub mod fanout;
