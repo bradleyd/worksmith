@@ -56,6 +56,13 @@ brew install bradleyd/worksmith/worksmith
 the [releases](https://github.com/bradleyd/worksmith/releases), untar it, and
 put `worksmith` on your PATH.
 
+The formula lives in a separate tap repo,
+[bradleyd/homebrew-worksmith](https://github.com/bradleyd/homebrew-worksmith)
+(`brew tap bradleyd/worksmith` resolves to it). It is a macOS-only formula;
+Linux users take the release tarball. To cut a release: tag `v<version>` in
+this repo (the `release` workflow builds and uploads the artifacts), then bump
+the tap's `url`/`sha256` and push.
+
 Pick one location and stick to it. `install.sh` writes to `~/.local/bin` and
 `cargo install --path .` writes to `~/.cargo/bin`; if both exist, whichever comes
 first on your PATH wins, and you can spend a while debugging a bug you already
