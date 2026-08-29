@@ -278,11 +278,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("backlogs", nargs="+", type=Path)
     ap.add_argument("--model")
-    ap.add_argument("--timeout", type=int, default=600,
-                    help="per task, seconds. 240 was too short for a 9B on a "
-                         "coarse task: it was killed mid-stream with no usage "
-                         "event at all, which scores as a failure of the model "
-                         "rather than of the clock.")
+    # Must stay above worksmith's own stream-idle timeout
+    # (llm::DEFAULT_STREAM_IDLE_SECS, 600s), or this harness kills the process
+    # at the same moment worksmith is about to report the stall itself — and a
+    # provider that accepted the request and went quiet then scores as
+    # `outcome=None gen_tok=0`, which reads as the model failing. Two 9B tasks
+    # died that way at exactly 600.0s with both timeouts set to 600.
+    ap.add_argument("--timeout", type=int, default=900,
+                    help="per task, seconds. Keep it above worksmith's "
+                         "stream-idle timeout (600s) so a stalled provider is "
+                         "reported by worksmith rather than killed here.")
     ap.add_argument("--keep-going", action="store_true",
                     help="on failure, splice in the reference solution and carry "
                          "on, so every task is attempted. Gives a per-task pass "

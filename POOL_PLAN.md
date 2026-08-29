@@ -233,10 +233,21 @@ answers is a skip") — otherwise every eval run blocks forever on an empty room
 
 Stated up front so the answer is not negotiated after the fact.
 
+**Sweep 1 (2026-08-29) fired none of these.** Coarse < medium < fine on every
+model that can fail, and cost per solved task fell 2.5x as tasks shrank. Results
+and caveats in `evals/pool/RESULTS.md`; the branch lives.
+
 - **Fine does not beat coarse on end-to-end pass, at the 14B.** The bet is
-  wrong; delete the branch.
-- **Confidently-wrong does not fall as tasks shrink.** Any end-to-end gain came
-  from retries, which `--until` already buys without a pool.
+  wrong; delete the branch. *(Sweep 1: did not fire — 0/3 coarse, 7/22 fine.)*
+- ~~**Confidently-wrong does not fall as tasks shrink.**~~ **Retired after sweep
+  1.** It read 0 on every arm of every model, so it cannot discriminate between
+  them. The bet was that small tasks plus a per-task check would convert
+  "declared done, was wrong" into caught-and-retried; on these models failure
+  never wore that shape — every weak-model failure was thrashing, caught by the
+  supervisor's repeat detector rather than by a check catching a false claim.
+  The gain is real and arrives by another route: **containment**, a failure
+  costing one small task instead of the whole job. Still measured, no longer
+  decisive.
 - **Cost per solved task blows up.** The eval's bar is +3% on the 9B. A pool
   that needs 5× to win is a benchmark result, not a feature. This is about
   *tokens*, not time — see below.
