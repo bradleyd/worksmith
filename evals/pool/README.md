@@ -59,8 +59,14 @@ are for.
 
 ## Known cost of fine granularity, recorded before the runs
 
-`fine.toml` is mostly a chain — twenty-two tasks that repeatedly extend the same
-four files, so `needs` serialises nearly all of them. Pool concurrency buys
-little there and wall clock will likely be *worse* than coarse. That is expected
-and is not a failure: the bet is on per-task accuracy, and the price is being
-written down in advance so it cannot later be reported as a surprise.
+`fine.toml` is not mostly a chain, it is entirely one: twenty-two tasks, twenty-
+two deep, never more than one runnable at a time, because each extends the file
+the last one wrote. Pool concurrency does nothing for it and its wall clock will
+be worse than coarse.
+
+Accepted, not apologised for. The target user runs a local model on a Mac and is
+already slow, so seconds are not the scarce resource. Work, then correct, then
+fast.
+
+Tokens are a different currency and are still scarce: cost per *solved* task can
+kill this experiment (`POOL_PLAN.md` §8), wall clock cannot.

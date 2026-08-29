@@ -111,11 +111,21 @@ implementation, and refuses a cycle or a dangling `needs`. An answer key nobody
 graded is how a day gets spent discovering the model was right and the check was
 wrong. All three pass.
 
-**A cost recorded in advance:** `fine.toml` is mostly a chain — twenty-two tasks
-repeatedly extending the same four files — so `needs` serialises nearly all of
-it and wall clock will probably be *worse* than coarse. The bet is on per-task
-accuracy, not throughput. Writing that down now means it cannot later be
-reported as a surprise.
+**Recorded in advance, and accepted:** `fine.toml` is not mostly a chain, it is
+*entirely* one — twenty-two tasks, twenty-two deep, never more than one runnable
+at a time, because each extends the file the last one wrote. Its wall clock will
+be worse than coarse, and pool concurrency does nothing for it at all.
+
+That is a trade this project takes without argument. The user is running a local
+model on a Mac; they are already slow, so seconds are not the scarce resource
+and a design that spends them on correctness costs them nothing they had. Work,
+then correct, then fast — and phase one is not the place to spend effort on
+phase three.
+
+**Seconds and tokens are not the same currency, though.** "Slower is fine" does
+not license "more expensive is fine": generation cost still buys nothing back,
+and cost per solved task stays a kill criterion in §8 while wall clock is
+explicitly not one. Both get recorded; only one can end the branch.
 
 Per run, recorded:
 
@@ -228,9 +238,15 @@ Stated up front so the answer is not negotiated after the fact.
 - **Confidently-wrong does not fall as tasks shrink.** Any end-to-end gain came
   from retries, which `--until` already buys without a pool.
 - **Cost per solved task blows up.** The eval's bar is +3% on the 9B. A pool
-  that needs 5× to win is a benchmark result, not a feature.
+  that needs 5× to win is a benchmark result, not a feature. This is about
+  *tokens*, not time — see below.
 - **Fine wins but only on hand-written backlogs no planner could produce.** Not
   a kill on its own — it moves the whole problem to Phase 2 and says so.
+
+**Explicitly not a kill: wall clock.** However much slower fine-grained turns
+out to be, that number is reported and the branch lives. It is the one cost this
+project is happy to pay, and a kill list that quietly included it would be
+optimising the third thing before the first two are settled.
 
 ## 9. Work
 
