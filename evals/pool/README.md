@@ -44,6 +44,44 @@ granularities apart would not be grading the same thing three times. It also
 writes CSVs of its own (no header, `$5` with no decimal part, an empty file) so
 it is not only checking the fixture the model was handed.
 
+## Running a backlog
+
+```
+python3 evals/pool/run_pool.py evals/pool/expenses/coarse.toml
+python3 evals/pool/run_pool.py evals/pool/expenses/*.toml --json sweep.json
+```
+
+**Phase 1 needs no Rust.** A disposable worker is just another `worksmith`
+process — separate invocation, fresh context, its own `--until` — so the
+readiness gate, per-task acceptance and blocked dependents all live in
+`run_pool.py`, and the number that decides the experiment can be had before
+`worker.rs` is touched. Dependency gating in the Rust manager is what makes the
+pool a *feature* inside worksmith; it is not what makes it measurable, and doing
+it first would have been building the product to run the experiment that says
+whether to build the product.
+
+Dispatch is sequential. Two ready tasks share one directory and a backlog does
+not declare which file a task writes — in `medium.toml`, `parse-amount` and
+`format-cents` are both roots and both write `money.py`, so running them at once
+clobbers one and scores it as a model failure. Concurrency needs a `writes` key
+first, and it would buy only wall clock, which this project spends freely.
+
+## test_dispatch.py
+
+```
+python3 evals/pool/test_dispatch.py
+```
+
+Drives the dispatcher with stub agents instead of a model: one that writes the
+reference solution, one that writes nothing and reports `done`, one that starts
+working too late. Between them they check that tasks run in dependency order,
+that output is attributed to the task that produced it, that a failure blocks
+its dependents rather than running them on a broken dependency, and that
+"declared success, check disagrees" is counted.
+
+The dispatcher is as much under test as the model is, and none of that needs a
+model run to answer.
+
 ## verify.py
 
 ```
