@@ -1,0 +1,316 @@
+name = "expenses-fine"
+granularity = "fine"
+description = "Twenty-two tasks — one behaviour each, extended in place"
+spec = "SPEC.md"
+validate = "python3 check.py"
+files = ["expenses.csv", "check.py", "SPEC.md"]
+
+# Sections 1-8 build money.py one behaviour at a time. Each task edits the same
+# file as the one before it, so these are a chain, not a fan-out. That is the
+# honest cost of fine granularity and the sweep should show it in wall clock.
+
+[[task]]
+id = "fc-whole"
+prompt = "Create money.py with format_cents(n: int) -> str. Only whole-dollar positive amounts under $1000 need work yet: format_cents(1250) == '$12.50', format_cents(500) == '$5.00'. See SPEC.md section 1."
+validate = '''
+python3 - <<'PY'
+from money import format_cents
+assert format_cents(1250) == "$12.50"
+assert format_cents(500) == "$5.00"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "fc-commas"
+needs = ["fc-whole"]
+prompt = "Extend format_cents in money.py to insert thousands separators: format_cents(123456) == '$1,234.56'. Do not break what already works."
+validate = '''
+python3 - <<'PY'
+from money import format_cents
+assert format_cents(123456) == "$1,234.56"
+assert format_cents(100000000) == "$1,000,000.00"
+assert format_cents(1250) == "$12.50"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "fc-signs"
+needs = ["fc-commas"]
+prompt = "Extend format_cents in money.py for zero and negatives. The minus sign goes before the dollar sign: format_cents(-475) == '-$4.75', format_cents(0) == '$0.00'."
+validate = '''
+python3 - <<'PY'
+from money import format_cents
+assert format_cents(-475) == "-$4.75"
+assert format_cents(0) == "$0.00"
+assert format_cents(-123456) == "-$1,234.56"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pa-plain"
+needs = ["fc-signs"]
+prompt = "Add parse_amount(s: str) -> int to money.py. Plain amounts only for now: parse_amount('$12.50') == 1250. Surrounding whitespace is stripped. See SPEC.md section 1."
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+assert parse_amount("$12.50") == 1250
+assert parse_amount("  $0.99 ") == 99
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pa-commas"
+needs = ["pa-plain"]
+prompt = "Extend parse_amount in money.py to accept thousands separators: parse_amount('$1,234.56') == 123456."
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+assert parse_amount("$1,234.56") == 123456
+assert parse_amount("$12.50") == 1250
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pa-nodecimals"
+needs = ["pa-commas"]
+prompt = "Extend parse_amount in money.py to accept an amount with no decimal part: parse_amount('$5') == 500."
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+assert parse_amount("$5") == 500
+assert parse_amount("$1,000") == 100000
+assert parse_amount("$12.50") == 1250
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pa-negative"
+needs = ["pa-nodecimals"]
+prompt = "Extend parse_amount in money.py for negatives. The minus comes before the dollar sign: parse_amount('-$4.75') == -475."
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+assert parse_amount("-$4.75") == -475
+assert parse_amount("-$1,000") == -100000
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pa-reject"
+needs = ["pa-negative"]
+prompt = "Make parse_amount in money.py raise ValueError on anything the spec does not allow: '$-5.00' (minus in the wrong place), '12.5' (no dollar sign, one decimal place), '$1.234' (three decimal places), '$1,23.45' (bad grouping), and ''. See SPEC.md section 1."
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+for bad in ("$-5.00", "12.5", "$1.234", "$1,23.45", "", "abc"):
+    try:
+        parse_amount(bad); raise AssertionError(bad)
+    except ValueError:
+        pass
+assert parse_amount("$5") == 500 and parse_amount("-$4.75") == -475
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pl-fields"
+needs = ["pa-reject"]
+prompt = "Create records.py with parse_line(line) -> dict returning date, category, description and amount as strings for now. Use the csv module, not str.split: a description may be quoted and contain commas. See SPEC.md section 2."
+validate = '''
+python3 - <<'PY'
+from records import parse_line
+r = parse_line('2026-01-03,Groceries,"Milk, eggs",$12.50')
+assert r["description"] == "Milk, eggs", r
+assert r["date"] == "2026-01-03"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pl-category"
+needs = ["pl-fields"]
+prompt = "In records.py, make parse_line strip and lowercase the category, so ' GROCERIES ' and 'Groceries' are the same category."
+validate = '''
+python3 - <<'PY'
+from records import parse_line
+assert parse_line("d, GROCERIES ,x,$1.00")["category"] == "groceries"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pl-amount"
+needs = ["pl-category"]
+prompt = "In records.py, make parse_line convert the amount field to integer cents with money.parse_amount."
+validate = '''
+python3 - <<'PY'
+from records import parse_line
+assert parse_line("d,c,x,-$4.75")["amount"] == -475
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pl-reject"
+needs = ["pl-amount"]
+prompt = "In records.py, make parse_line raise ValueError when a row does not have exactly four fields."
+validate = '''
+python3 - <<'PY'
+from records import parse_line
+for bad in ("a,b,c", "a,b,c,$1.00,e"):
+    try:
+        parse_line(bad); raise AssertionError(bad)
+    except ValueError:
+        pass
+assert parse_line("d,c,x,$1.00")["amount"] == 100
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pf-read"
+needs = ["pl-reject"]
+prompt = "Add parse_file(path) -> list[dict] to records.py. Read the file and return one record per line, in file order, using parse_line. Header and blank lines come later. See SPEC.md section 2."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+open("t.csv", "w").write("a,B,x,$1.00\n")
+assert parse_file("t.csv") == [
+    {"date": "a", "category": "b", "description": "x", "amount": 100}
+]
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pf-header"
+needs = ["pf-read"]
+prompt = "In records.py, make parse_file skip a first line that begins with 'date,' (case-insensitive). A file whose only line is that header returns []."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+open("h.csv", "w").write("Date,Category,Description,Amount\n2026-02-01,Books,Vol 1,$5.00\n")
+assert len(parse_file("h.csv")) == 1
+open("e.csv", "w").write("date,category,description,amount\n")
+assert parse_file("e.csv") == []
+print("ok")
+PY
+'''
+
+[[task]]
+id = "pf-blanks"
+needs = ["pf-header"]
+prompt = "In records.py, make parse_file skip blank lines. It should then read the provided expenses.csv as exactly 7 records."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+rows = parse_file("expenses.csv")
+assert len(rows) == 7, len(rows)
+assert rows[0]["description"] == "Milk, eggs"
+assert rows[4]["amount"] == 123456, rows[4]
+print("ok")
+PY
+'''
+
+[[task]]
+id = "totals"
+needs = ["pf-blanks"]
+prompt = "Create report.py with totals_by_category(rows) -> dict[str, int], the net cents per category. A category netting to zero is still in the result. See SPEC.md section 3."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import totals_by_category
+t = totals_by_category(parse_file("expenses.csv"))
+assert t == {"groceries": 1100, "transit": 130956, "dining": 0}, t
+print("ok")
+PY
+'''
+
+[[task]]
+id = "ranked-sort"
+needs = ["totals"]
+prompt = "Add ranked(totals) -> list[tuple[str, int]] to report.py, sorted by total descending."
+validate = '''
+python3 - <<'PY'
+from report import ranked
+assert ranked({"a": 5, "b": 9}) == [("b", 9), ("a", 5)]
+assert ranked({}) == []
+print("ok")
+PY
+'''
+
+[[task]]
+id = "ranked-ties"
+needs = ["ranked-sort"]
+prompt = "In report.py, make ranked break ties by category name ascending."
+validate = '''
+python3 - <<'PY'
+from report import ranked
+assert ranked({"books": 10, "art": 10}) == [("art", 10), ("books", 10)]
+assert ranked({"a": 5, "b": 9}) == [("b", 9), ("a", 5)]
+print("ok")
+PY
+'''
+
+[[task]]
+id = "fr-rows"
+needs = ["ranked-ties"]
+prompt = "Add format_report(rows) -> str to report.py. For now: the 'CATEGORY'/'TOTAL' header line, then one line per category in ranked order. Every line is the category left-justified to width 12 followed by the amount right-justified to width 10, amounts via format_cents. See SPEC.md section 3."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import format_report
+got = format_report(parse_file("expenses.csv")).splitlines()
+assert got[0] == "CATEGORY         TOTAL", repr(got[0])
+assert got[1] == "transit      $1,309.56", repr(got[1])
+assert got[3] == "dining           $0.00", repr(got[3])
+print("ok")
+PY
+'''
+
+[[task]]
+id = "fr-total"
+needs = ["fr-rows"]
+prompt = "In report.py, finish format_report: after the category lines, exactly 22 '-' characters, then a final line pairing 'TOTAL' with the grand total. No trailing newline. The example report in SPEC.md section 3 is the contract."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import format_report
+want = """CATEGORY         TOTAL
+transit      $1,309.56
+groceries       $11.00
+dining           $0.00
+----------------------
+TOTAL        $1,320.56"""
+got = format_report(parse_file("expenses.csv"))
+assert got == want, f"\n{got!r}\n{want!r}"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "cli-print"
+needs = ["fr-total"]
+prompt = "Create cli.py. `python3 cli.py <path>` prints format_report(parse_file(path)) and a trailing newline, exiting 0. See SPEC.md section 4."
+validate = '''
+python3 - <<'PY'
+import subprocess, sys
+r = subprocess.run([sys.executable, "cli.py", "expenses.csv"], capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+assert r.stdout.endswith("TOTAL        $1,320.56\n"), repr(r.stdout[-40:])
+print("ok")
+PY
+'''
+
+[[task]]
+id = "cli-missing"
+needs = ["cli-print"]
+prompt = "In cli.py, handle a path that does not exist: print 'error: no such file: <path>' to stderr, print nothing to stdout, and exit 2."
+validate = "python3 check.py"

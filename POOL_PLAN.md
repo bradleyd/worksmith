@@ -76,20 +76,46 @@ Synthetic first, to get the shape. A real task grounds the result but makes the
 per-task checks fiddly, and fiddly checks are how an experiment ends up
 measuring its own harness.
 
-One goal — a small Python library, in the register of `evals/tasks/05` — cut
-three ways:
+One goal — `evals/pool/expenses/`, a small Python library plus a CLI in the
+register of `evals/tasks/05` — cut three ways:
 
 | backlog | tasks | roughly |
 |---|---|---|
-| coarse | 3 | the decomposition a person would type |
+| coarse | 3 | one module group each |
 | medium | 8 | one function each |
-| fine | ~20 | one function, or one edge case of one function |
+| fine | 22 | one behaviour each, extended in place |
 
-**The end-to-end check is byte-identical across all three.** That is what makes
-the comparison fair, and it is the same discipline `evals/run.py` already
-enforces between raw and guided. The finer backlogs additionally carry per-task
-checks; the coarse one mostly cannot, which is itself part of what is being
-measured.
+**Two things are held identical so that granularity is the only variable.**
+
+*The specification.* `SPEC.md` carries every module, signature, edge case and
+the exact report layout, and every backlog points at its sections rather than
+adding requirements. Without this the experiment is unreadable: the natural way
+to write a fine-grained backlog is to spell out every function and edge case,
+and a win would then be the extra *information*, not the smaller tasks. The
+eval had to guard exactly this once already — guided beat raw on the 9B and the
+finding only counted because guided leaked nothing the goal did not carry.
+
+*The end-to-end check.* `files/check.py` drives `cli.py` as a subprocess and
+compares stdout byte for byte. It knows nothing about which modules exist, so it
+cannot tell the three granularities apart, which is the only way it grades the
+same thing three times. It writes CSVs of its own as well as reading the
+fixture, so it is not scoring a file the model was handed.
+
+Every backlog also gets per-task checks at its own granularity. Giving the fine
+one checks and the coarse one none would move enforcement and size together,
+which is two variables again.
+
+The backlogs are graded before any model sees them: `evals/pool/verify.py` runs
+all 33 per-task checks and all 3 end-to-end checks against a reference
+implementation, and refuses a cycle or a dangling `needs`. An answer key nobody
+graded is how a day gets spent discovering the model was right and the check was
+wrong. All three pass.
+
+**A cost recorded in advance:** `fine.toml` is mostly a chain — twenty-two tasks
+repeatedly extending the same four files — so `needs` serialises nearly all of
+it and wall clock will probably be *worse* than coarse. The bet is on per-task
+accuracy, not throughput. Writing that down now means it cannot later be
+reported as a surprise.
 
 Per run, recorded:
 
@@ -127,25 +153,32 @@ text keeps context growing with the backlog, which is the thing being avoided.
 ## 6. Backlog format
 
 ```toml
-name = "expenses"
-goal = "..."                  # for the context line only, never the instruction
-validate = "python3 check.py" # the shared end-to-end check
+name = "expenses-medium"
+granularity = "medium"
+spec = "SPEC.md"                 # the only source of requirements, shared
+validate = "python3 check.py"    # the shared end-to-end check
+files = ["expenses.csv", "check.py", "SPEC.md"]
 
 [[task]]
-id = "money"
-prompt = "Create money.py with format_cents(n) returning ..."
-validate = "python3 -c '...'"
+id = "parse-amount"
+prompt = "Implement parse_amount in money.py, per SPEC.md section 1."
+validate = """..."""
 
 [[task]]
-id = "parse"
-needs = ["money"]
-prompt = "..."
-validate = "..."
+id = "parse-line"
+needs = ["parse-amount"]
+prompt = "Implement parse_line in records.py, per SPEC.md section 2."
+validate = """..."""
 ```
 
-Same TOML register as `evals/tasks/*.toml`, and `[files]` fixtures work the same
-way, because the runner should be a mode of `run.py` rather than a second
-harness with its own bugs.
+Same TOML register as `evals/tasks/*.toml`, so the runner is a mode of `run.py`
+rather than a second harness with its own bugs.
+
+**A `validate` is a heredoc, not `python3 -c "..."`.** Every amount in this
+domain starts with `$`, and inside bash double quotes `$12` expands to a
+positional parameter — silently, producing a check that tests nothing. Two of
+the twelve short checks were written that way and `verify.py` caught both. Any
+new check goes through a `python3 - <<'PY'` block.
 
 A task that exhausts its retries is **failed, and its dependents are blocked,
 not attempted**. Running a dependent on a broken dependency produces a second
@@ -201,13 +234,15 @@ Stated up front so the answer is not negotiated after the fact.
 
 ## 9. Work
 
-1. Backlog format + loader, as a mode of `evals/run.py`.
-2. Dependency gating and result lines in `Manager` — `pump()` grows a
+1. **Write the three backlogs by hand — done.** Deliberately first: this *is*
+   the experiment, it deserves more care than the code, and writing it first
+   settled the format by use instead of by guess. `evals/pool/`, graded by
+   `verify.py`.
+2. Backlog loader, as a mode of `evals/run.py`.
+3. Dependency gating and result lines in `Manager` — `pump()` grows a
    readiness test; `PendingTask` grows `id`, `needs`, `validate`.
-3. Per-task acceptance. Workers already take a `CommandValidator`
+4. Per-task acceptance. Workers already take a `CommandValidator`
    (`worker.rs:472`), so this is plumbing per task rather than per fan-out.
-4. Write the three backlogs by hand. This is the experiment; it deserves more
-   care than the code.
 5. Run the sweep on the 14B, and on the 27B as a control — if the 27B gains too,
    the result is about task size generally and not about weak models.
 6. Only then: `kind = "ask" | "yours"`, and the Phase 2 planner.

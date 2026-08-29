@@ -1,0 +1,65 @@
+name = "expenses-coarse"
+granularity = "coarse"
+description = "Three tasks — the cut a person would type"
+spec = "SPEC.md"
+validate = "python3 check.py"
+files = ["expenses.csv", "check.py", "SPEC.md"]
+
+[[task]]
+id = "money-and-records"
+prompt = """
+Implement SPEC.md sections 1 and 2: money.py (parse_amount, format_cents) and
+records.py (parse_line, parse_file). Follow the spec exactly, including the
+cases it says must raise ValueError.
+"""
+validate = '''
+python3 - <<'PY'
+from money import parse_amount, format_cents
+from records import parse_line, parse_file
+assert parse_amount("$1,234.56") == 123456
+assert parse_amount("$5") == 500
+assert parse_amount("-$4.75") == -475
+for bad in ("$-5.00", "12.5", "$1.234", ""):
+    try:
+        parse_amount(bad); raise AssertionError(bad)
+    except ValueError:
+        pass
+assert format_cents(-475) == "-$4.75" and format_cents(0) == "$0.00"
+r = parse_line('2026-01-03,Groceries,"Milk, eggs",$12.50')
+assert r == {"date": "2026-01-03", "category": "groceries",
+             "description": "Milk, eggs", "amount": 1250}, r
+assert len(parse_file("expenses.csv")) == 7
+print("ok")
+PY
+'''
+
+[[task]]
+id = "report"
+needs = ["money-and-records"]
+prompt = """
+Implement SPEC.md section 3: report.py (totals_by_category, ranked,
+format_report). The exact column widths and the example report in the spec are
+the contract.
+"""
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import totals_by_category, ranked, format_report
+rows = parse_file("expenses.csv")
+t = totals_by_category(rows)
+assert t == {"groceries": 1100, "transit": 130956, "dining": 0}, t
+assert ranked(t) == [("transit", 130956), ("groceries", 1100), ("dining", 0)]
+assert format_report(rows).splitlines()[0] == "CATEGORY         TOTAL"
+assert format_report(rows).splitlines()[-1] == "TOTAL        $1,320.56"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "cli"
+needs = ["report"]
+prompt = """
+Implement SPEC.md section 4: cli.py. `python3 cli.py <path>` prints the report;
+a missing file is an error on stderr and exit code 2.
+"""
+validate = "python3 check.py"

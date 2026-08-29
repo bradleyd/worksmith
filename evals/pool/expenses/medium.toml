@@ -1,0 +1,131 @@
+name = "expenses-medium"
+granularity = "medium"
+description = "Eight tasks — one function each"
+spec = "SPEC.md"
+validate = "python3 check.py"
+files = ["expenses.csv", "check.py", "SPEC.md"]
+
+[[task]]
+id = "parse-amount"
+prompt = "Implement parse_amount in money.py, per SPEC.md section 1."
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+assert parse_amount("$12.50") == 1250
+assert parse_amount("$1,234.56") == 123456
+assert parse_amount("$5") == 500
+assert parse_amount("-$4.75") == -475
+assert parse_amount("  $5.00 ") == 500
+for bad in ("$-5.00", "12.5", "$1.234", "", "$1,23.45"):
+    try:
+        parse_amount(bad); raise AssertionError(bad)
+    except ValueError:
+        pass
+print("ok")
+PY
+'''
+
+[[task]]
+id = "format-cents"
+prompt = "Implement format_cents in money.py, per SPEC.md section 1."
+validate = '''
+python3 - <<'PY'
+from money import format_cents
+assert format_cents(1250) == "$12.50"
+assert format_cents(123456) == "$1,234.56"
+assert format_cents(-475) == "-$4.75"
+assert format_cents(0) == "$0.00"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "parse-line"
+needs = ["parse-amount"]
+prompt = "Implement parse_line in records.py, per SPEC.md section 2."
+validate = '''
+python3 - <<'PY'
+from records import parse_line
+r = parse_line('2026-01-03,Groceries,"Milk, eggs",$12.50')
+assert r == {"date": "2026-01-03", "category": "groceries",
+             "description": "Milk, eggs", "amount": 1250}, r
+assert parse_line("2026-01-06, GROCERIES ,Refund,-$4.75")["category"] == "groceries"
+try:
+    parse_line("a,b,c"); raise AssertionError("3 fields")
+except ValueError:
+    pass
+print("ok")
+PY
+'''
+
+[[task]]
+id = "parse-file"
+needs = ["parse-line"]
+prompt = "Implement parse_file in records.py, per SPEC.md section 2."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+rows = parse_file("expenses.csv")
+assert len(rows) == 7, len(rows)
+assert rows[0]["description"] == "Milk, eggs"
+assert rows[-1]["amount"] == -1100
+open("h.csv", "w").write("2026-02-01,Books,Vol 1,$5\n")
+assert len(parse_file("h.csv")) == 1
+open("e.csv", "w").write("date,category,description,amount\n")
+assert parse_file("e.csv") == []
+print("ok")
+PY
+'''
+
+[[task]]
+id = "totals"
+needs = ["parse-file"]
+prompt = "Implement totals_by_category in report.py, per SPEC.md section 3."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import totals_by_category
+t = totals_by_category(parse_file("expenses.csv"))
+assert t == {"groceries": 1100, "transit": 130956, "dining": 0}, t
+print("ok")
+PY
+'''
+
+[[task]]
+id = "ranked"
+prompt = "Implement ranked in report.py, per SPEC.md section 3."
+validate = '''
+python3 - <<'PY'
+from report import ranked
+assert ranked({"a": 5, "b": 9}) == [("b", 9), ("a", 5)]
+assert ranked({"books": 10, "art": 10}) == [("art", 10), ("books", 10)]
+assert ranked({}) == []
+print("ok")
+PY
+'''
+
+[[task]]
+id = "format-report"
+needs = ["totals", "ranked", "format-cents"]
+prompt = "Implement format_report in report.py, per SPEC.md section 3."
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import format_report
+want = """CATEGORY         TOTAL
+transit      $1,309.56
+groceries       $11.00
+dining           $0.00
+----------------------
+TOTAL        $1,320.56"""
+got = format_report(parse_file("expenses.csv"))
+assert got == want, f"\n{got!r}\n{want!r}"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "cli"
+needs = ["format-report", "parse-file"]
+prompt = "Implement cli.py, per SPEC.md section 4."
+validate = "python3 check.py"
