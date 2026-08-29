@@ -48,7 +48,7 @@ def check(label, got, want):
         FAILURES.append(f"{label}: want {want!r}, got {got!r}")
 
 
-def run(mode: str, backlog: str) -> dict:
+def run(mode: str, backlog: str, *extra: str) -> dict:
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         stub = d / "stub.py"
@@ -60,7 +60,7 @@ def run(mode: str, backlog: str) -> dict:
         r = subprocess.run(
             [sys.executable, str(HERE / "run_pool.py"),
              str(HERE / "expenses" / backlog), "--bin", str(stub),
-             "--json", str(out)],
+             "--json", str(out), *extra],
             capture_output=True, text=True, env=env,
         )
         if not out.exists():
@@ -98,6 +98,29 @@ check("idle end-to-end", res.get("end_to_end"), False)
 res = run("late", "coarse.toml")
 check("late ran", res.get("ran"), 1)
 check("late blocked", len(res.get("blocked", [])), 2)
+
+# --keep-going: a failure stops being a wall, so a pass rate covers the whole
+# backlog instead of reporting time-to-first-obstacle.
+res = run("idle", "fine.toml", "--keep-going")
+check("keep-going attempted all", res.get("ran"), 22)
+check("keep-going blocked none", res.get("blocked"), [])
+check("keep-going solved none", res.get("solved"), 0)
+check("keep-going repaired once", res.get("repaired"), ["fc-whole"])
+# The reference implements the whole backlog, so every later check would pass
+# for free. Scoring them would invent 21 successes for an agent that wrote
+# nothing — the exact number this rule exists to refuse.
+check("keep-going scores only the untainted", res.get("scored"), 1)
+check("keep-going taints the rest", len(res.get("tainted", [])), 21)
+# Every dependency was handed over by the harness, so the shared check would be
+# grading the reference solution. Reporting it as a pass would be a lie.
+check("keep-going voids end-to-end", res.get("end_to_end"), None)
+
+# An agent that starts working from the third task on: the first two are
+# repaired past, the rest are its own.
+res = run("late", "fine.toml", "--keep-going")
+check("late keep-going attempted all", res.get("ran"), 22)
+check("late keep-going repaired the first", res.get("repaired"), ["fc-whole"])
+check("late keep-going scores only up to the repair", res.get("scored"), 1)
 
 if FAILURES:
     print("\n".join(FAILURES), file=sys.stderr)

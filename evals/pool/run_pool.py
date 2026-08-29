@@ -96,10 +96,20 @@ def prompt_for(task: dict, produced: dict) -> str:
 
 
 def run_task(binp: str, task: dict, workdir: Path, produced: dict,
-             model: str | None, timeout: int) -> dict:
+             model: str | None, timeout: int, fast: bool = False,
+             think: str | None = None) -> dict:
     cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
     if model:
         cmd += ["--model", model]
+    # A model that always reasons will spend its whole budget thinking and
+    # return empty content, which reaches the harness as "stuck: the model
+    # returned an empty response" and reads like a capability failure. Measured:
+    # qwen3.5-9b answered "reply with exactly: hello" with 46 reasoning tokens,
+    # no content, finish_reason=length. Its whole sweep scored that way.
+    if fast:
+        cmd.append("--fast")
+    elif think:
+        cmd += ["--think", think]
     if task.get("validate"):
         cmd += ["--until", task["validate"]]
     cmd.append(prompt_for(task, produced))
@@ -137,8 +147,32 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
     return row
 
 
+def repair(workdir: Path, backlog: dict) -> list[str]:
+    """Splice the reference solution in, so a failed task stops being a wall.
+
+    Only used by --keep-going, and it copies the *whole* reference because a
+    failed task rarely leaves exactly one file wrong.
+
+    That bluntness is why every task after a repair is marked `tainted` and left
+    out of the pass rate. The reference implements the entire backlog, so once
+    it is in place a later task's check passes whether or not the model did
+    anything — a stub agent that writes nothing scores 21 of 22 without the
+    taint rule. Grading tainted tasks would not be a generous measurement, it
+    would be a fabricated one.
+    """
+    ref = backlog["dir"] / "reference"
+    if not ref.is_dir():
+        return []
+    names = []
+    for f in sorted(ref.glob("*.py")):
+        shutil.copy(f, workdir / f.name)
+        names.append(f.name)
+    return names
+
+
 def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
-             keep: bool) -> dict:
+             keep: bool, keep_going: bool = False, fast: bool = False,
+             think: str | None = None) -> dict:
     """The readiness gate. A task runs when every id in `needs` has passed.
 
     Deliberately sequential. Tasks share one directory and a backlog does not
@@ -159,7 +193,9 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
     produced: dict[str, list[str]] = {}
     rows: list[dict] = []
     blocked: list[str] = []
+    tainted = False
 
+    repaired: list[str] = []
     remaining = list(tasks)
     while remaining:
         ready = [i for i in remaining
@@ -173,11 +209,28 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
             break
         tid = ready[0]
         remaining.remove(tid)
-        row = run_task(binp, tasks[tid], workdir, produced, model, timeout)
+        row = run_task(binp, tasks[tid], workdir, produced, model, timeout,
+                       fast, think)
+        row["tainted"] = tainted
         rows.append(row)
         if row["passed"]:
             done.add(tid)
             produced[tid] = row["wrote"]
+        elif keep_going:
+            # Measuring, not working. Blocking is right when the output is the
+            # code; it is wrong when the output is a pass rate, because one hard
+            # task early in a chain reports as twenty failures while saying
+            # nothing about the other nineteen. Splice in the reference and let
+            # the rest of the backlog be attempted on a correct dependency —
+            # scored, but marked (see `repair`).
+            patched = repair(workdir, backlog)
+            if patched:
+                repaired.append(tid)
+                done.add(tid)
+                produced[tid] = patched
+                tainted = True
+                print(f"  REPAIR {tid} — reference spliced in; everything after "
+                      "this is unscored", file=sys.stderr)
         mark = "PASS " if row["passed"] else "FAIL "
         flag = " CONFIDENTLY-WRONG" if row["confidently_wrong"] else ""
         wrote = f" wrote={','.join(row['wrote'])}" if row["wrote"] else ""
@@ -185,19 +238,24 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
               f"gen_tok={row['gen_tokens']:<6} outcome={row['outcome']}"
               f"{wrote}{flag}", file=sys.stderr)
 
+    # An end-to-end pass means nothing once the reference has been spliced in.
     e2e = subprocess.run(["bash", "-lc", backlog["validate"]], cwd=workdir,
                          capture_output=True, text=True)
-    solved = sum(1 for r in rows if r["passed"])
-    total_tok = sum(r["gen_tokens"] for r in rows)
+    scored = [r for r in rows if not r.get("tainted")]
+    solved = sum(1 for r in scored if r["passed"])
+    total_tok = sum(r["gen_tokens"] for r in scored)
     result = {
         "backlog": backlog["name"],
         "granularity": backlog.get("granularity"),
         "tasks": len(tasks),
         "ran": len(rows),
+        "scored": len(scored),
         "solved": solved,
+        "tainted": [r["id"] for r in rows if r.get("tainted")],
         "blocked": blocked,
-        "confidently_wrong": sum(1 for r in rows if r["confidently_wrong"]),
-        "end_to_end": e2e.returncode == 0,
+        "repaired": repaired,
+        "confidently_wrong": sum(1 for r in scored if r["confidently_wrong"]),
+        "end_to_end": None if repaired else e2e.returncode == 0,
         "gen_tokens": total_tok,
         # The eval reports cost per *solved* task, not total: a loop that spends
         # more and succeeds more is not more expensive per unit of work.
@@ -220,7 +278,21 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("backlogs", nargs="+", type=Path)
     ap.add_argument("--model")
-    ap.add_argument("--timeout", type=int, default=240, help="per task, seconds")
+    ap.add_argument("--timeout", type=int, default=600,
+                    help="per task, seconds. 240 was too short for a 9B on a "
+                         "coarse task: it was killed mid-stream with no usage "
+                         "event at all, which scores as a failure of the model "
+                         "rather than of the clock.")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="on failure, splice in the reference solution and carry "
+                         "on, so every task is attempted. Gives a per-task pass "
+                         "rate over the whole backlog instead of time-to-first-"
+                         "wall. Voids the end-to-end result, which is then null.")
+    ap.add_argument("--fast", action="store_true",
+                    help="thinking off. Needed for a model that always reasons: "
+                         "it otherwise spends the budget thinking and returns "
+                         "empty content, which reads as a capability failure.")
+    ap.add_argument("--think", metavar="LEVEL")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--json")
     ap.add_argument("--keep", action="store_true",
@@ -245,7 +317,8 @@ def main() -> int:
         for i in range(args.repeat):
             tag = backlog["name"] + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
             print(f"\n=== {tag} ({len(backlog['task'])} tasks) ===", file=sys.stderr)
-            r = dispatch(backlog, binp, args.model, args.timeout, args.keep)
+            r = dispatch(backlog, binp, args.model, args.timeout, args.keep,
+                         args.keep_going, args.fast, args.think)
             r["run"] = i
             results.append(r)
             if args.json:
@@ -254,12 +327,13 @@ def main() -> int:
     print(f"\n{'backlog':<20} {'tasks':>7} {'e2e':>5} {'conf-wrong':>11} "
           f"{'tok/solved':>11} {'wall':>8}")
     for r in results:
-        e2e = "pass" if r["end_to_end"] else "FAIL"
+        e2e = "—" if r["end_to_end"] is None else ("pass" if r["end_to_end"] else "FAIL")
         per = r["gen_tokens_per_solved"]
-        print(f"{r['backlog']:<20} {r['solved']:>3}/{r['tasks']:<3} {e2e:>5} "
+        denom = r["scored"] if r["tainted"] else r["tasks"]
+        print(f"{r['backlog']:<20} {r['solved']:>3}/{denom:<3} {e2e:>5} "
               f"{r['confidently_wrong']:>11} {per if per else '—':>11} "
               f"{r['wall_clock']:>7}s")
-    return 0 if all(r["end_to_end"] for r in results) else 1
+    return 0 if all(r["end_to_end"] is not False for r in results) else 1
 
 
 if __name__ == "__main__":
