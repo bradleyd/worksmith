@@ -27,7 +27,7 @@ HERE = Path(__file__).resolve().parent
 REF = HERE / "expenses" / "reference"
 
 STUB = '''#!/usr/bin/env python3
-import json, os, shutil, sys
+import json, os, shutil, sys, time
 from pathlib import Path
 ref, mode, state = Path(os.environ["STUB_REF"]), os.environ["STUB_MODE"], Path(os.environ["STUB_STATE"])
 n = int(state.read_text()) if state.exists() else 0
@@ -38,6 +38,9 @@ if mode == "perfect" or (mode == "late" and n >= 2):
 print(json.dumps({"type": "usage", "completion_tokens": 100, "prompt_tokens": 500}))
 print(json.dumps({"type": "tool_call", "name": "write"}))
 print(json.dumps({"type": "turn_complete", "outcome": "done"}))
+if mode == "slow":
+    sys.stdout.flush()
+    time.sleep(30)
 '''
 
 FAILURES = []
@@ -121,6 +124,16 @@ res = run("late", "fine.toml", "--keep-going")
 check("late keep-going attempted all", res.get("ran"), 22)
 check("late keep-going repaired the first", res.get("repaired"), ["fc-whole"])
 check("late keep-going scores only up to the repair", res.get("scored"), 1)
+
+# A task killed by the clock must still report the work it did. Dropping the
+# partial output makes a slow task look identical to a dead one, which is how
+# three sweeps got misdiagnosed as provider stalls.
+res = run("slow", "coarse.toml", "--timeout", "2")
+row = (res.get("task_rows") or [{}])[0]
+check("timeout is flagged", row.get("timed_out"), True)
+check("timeout keeps token count", row.get("gen_tokens"), 100)
+check("timeout keeps tool calls", row.get("tool_calls"), 1)
+check("timeout is not confidently-wrong", row.get("confidently_wrong"), False)
 
 if FAILURES:
     print("\n".join(FAILURES), file=sys.stderr)

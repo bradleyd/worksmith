@@ -76,21 +76,33 @@ neither for capability:
   exactly: hello" with 46 reasoning tokens, no content, `finish_reason=length`.
   The whole sweep scored `stuck: the model returned an empty response`.
   `run.py` had `--fast`; `run_pool.py` did not. Fixed.
-- **Two timeouts set to the same number.** Worksmith bounds the gap between
-  stream chunks at `DEFAULT_STREAM_IDLE_SECS` = 600s and reports a stall as a
-  retryable error. This harness also killed the process at 600s, so a provider
-  that accepted a request and went quiet was killed at the exact moment
-  worksmith was about to handle it — surfacing as `outcome=None gen_tok=0`,
-  which reads as the model failing. Harness default is now 900s.
+- **A timeout threw away the evidence of what it interrupted.**
+  `subprocess.TimeoutExpired` carries everything the process printed before the
+  kill, and this harness discarded it — so a task killed by the clock reported
+  `gen_tok=0, outcome=None`, byte-identical to a model that never produced a
+  token.
 
-  The 9B's `0/3` on coarse is still that artifact, twice, and should not be read
-  as capability. Its completed tasks were fast and cheap (221–531 tokens).
+  **This produced a wrong diagnosis, recorded here because the wrong one is
+  still in the git history.** Three coarse runs were called provider stalls on
+  that evidence. They were not. Running the same task by hand against the local
+  9B shows it reading `SPEC.md` and then generating 1,044 tokens of
+  implementation — working normally, just slower than the clock allowed. The
+  hosted 9B's two 600s failures cannot now be classified either way; their
+  output is gone.
+
+  Fixed: partial output is parsed on timeout, the row is flagged `timed_out`,
+  and the error names how far it got. A timeout is also no longer eligible to
+  count as confidently-wrong, since the model never claimed anything.
+
+  **So every `0/3` on coarse in the table above is "did not finish in the time
+  allowed", not "could not do it".** Coarse is three module-sized tasks; on a
+  local 4-bit 9B that is a genuinely long job, and the number to fix is the
+  budget, not the model.
 
 ## Next
 
-The remaining variance is the provider, not the model: OpenRouter routing gives
-different endpoints run to run, and a stall costs 10 minutes. The local `omlx`
-provider already has a capability ladder configured (`gemma-3-270m` →
+Re-run coarse with a budget that fits the work, now that a timeout reports what
+it interrupted. The local `omlx` provider has a capability ladder configured (`gemma-3-270m` →
 `Qwen3.5-2B` → `SmolLM3-3B` → `Strand-Rust-Coder-14B` → `Qwen3.8-27B-4bit`) and
 is free, deterministic in routing, and stall-free. That is the better place to
 ask where the capability floor is.

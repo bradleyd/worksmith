@@ -117,7 +117,8 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
     before = snapshot(workdir)
     row = {"id": task["id"], "passed": False, "outcome": None, "gen_tokens": 0,
            "tool_calls": 0, "model_calls": 0, "reasoning_tokens": 0,
-           "elapsed": 0.0, "wrote": [], "error": None, "confidently_wrong": False}
+           "elapsed": 0.0, "wrote": [], "error": None, "confidently_wrong": False,
+           "timed_out": False}
     t0 = time.time()
     try:
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
@@ -125,8 +126,21 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
         row.update(parse_events(r.stdout))
         if r.returncode != 0:
             row["error"] = (r.stderr or "").strip()[:200]
-    except subprocess.TimeoutExpired:
-        row["error"] = f"timeout after {timeout}s"
+    except subprocess.TimeoutExpired as e:
+        # TimeoutExpired carries everything the process printed before the kill,
+        # and dropping it makes a *slow* task indistinguishable from a dead one:
+        # both report gen_tok=0, outcome=None. Three runs were called provider
+        # stalls on that evidence when the model had in fact read the spec and
+        # written a thousand tokens of implementation before the clock ran out.
+        partial = e.stdout or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        row.update(parse_events(partial))
+        row["timed_out"] = True
+        row["error"] = (f"timeout after {timeout}s "
+                        f"(had run {row['model_calls']} model calls, "
+                        f"{row['tool_calls']} tool calls, "
+                        f"{row['gen_tokens']} gen tokens)")
     row["elapsed"] = round(time.time() - t0, 1)
 
     after = snapshot(workdir)
@@ -143,7 +157,8 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
 
     # The metric the experiment turns on: the model said it was finished and it
     # was not. Everything else here is context for this number.
-    row["confidently_wrong"] = row["outcome"] == "done" and not row["passed"]
+    row["confidently_wrong"] = (row["outcome"] == "done" and not row["passed"]
+                                and not row["timed_out"])
     return row
 
 
@@ -231,7 +246,7 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
                 tainted = True
                 print(f"  REPAIR {tid} — reference spliced in; everything after "
                       "this is unscored", file=sys.stderr)
-        mark = "PASS " if row["passed"] else "FAIL "
+        mark = "PASS " if row["passed"] else ("TIME " if row["timed_out"] else "FAIL ")
         flag = " CONFIDENTLY-WRONG" if row["confidently_wrong"] else ""
         wrote = f" wrote={','.join(row['wrote'])}" if row["wrote"] else ""
         print(f"  {mark}{tid:<16} {row['elapsed']:>6.1f}s "
@@ -260,6 +275,7 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
         # The eval reports cost per *solved* task, not total: a loop that spends
         # more and succeeds more is not more expensive per unit of work.
         "gen_tokens_per_solved": round(total_tok / solved) if solved else None,
+        "timed_out": [r["id"] for r in rows if r["timed_out"]],
         "wall_clock": round(sum(r["elapsed"] for r in rows), 1),
         "task_rows": rows,
     }
