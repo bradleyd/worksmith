@@ -15,4 +15,8 @@ skills/book-writer/
 .env
 
 # Python bytecode from the eval helpers
-evals/__pycache__/
+__pycache__/
+
+# Pool sweep scratch output (evals/pool/run_pool.py --json / its log).
+evals/pool/last-run.log
+evals/pool/last-run.json
