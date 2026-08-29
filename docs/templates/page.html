@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} · Worksmith{% endblock %}
+{% block body %}
+  <h1>{{ page.title }}</h1>
+  {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
+  {{ page.content | safe }}
+{% endblock %}

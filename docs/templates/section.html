@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ section.title }} · Worksmith{% endblock %}
+{% block body %}
+  <h1>{{ section.title }}</h1>
+  {% if section.description %}<p class="lede">{{ section.description }}</p>{% endif %}
+  {{ section.content | safe }}
+  {% if section.pages %}
+  <h2>Pages</h2>
+  <ul class="pages">
+    {% for p in section.pages %}
+    <li><a href="{{ p.path }}">{{ p.title }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+{% endblock %}
