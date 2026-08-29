@@ -14,6 +14,9 @@ worksmith --until "cargo test" "make the failing test pass"
 
 The model stops when the test passes, not when it says so.
 
+The [docs](https://worksmith.sh/) cover the same ground in depth — the loop,
+the evals, and the configuration reference.
+
 ## Is this for you?
 
 Probably yes if you run models locally (vLLM, llama.cpp, Ollama) or on cheap
