@@ -15,6 +15,14 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
+- **`config check` accepts `--trust-project` and ignores it.** The flag is on
+  the subcommand's `--help`, but `run_config_check` never passes it:
+  `Check::run(cwd, probe)` consults only the trust store, so an untrusted
+  project config is reported `not trusted` and every key in it is silently
+  omitted from the report. Found while adding `[models."omlx/..."]` tables to
+  this repo's project config — they did not appear, and the natural reading is
+  that the tables are broken rather than that the report is. `main.rs:1479`.
+
 - **`/pair` bare toggles instead of reporting.** Every other state command
   (`/validate`, `/route`, `/mouse`) reports when given no argument. `/pair`
   flips it, so checking whether pairing is on turns it off. Bare should report;

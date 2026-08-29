@@ -67,6 +67,25 @@ each task can be run independently from a known-good state. ~22 snapshots for
 `fine.toml`, self-verifying: each must pass its own task's check and fail the
 next one's. Not built — the ordering above is unambiguous without it.
 
+## A confound found afterwards: sampling is not uniform across the ladder
+
+The global config sets `temperature = 0.7` for everything, then overrides
+`omlx/Qwen3.5-9B-OptiQ-4bit` alone to `temperature = 0.6, top-k = 20`. So the
+local 9B arm was sampled differently from the 2B and 27B arms, and the claim
+that "only the cutting changed" holds *within* a model but not *between* the
+local ones.
+
+It costs little in practice — the local 9B produced only a timeout, so no result
+rests on it — but it is recorded rather than quietly levelled, because changing
+it now would break comparison with the hosted numbers already taken at 0.7.
+
+**Settings a result depends on must be written down here.** `.gitignore`
+excludes `.worksmith/` wholesale, so this repo's own project config is not
+tracked: a context window or a temperature set there travels no better than a
+value typed into a model server's UI. The local runs above used
+`context = 32768` for the 2B and 9B, global `temperature = 0.7`, and the 9B
+override noted above.
+
 ## Harness bugs this sweep found
 
 Two of the three runs were invalid on first attempt, both for harness reasons,
