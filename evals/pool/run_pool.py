@@ -112,6 +112,10 @@ def load(path: Path) -> dict:
     b = tomllib.loads(path.read_text())
     b["dir"] = path.parent
     b["file"] = path.name
+    # Remember each task's predecessor before any filtering, so --task can find
+    # the right snapshot by name instead of by position in a shortened list.
+    for i, t in enumerate(b["task"]):
+        t["_prev"] = b["task"][i - 1]["id"] if i else None
     ids = [t["id"] for t in b["task"]]
     if len(set(ids)) != len(ids):
         sys.exit(f"{path}: duplicate task id")
@@ -296,15 +300,22 @@ def repair(workdir: Path, backlog: dict) -> list[str]:
 
 def seed_for(backlog: dict, tasks: list, i: int) -> Path | None:
     """The snapshot a task starts from. Same rule as `bare.py`, deliberately:
-    the two arms are only comparable if they start from identical states."""
+    the two arms are only comparable if they start from identical states.
+
+    Snapshots are named by position in the *whole* backlog, so `--task` looks
+    the directory up by name rather than trusting the filtered list's index. A
+    filtered run that seeded task 8 from position 1 would start it in an empty
+    directory and score the model on work it was never given.
+    """
     snaps = backlog["dir"] / "snapshots"
     task = tasks[i]
     if "seed" in task:
         return (snaps / task["seed"]) if task["seed"] else None
-    if i == 0:
+    prev = task.get("_prev")
+    if prev is None:
         return None
-    d = snaps / f"{i:02d}-{tasks[i - 1]['id']}"
-    return d if d.is_dir() else None
+    d = next((x for x in snaps.glob(f"*-{prev}") if x.is_dir()), None)
+    return d
 
 
 def run_independent(backlog: dict, binp: str, model: str | None, timeout: int,
@@ -484,6 +495,12 @@ def main() -> int:
                     help="per task, seconds. Keep it above worksmith's "
                          "stream-idle timeout (600s) so a stalled provider is "
                          "reported by worksmith rather than killed here.")
+    ap.add_argument("--task", action="append", metavar="ID",
+                    help="run only this task (repeatable). Implies "
+                         "--independent, since a single task out of a chain has "
+                         "to start from its snapshot. This is the fast feedback "
+                         "loop: a change aimed at one task can be judged in "
+                         "minutes instead of the 111 a full sweep takes.")
     ap.add_argument("--independent", action="store_true",
                     help="run every task on its own, seeded from its snapshot, "
                          "instead of as a blocking chain. This is the arm that "
@@ -523,7 +540,14 @@ def main() -> int:
         for i in range(args.repeat):
             tag = backlog["name"] + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
             print(f"\n=== {tag} ({len(backlog['task'])} tasks) ===", file=sys.stderr)
-            if args.independent:
+            if args.task:
+                keep = set(args.task)
+                unknown = keep - {t["id"] for t in backlog["task"]}
+                if unknown:
+                    sys.exit(f"no such task: {', '.join(sorted(unknown))}")
+                backlog = {**backlog,
+                           "task": [t for t in backlog["task"] if t["id"] in keep]}
+            if args.independent or args.task:
                 r = run_independent(backlog, binp, args.model, args.timeout,
                                     args.fast, args.think)
             else:

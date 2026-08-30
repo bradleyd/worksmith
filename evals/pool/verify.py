@@ -49,7 +49,11 @@ def check_backlog(path: Path, ref: Path, fixtures: Path) -> bool:
         d = Path(d)
         for src in list(ref.glob("*.py")) + list(fixtures.iterdir()):
             shutil.copy(src, d / src.name)
-        shutil.copy(path.parent / backlog.get("spec", "SPEC.md"), d)
+        # Not every fixture has a spec file: the newsletter tasks carry their
+        # own criteria, which is the point of that fixture.
+        spec = path.parent / backlog.get("spec", "SPEC.md")
+        if spec.exists():
+            shutil.copy(spec, d)
         ok = True
         for t in tasks:
             r = subprocess.run(t["validate"], shell=True, cwd=d,
