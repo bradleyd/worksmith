@@ -192,7 +192,7 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
            "tool_calls": 0, "model_calls": 0, "reasoning_tokens": 0,
            "elapsed": 0.0, "wrote": [], "error": None, "confidently_wrong": False,
            "timed_out": False}
-    t0 = time.time()
+    t0, w0 = time.monotonic(), time.time()
     try:
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
                            timeout=timeout)
@@ -214,7 +214,19 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
                         f"(had run {row['model_calls']} model calls, "
                         f"{row['tool_calls']} tool calls, "
                         f"{row['gen_tokens']} gen tokens)")
-    row["elapsed"] = round(time.time() - t0, 1)
+    # Monotonic, to match the clock `subprocess.run(timeout=)` enforces. Wall
+    # clock does not: the machine slept mid-sweep on 2026-08-30 and a task
+    # reported 3,155s elapsed against an 1,800s timeout that had correctly not
+    # fired. A number that large silently implies the harness is broken.
+    row["elapsed"] = round(time.monotonic() - t0, 1)
+    # The gap between the two clocks IS the sleep. A run that straddles one has
+    # dropped connections and stale server state in it, and its failures cannot
+    # be read as the model's.
+    slept = (time.time() - w0) - (time.monotonic() - t0)
+    if slept > 60:
+        row["slept_secs"] = round(slept, 1)
+        print(f"  !! machine slept ~{slept / 60:.0f}m during {task['id']} — "
+              "this run is not clean", file=sys.stderr)
 
     after = snapshot(workdir)
     row["wrote"] = sorted(n for n in after if before.get(n) != after.get(n))
@@ -376,6 +388,7 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
         # more and succeeds more is not more expensive per unit of work.
         "gen_tokens_per_solved": round(total_tok / solved) if solved else None,
         "timed_out": [r["id"] for r in rows if r["timed_out"]],
+        "slept_during": [r["id"] for r in rows if r.get("slept_secs")],
         "wall_clock": wall,
         "server": server,
         "task_rows": rows,

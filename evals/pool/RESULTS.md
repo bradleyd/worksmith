@@ -4,10 +4,58 @@ Newest first. Each sweep says what held, what did not, and what it found wrong
 with its own design; a result whose caveats are not written next to it gets
 quoted later without them.
 
-# Sweep 3 — the confound wins, 2026-08-29
+# Sweep 4 — sweep 3 does not replicate, 2026-08-30
 
-**Self-containment is the lever. Task size is not.** This inverts the branch's
-thesis, on its own data.
+**Retraction.** Sweep 3's conclusion was drawn from one run of each backlog. Run
+again on the same model with the same settings:
+
+| backlog | run A (sweep 3) | run B |
+|---|---|---|
+| medium-inline | 7/8 | **2/8** |
+| fine | 18–22/22 | **7/22** |
+
+Run B is not clean — `kern.sleeptime` puts a system sleep at 00:19:42, mid-sweep
+— and one task reported 3,155s elapsed against an 1,800s timeout that had
+correctly not fired, because the harness measured wall clock while
+`subprocess.run` enforces a monotonic one. A sweep that straddles a sleep has
+dropped connections and stale server state in it, so its failures cannot be read
+as the model's.
+
+But that cuts both ways: **run A is one sample and run B is unusable, so
+nothing here supports the sweep 3 claim.** The honest position is that
+run-to-run variance on this model is large enough to swamp every effect reported
+above, and the single-run numbers throughout this document — sweeps 1, 2 and 3
+alike — are not evidence at the precision they were written with.
+
+What has survived every run without exception: **the 4B never completes a coarse
+task (0/3), and reaches somewhere between 6 and 22 of the 22 fine ones.** That
+ordering is real. Every finer-grained claim built on top of it is not yet
+measured.
+
+**Fixed here.** `elapsed` is now monotonic, matching the clock the timeout
+enforces, and the gap between the two clocks is reported as `slept_secs` with a
+loud warning — a run that straddles a sleep now says so instead of producing a
+number that quietly implies the harness is broken.
+
+**What it would take to answer the question properly:**
+
+- `--repeat 3` minimum on every arm; the effect sizes being chased are smaller
+  than the observed spread.
+- `caffeinate -i` around any sweep, or the machine will keep doing this.
+- A budget that fits the work: `pa-reject` and `parse-amount` have now consumed
+  1,672s / 48,532 tokens and 1,800s / 21,782 tokens without finishing. Tasks
+  that routinely exceed the timeout make the timeout the independent variable.
+
+Estimated cost of doing it right: 4 backlogs x 3 repeats x ~1-2h. That is a
+day of machine time, which is the actual price of the claim.
+
+# Sweep 3 — RETRACTED, see sweep 4 — 2026-08-29
+
+**RETRACTED — did not replicate.** See sweep 4. Kept in full because the
+reasoning was right and the sample size was not, and a retraction that deletes
+its own evidence teaches nothing.
+
+~~Self-containment is the lever. Task size is not.~~ One run of each backlog.
 
 Qwen3.5-4B-4bit, granularity held fixed at 8 tasks with the same dependency
 graph, the same checks and the same grader. The only variable is how the task is
