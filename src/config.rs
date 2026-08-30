@@ -92,6 +92,8 @@ pub struct AgentsConfig {
     pub max_nudges: Option<usize>,
     /// Identical tool calls (across the run) before the supervisor nudges.
     pub repeat_threshold: Option<u32>,
+    /// Consecutive failures of the *same* check before the supervisor steps in.
+    pub stuck_check_threshold: Option<u32>,
     /// Completion tokens a worker may spend before it's stopped.
     pub token_budget: Option<u32>,
     /// Seconds a single model call may take before the worker is stopped as
@@ -422,6 +424,7 @@ impl Config {
         take(&mut self.agents.stuck_timeout, other.agents.stuck_timeout);
         take(&mut self.agents.max_nudges, other.agents.max_nudges);
         take(&mut self.agents.repeat_threshold, other.agents.repeat_threshold);
+        take(&mut self.agents.stuck_check_threshold, other.agents.stuck_check_threshold);
         take(&mut self.agents.token_budget, other.agents.token_budget);
         take(&mut self.agents.request_timeout, other.agents.request_timeout);
         take(&mut self.agents.fanout, other.agents.fanout);
@@ -548,6 +551,10 @@ impl Config {
                 .unwrap_or(d.idle_timeout),
             max_nudges: self.agents.max_nudges.unwrap_or(d.max_nudges),
             repeat_threshold: self.agents.repeat_threshold.unwrap_or(d.repeat_threshold),
+            stuck_check_threshold: self
+                .agents
+                .stuck_check_threshold
+                .unwrap_or(d.stuck_check_threshold),
             token_budget: self.agents.token_budget,
             request_timeout: self
                 .agents
