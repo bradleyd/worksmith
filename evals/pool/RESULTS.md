@@ -4,6 +4,40 @@ Newest first. Each sweep says what held, what did not, and what it found wrong
 with its own design; a result whose caveats are not written next to it gets
 quoted later without them.
 
+# Sweep 6 — the comparison the branch was for, 2026-08-30
+
+Three attempts per task, every arm, same 22 tasks from the same snapshots.
+
+| arm | passed | always | flaky | never | cost | wall |
+|---|---|---|---|---|---|---|
+| Claude Sonnet 5, one shot | 66/66, 100% | 22 | 0 | 0 | $0.2604 | mins |
+| **Qwen3.5-4B + worksmith** | **64/66, 97%** | **20** | **2** | **0** | free | 111m |
+| Qwen3.5-9B, one shot, local 4-bit | 52/65, 80% | 13 | 8 | 1 | free | - |
+| Qwen3.5-9B, one shot, hosted | 51/65, 78% | 15 | 5 | 2 | $0.0088 | - |
+| Qwen3.5-4B, one shot | 35/62, 56% | 9 | 7 | 6 | free | - |
+
+**The harness is worth more than doubling the model.** A 4B in the loop beats a
+bare 9B by 17 points, and beats itself by 41.
+
+**Consistency moved further than accuracy.** Same 4B, one-shot to harnessed:
+tasks that always pass 9 → 20, tasks that never pass 6 → 0. Nothing in the suite
+is beyond the loop, which is a different claim from a good average and the more
+useful one.
+
+**Where it stops.** Sonnet is 22/0/0; the 4B harnessed is 20/2/0. Three points
+per task, but across a 22-step chain two coin flips compound to roughly 44%
+against 100%. The harness closes most of the distance, not all of it.
+
+**The residue has a name.** Both flaky tasks are `pa-reject` and `cli-print`,
+and both are whole-file rewriters: `pa-reject` averages 1,201 generated tokens
+per model call against a suite median of 140, over 23 consecutive calls. So the
+next piece of work (anchored search/replace patches, `rustopedia/`'s §3) is
+aimed at the measured gap rather than a guess.
+
+**Cost, stated plainly.** Sonnet did the whole suite for 26 cents, about four
+tenths of a cent per solved task. The argument for local is free, private, no
+rate limit, works offline. It is not that Sonnet is expensive.
+
 # Sweep 5 — the bare arm, and what the branch actually found, 2026-08-30
 
 **Task shape does not help the model. The loop does.**
