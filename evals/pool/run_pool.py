@@ -195,7 +195,7 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
     row = {"id": task["id"], "passed": False, "outcome": None, "gen_tokens": 0,
            "tool_calls": 0, "model_calls": 0, "reasoning_tokens": 0,
            "elapsed": 0.0, "wrote": [], "error": None, "confidently_wrong": False,
-           "timed_out": False}
+           "timed_out": False, "by_tool": {}, "tool_errors": {}}
     t0, w0 = time.monotonic(), time.time()
     try:
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
@@ -347,8 +347,9 @@ def run_independent(backlog: dict, binp: str, model: str | None, timeout: int,
         solved += row["passed"]
         mark = "PASS " if row["passed"] else ("TIME " if row["timed_out"] else "FAIL ")
         print(f"  {mark}{task['id']:<16} {row['elapsed']:>6.1f}s "
-              f"gen_tok={row['gen_tokens']:<6} outcome={row['outcome']}",
-              file=sys.stderr)
+              f"gen_tok={row['gen_tokens']:<6} "
+              f"tools={row['by_tool']} errs={row['tool_errors']} "
+              f"outcome={row['outcome']}", file=sys.stderr)
     return {"backlog": backlog["name"], "granularity": backlog.get("granularity"),
             "mode": "independent", "tasks": len(tasks), "ran": attempted,
             "scored": attempted, "solved": solved, "blocked": [], "tainted": [],

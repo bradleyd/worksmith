@@ -85,6 +85,8 @@ def setup_workdir(task: dict) -> Path:
 def parse_events(stdout: str) -> dict:
     model_calls = tool_calls = gen_tokens = ctx_peak = reasoning_tokens = 0
     outcome = None
+    by_tool: dict[str, int] = {}
+    tool_errors: dict[str, int] = {}
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -103,11 +105,20 @@ def parse_events(stdout: str) -> dict:
             ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
         elif t == "tool_call":
             tool_calls += 1
+            # By name, because "which tool" is the question behind the
+            # whole-file rewrite problem: worksmith already has an anchored
+            # `edit`, so the interesting number is whether the model reaches
+            # for it or for `write`, and whether `edit` is failing when it does.
+            by_tool[e.get("name") or "?"] = by_tool.get(e.get("name") or "?", 0) + 1
+        elif t == "tool_result" and not e.get("ok", True):
+            n = e.get("name") or "?"
+            tool_errors[n] = tool_errors.get(n, 0) + 1
         elif t == "turn_complete":
             outcome = e.get("outcome")
     return {"model_calls": model_calls, "tool_calls": tool_calls,
             "gen_tokens": gen_tokens, "reasoning_tokens": reasoning_tokens,
-            "ctx_peak": ctx_peak, "outcome": outcome}
+            "ctx_peak": ctx_peak, "outcome": outcome,
+            "by_tool": by_tool, "tool_errors": tool_errors}
 
 
 def validate(workdir: Path, cmd: str) -> bool:
