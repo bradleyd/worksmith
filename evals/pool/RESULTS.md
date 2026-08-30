@@ -15,10 +15,31 @@ quoted later without them.
 | fine | **22/22** | **pass** | **3,288** | 2,784s |
 
 One model, one specification, one grader. Cut into three tasks it cannot finish
-the first. Cut into twenty-two it finishes all of them, and the shared
-end-to-end check — which drives the CLI as a subprocess and knows nothing about
-how the work was divided — passes on the program it actually wrote. Nothing was
-spliced in; `--keep-going` was not used.
+the first. Cut into twenty-two it finishes nearly all of them.
+
+**Replication, run 2 (after an oMLX settings change): 18/22, end-to-end fail.**
+The headline above is one run and should not have been written as settled.
+
+| | run 1 | run 2 |
+|---|---|---|
+| solved | 22/22 | 18/22 |
+| end-to-end | pass | fail |
+| tok/solved | 3,288 | 2,970 |
+| wall | 2,784s | 2,545s |
+
+The entire difference is one task on the timeout boundary. `fr-rows` hit the
+900s cap in both runs — 23,135 tokens, then 25,246 — and in run 1 its check
+happened to pass on work already written, in run 2 it did not. `pa-negative`
+also hit the cap in run 2 and passed the same way. So **the 900s budget, not
+the model, decides whether this reads 22/22 or 18/22**: the same class of
+artifact as the `gen_tok=0` bug, and harder to catch because either number
+looks plausible.
+
+What survives both runs: **the 4B solves 18–22 of 22 fine tasks and 0 of 3
+coarse ones.** That ordering is the result. The clean "22/22 with a working
+program" is a demonstration still owed a run with a budget that fits the work.
+
+Nothing was spliced in; `--keep-going` was not used in either run.
 
 Cost per solved task fell 4.6x from medium to fine, so the granularity that
 made it possible also made it cheaper. Wall clock tripled, which is the trade
