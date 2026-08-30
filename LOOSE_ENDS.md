@@ -15,6 +15,37 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
+- **The model rewrites whole files instead of editing them, and it costs both
+  tokens and correctness.** Measured 2026-08-30 on Qwen3.5-4B over 22 tasks: the
+  median model call generates 140 tokens, but `pa-reject` averaged **1,201
+  tokens per call across 23 consecutive calls**, 27,615 in total, and still
+  failed. That size is a whole-file rewrite plus a sentence of explanation, over
+  and over, when the task was to add one rejection rule to an existing function.
+
+  It is not just cost. Inspected directly, the model rebuilt `parse_amount`
+  around the new constraint and dropped three behaviours earlier tasks had
+  established: its version rejected `$5` and `-$4.75`, and re-rejected commas
+  that an earlier task existed to add. The regression only surfaced because that
+  task's check re-asserts the earlier cases. Same instinct on the bare arm with
+  no harness at all, so it is the model's habit rather than something the loop
+  induces.
+
+  **`rustopedia/` already solved this** and the parts are general: SEARCH/REPLACE
+  patch blocks instead of whole-file writes, anchor matching against the real
+  file, apply into a scratch git worktree, and a retry loop
+  (`src/retry_loop.rs`) with named failure classes — patch-format drift, anchor
+  mismatch, validation failure — each with a directive that shows the model the
+  actual file slice it got wrong. PLAN.md §3 already lists `retry_loop.rs` as a
+  port-don't-re-derive candidate; this is the evidence for why it matters.
+
+  Worth noting it is not a code-only fix. The same anchored-patch shape applies
+  to editing a document or a research note, which is most of what the newsletter
+  fixture does.
+
+  Unconfirmed: whether the model is choosing `write` over the existing `edit`
+  tool, or whether `edit` is failing and it falls back. A kept session
+  transcript from one `pa-reject` run answers it.
+
 - **`config check` accepts `--trust-project` and ignores it.** The flag is on
   the subcommand's `--help`, but `run_config_check` never passes it:
   `Check::run(cwd, probe)` consults only the trust store, so an untrusted
