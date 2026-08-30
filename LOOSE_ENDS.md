@@ -15,36 +15,42 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
-- **The model rewrites whole files instead of editing them, and it costs both
-  tokens and correctness.** Measured 2026-08-30 on Qwen3.5-4B over 22 tasks: the
-  median model call generates 140 tokens, but `pa-reject` averaged **1,201
-  tokens per call across 23 consecutive calls**, 27,615 in total, and still
-  failed. That size is a whole-file rewrite plus a sentence of explanation, over
-  and over, when the task was to add one rejection rule to an existing function.
+- **A task can fail nine checks in a row and nothing notices it is going
+  nowhere.** `pa-reject` on Qwen3.5-4B, three isolated runs: 0/3, taking 327s,
+  900s (timed out) and 436s, burning 9,033 / 24,939 / 13,650 generated tokens.
+  In every run the model read the file, made valid `edit` calls, ran its check,
+  failed, and edited again.
 
-  It is not just cost. Inspected directly, the model rebuilt `parse_amount`
-  around the new constraint and dropped three behaviours earlier tasks had
-  established: its version rejected `$5` and `-$4.75`, and re-rejected commas
-  that an earlier task existed to add. The regression only surfaced because that
-  task's check re-asserts the earlier cases. Same instinct on the bare arm with
-  no harness at all, so it is the model's habit rather than something the loop
-  induces.
+  **It is not a tool-choice problem.** Across those three runs: 32 `edit` calls,
+  **zero** `edit` errors, and **zero** `write` calls. The model reaches for the
+  right tool and uses it correctly. An earlier note here claimed whole-file
+  rewriting, built on one run averaging 1,201 generated tokens per model call;
+  the three instrumented runs average 311, 500 and 580, and the theory does not
+  survive them. Corrected rather than deleted, because the wrong version is in
+  the git history.
 
-  **`rustopedia/` already solved this** and the parts are general: SEARCH/REPLACE
-  patch blocks instead of whole-file writes, anchor matching against the real
-  file, apply into a scratch git worktree, and a retry loop
-  (`src/retry_loop.rs`) with named failure classes — patch-format drift, anchor
-  mismatch, validation failure — each with a directive that shows the model the
-  actual file slice it got wrong. PLAN.md §3 already lists `retry_loop.rs` as a
-  port-don't-re-derive candidate; this is the evidence for why it matters.
+  What actually happens is a no-progress loop: valid edits, the same check
+  failing the same way, over and over. The harness cannot see it. The supervisor
+  keys its repeat detector on `format!("{name}::{arguments}")`
+  (`supervisor.rs:159`), so it only catches literally identical calls — which is
+  why what finally stopped two of these runs was noticing the same `bash`
+  command five times, several minutes in, rather than the nine failed checks.
+  And `agent.rs:610` already counts consecutive validation failures, but counts
+  *any* failures: three different errors is a model working through a problem,
+  three identical ones is not, and it treats them alike.
 
-  Worth noting it is not a code-only fix. The same anchored-patch shape applies
-  to editing a document or a research note, which is most of what the newsletter
-  fixture does.
+  **The fix is small and the plumbing exists.** `Event::Validation { ok, detail }`
+  (`event.rs:61`) is already emitted on every failed check with the check's
+  output as `detail`, and `Supervisor` already has the
+  `HashMap<String, u32>` + threshold + nudge-then-escalate shape. What is missing
+  is a match arm. Normalise the detail first: our own failures carry a temp path
+  and a `line 32` that moves every time the model edits above it, so a raw hash
+  changes precisely when the model is editing, which is when you need it not to.
 
-  Unconfirmed: whether the model is choosing `write` over the existing `edit`
-  tool, or whether `edit` is failing and it falls back. A kept session
-  transcript from one `pa-reject` run answers it.
+  Not needed, having checked: search/replace (that is `edit`, already anchored
+  and unique-match), a `write` nudge (never called), or a port from
+  `rustopedia/` (its circuit breaker guards patch-format drift, which worksmith
+  structurally cannot have, since tool calls are schema-validated).
 
 - **`config check` accepts `--trust-project` and ignores it.** The flag is on
   the subcommand's `--help`, but `run_config_check` never passes it:
