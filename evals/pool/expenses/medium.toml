@@ -7,6 +7,7 @@ files = ["expenses.csv", "check.py", "SPEC.md"]
 
 [[task]]
 id = "parse-amount"
+seed = "03-fc-signs"
 prompt = "Implement parse_amount in money.py, per SPEC.md section 1."
 validate = '''
 python3 - <<'PY'
@@ -27,6 +28,7 @@ PY
 
 [[task]]
 id = "format-cents"
+seed = ""
 prompt = "Implement format_cents in money.py, per SPEC.md section 1."
 validate = '''
 python3 - <<'PY'
@@ -41,6 +43,7 @@ PY
 
 [[task]]
 id = "parse-line"
+seed = "08-pa-reject"
 needs = ["parse-amount"]
 prompt = "Implement parse_line in records.py, per SPEC.md section 2."
 validate = '''
@@ -60,6 +63,7 @@ PY
 
 [[task]]
 id = "parse-file"
+seed = "12-pl-reject"
 needs = ["parse-line"]
 prompt = "Implement parse_file in records.py, per SPEC.md section 2."
 validate = '''
@@ -79,6 +83,7 @@ PY
 
 [[task]]
 id = "totals"
+seed = "15-pf-blanks"
 needs = ["parse-file"]
 prompt = "Implement totals_by_category in report.py, per SPEC.md section 3."
 validate = '''
@@ -93,6 +98,7 @@ PY
 
 [[task]]
 id = "ranked"
+seed = "16-totals"
 prompt = "Implement ranked in report.py, per SPEC.md section 3."
 validate = '''
 python3 - <<'PY'
@@ -106,6 +112,7 @@ PY
 
 [[task]]
 id = "format-report"
+seed = "18-ranked-ties"
 needs = ["totals", "ranked", "format-cents"]
 prompt = "Implement format_report in report.py, per SPEC.md section 3."
 validate = '''
@@ -126,6 +133,7 @@ PY
 
 [[task]]
 id = "cli"
+seed = "20-fr-total"
 needs = ["format-report", "parse-file"]
 prompt = "Implement cli.py, per SPEC.md section 4."
 validate = "python3 check.py"

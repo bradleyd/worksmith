@@ -51,8 +51,15 @@ def target_file(task: dict) -> str:
     return m.group(1) if m else "solution.py"
 
 
-def build_prompt(task: dict, seed: Path | None, target: str) -> str:
+def build_prompt(task: dict, seed: Path | None, target: str,
+                 spec: str | None = None) -> str:
     parts = [task["prompt"].strip()]
+    # A task that says "see SPEC.md section 1" is under-specified without it,
+    # and the harness runs have the file sitting in the working directory. Not
+    # supplying it here would measure this script's omission rather than the
+    # task's shape — and nine of fine.toml's twenty-two tasks point at it.
+    if spec and "SPEC" in task["prompt"]:
+        parts.append(f"--- SPEC.md ---\n{spec.rstrip()}")
     if seed:
         files = sorted(p for p in seed.glob("*.py"))
         if files:
@@ -69,7 +76,11 @@ def main() -> int:
     ap.add_argument("model")
     ap.add_argument("--backlog", default="fine.toml")
     ap.add_argument("-n", type=int, default=3, help="attempts per task")
-    ap.add_argument("--max-tokens", type=int, default=3000)
+    # 3000 was not enough once SPEC.md is in the prompt: the model answers at
+    # length and both attempts at pa-reject were cut off mid-function. A
+    # truncated answer is reported as truncated rather than wrong, but it is
+    # still a wasted call.
+    ap.add_argument("--max-tokens", type=int, default=6000)
     ap.add_argument("--think", action="store_true")
     ap.add_argument("--json")
     ap.add_argument("--task", help="only this task id")
@@ -83,19 +94,30 @@ def main() -> int:
     snaps = sorted((exp / "snapshots").iterdir()) if (exp / "snapshots").is_dir() else []
     by_id = {d.name.split("-", 1)[1]: d for d in snaps}
 
+    spec_path = exp / backlog.get("spec", "SPEC.md")
+    spec = spec_path.read_text() if spec_path.exists() else None
     base, key, name = provider_of(args.model)
     rows, solved, attempted = [], 0, 0
     for i, task in enumerate(tasks):
         if not task.get("validate"):
             continue
-        # Seed from the previous task's snapshot; the first task starts empty.
-        prev = tasks[i - 1]["id"] if i else None
-        seed = by_id.get(prev) if prev else None
-        if prev and seed is None:
-            print(f"  SKIP {task['id']}: no snapshot for {prev}", file=sys.stderr)
-            continue
+        # A task may name its starting state explicitly (`seed = "08-pa-reject"`),
+        # which is what lets the coarser backlogs run here at all: their tasks do
+        # not line up one-to-one with fine.toml's stages, so "the previous task's
+        # snapshot" is only the right default within fine.toml itself.
+        # `seed = ""` means start from an empty directory.
+        if "seed" in task:
+            seed = (exp / "snapshots" / task["seed"]) if task["seed"] else None
+            if seed is not None and not seed.is_dir():
+                sys.exit(f"{task['id']}: no snapshot {task['seed']!r}")
+        else:
+            prev = tasks[i - 1]["id"] if i else None
+            seed = by_id.get(prev) if prev else None
+            if prev and seed is None:
+                print(f"  SKIP {task['id']}: no snapshot for {prev}", file=sys.stderr)
+                continue
         target = target_file(task)
-        prompt = build_prompt(task, seed, target)
+        prompt = build_prompt(task, seed, target, spec)
         passes = truncated = 0
         for _ in range(args.n):
             text, usage, finish = ask(base, key, name, prompt, args.max_tokens,

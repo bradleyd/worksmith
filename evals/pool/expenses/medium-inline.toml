@@ -7,6 +7,7 @@ files = ["expenses.csv", "check.py"]
 
 [[task]]
 id = "parse-amount"
+seed = "03-fc-signs"
 prompt = """
 Implement parse_amount(s: str) -> int in money.py — a text amount to cents.
 parse_amount("$12.50") == 1250. parse_amount("$1,234.56") == 123456 (commas are
@@ -34,6 +35,7 @@ PY
 
 [[task]]
 id = "format-cents"
+seed = ""
 prompt = """
 Implement format_cents(n: int) -> str in money.py — cents to text.
 format_cents(1250) == "$12.50". format_cents(123456) == "$1,234.56".
@@ -53,6 +55,7 @@ PY
 
 [[task]]
 id = "parse-line"
+seed = "08-pa-reject"
 needs = ["parse-amount"]
 prompt = """
 Implement parse_line(line: str) -> dict in records.py — one CSV row to a record.
@@ -81,6 +84,7 @@ PY
 
 [[task]]
 id = "parse-file"
+seed = "12-pl-reject"
 needs = ["parse-line"]
 prompt = """
 Implement parse_file(path: str) -> list[dict] in records.py — a file to records,
@@ -106,6 +110,7 @@ PY
 
 [[task]]
 id = "totals"
+seed = "15-pf-blanks"
 needs = ["parse-file"]
 prompt = """
 Implement totals_by_category(rows) -> dict[str, int] in report.py — the net cents
@@ -125,6 +130,7 @@ PY
 
 [[task]]
 id = "ranked"
+seed = "16-totals"
 prompt = """
 Implement ranked(totals) -> list[tuple[str, int]] in report.py — (category, total)
 sorted by total descending, ties broken by category name ascending.
@@ -144,6 +150,7 @@ PY
 
 [[task]]
 id = "format-report"
+seed = "18-ranked-ties"
 needs = ["totals", "ranked", "format-cents"]
 prompt = """
 Implement format_report(rows) -> str in report.py — the whole report, no trailing
@@ -178,6 +185,7 @@ PY
 
 [[task]]
 id = "cli"
+seed = "20-fr-total"
 needs = ["format-report", "parse-file"]
 prompt = """
 Implement cli.py. `python3 cli.py <path>` prints format_report(parse_file(path))
