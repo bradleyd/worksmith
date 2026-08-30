@@ -41,6 +41,23 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from floor import ask, provider_of  # noqa: E402
 
+# USD per million tokens (input, output), for the arms this compares. Local
+# models are free to run, which is the entire point of the comparison, so the
+# number that matters is what the frontier arm costs to reach the same place.
+PRICES = {
+    "openrouter/anthropic/claude-sonnet-5": (2.00, 10.00),
+    "openrouter/anthropic/claude-sonnet-4.5": (3.00, 15.00),
+    "openrouter/qwen/qwen3.5-9b": (0.10, 0.15),
+    "openrouter/mistralai/ministral-14b-2512": (0.20, 0.20),
+}
+
+
+def cost_of(model: str, prompt_tok: int, gen_tok: int) -> float:
+    """0.0 for anything local — free to run is the claim being tested."""
+    pin, pout = PRICES.get(model, (0.0, 0.0))
+    return (prompt_tok * pin + gen_tok * pout) / 1e6
+
+
 PY = re.compile(r"\b(\w+\.py)\b")
 FENCE = re.compile(r"```(?:python)?\n(.*?)```", re.S)
 
@@ -98,6 +115,7 @@ def main() -> int:
     spec = spec_path.read_text() if spec_path.exists() else None
     base, key, name = provider_of(args.model)
     rows, solved, attempted = [], 0, 0
+    tok_in = tok_out = 0
     for i, task in enumerate(tasks):
         if not task.get("validate"):
             continue
@@ -122,6 +140,8 @@ def main() -> int:
         for _ in range(args.n):
             text, usage, finish = ask(base, key, name, prompt, args.max_tokens,
                                       args.think)
+            tok_in += usage.get("prompt_tokens", 0) or 0
+            tok_out += usage.get("completion_tokens", 0) or 0
             if finish == "length":
                 truncated += 1
                 continue
@@ -142,18 +162,33 @@ def main() -> int:
         attempted += graded
         solved += passes
         rows.append({"id": task["id"], "passes": passes, "graded": graded,
-                     "truncated": truncated})
+                     "truncated": truncated,
+                     # Consistency, not just the mean: a task that passes every
+                     # attempt is usable in a pipeline; one that passes three of
+                     # five is a coin flip wearing a percentage.
+                     "reliable": graded > 0 and passes == graded,
+                     "flaky": 0 < passes < graded})
         flag = f"  ({truncated} truncated)" if truncated else ""
         print(f"  {task['id']:<16} {passes}/{graded}{flag}", file=sys.stderr)
 
     pct = 100 * solved / attempted if attempted else 0
+    rel = sum(1 for r in rows if r["reliable"])
+    flaky = sum(1 for r in rows if r["flaky"])
+    never = sum(1 for r in rows if r["graded"] and r["passes"] == 0)
+    cost = cost_of(args.model, tok_in, tok_out)
     print(f"\n{args.model} · {args.backlog} · bare, {args.n} attempts each")
     print(f"{solved}/{attempted} attempts passed ({pct:.0f}%) "
           f"across {len(rows)} tasks")
+    print(f"tasks: {rel} always pass · {flaky} flaky · {never} never pass")
+    print(f"tokens: {tok_in:,} in / {tok_out:,} out"
+          + (f" · ${cost:.4f}" if cost else " · local, no API cost"))
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"model": args.model, "backlog": args.backlog, "n": args.n,
-             "solved": solved, "attempted": attempted, "tasks": rows}, indent=2))
+             "solved": solved, "attempted": attempted,
+             "always_pass": rel, "flaky": flaky, "never_pass": never,
+             "prompt_tokens": tok_in, "completion_tokens": tok_out,
+             "usd": round(cost, 4), "tasks": rows}, indent=2))
     return 0
 
 
