@@ -46,6 +46,25 @@ capability a model lacks, and above some line it is pure overhead.
 That narrows the pitch on purpose. This earns its keep when the model is weak
 enough to need it.
 
+**A tighter measurement, on 22 tasks.** The eval above turns validation off by
+flipping one flag, which still leaves the model its tools and its retries. So we
+built a control that removes the harness entirely: one shot at the task, no
+tools, no supervisor, no timeout, graded by the same check. A Qwen3.5-4B scores
+56% that way. The same model on the same tasks with the harness in the loop
+scores 95%. A bare 9B, more than twice the parameters, manages 80%.
+
+For reference, Claude Sonnet 5 one-shots all 22 tasks, three times out of three,
+for 26 cents. The local model is free and takes 35 minutes instead of a few.
+Pick accordingly.
+
+Getting to those numbers took four wrong answers first, and they are written up
+alongside the right one in [Measuring the harness](https://worksmith.sh/guide/measuring/).
+Three of them were bugs in the measurement that produced plausible looking
+results: a timeout that discarded the evidence of what it interrupted, two
+timeouts set to the same value so a stall got killed before it could be
+reported, and a "do not think" flag that one provider silently ignores. If you
+want to argue with the claim, start there.
+
 ## Install
 
 **Homebrew** (macOS, no Rust toolchain needed):
