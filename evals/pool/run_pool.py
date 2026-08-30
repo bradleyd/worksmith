@@ -174,7 +174,7 @@ def prompt_for(task: dict, produced: dict) -> str:
 
 def run_task(binp: str, task: dict, workdir: Path, produced: dict,
              model: str | None, timeout: int, fast: bool = False,
-             think: str | None = None) -> dict:
+             think: str | None = None, trace_dir: Path | None = None) -> dict:
     cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
     if model:
         cmd += ["--model", model]
@@ -196,11 +196,13 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
            "tool_calls": 0, "model_calls": 0, "reasoning_tokens": 0,
            "elapsed": 0.0, "wrote": [], "error": None, "confidently_wrong": False,
            "timed_out": False, "by_tool": {}, "tool_errors": {}}
+    stream = ""
     t0, w0 = time.monotonic(), time.time()
     try:
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
                            timeout=timeout)
-        row.update(parse_events(r.stdout))
+        stream = r.stdout
+        row.update(parse_events(stream))
         if r.returncode != 0:
             row["error"] = (r.stderr or "").strip()[:200]
     except subprocess.TimeoutExpired as e:
@@ -212,6 +214,7 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
         partial = e.stdout or ""
         if isinstance(partial, bytes):
             partial = partial.decode("utf-8", "replace")
+        stream = partial
         row.update(parse_events(partial))
         row["timed_out"] = True
         row["error"] = (f"timeout after {timeout}s "
@@ -231,6 +234,23 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
         row["slept_secs"] = round(slept, 1)
         print(f"  !! machine slept ~{slept / 60:.0f}m during {task['id']} — "
               "this run is not clean", file=sys.stderr)
+
+    if trace_dir is not None:
+        # Keep the raw event stream. worksmith already emits every model call,
+        # tool call, tool result, validation failure with its output, and nudge;
+        # this function reduces all of it to a handful of counters and then the
+        # process is gone.
+        #
+        # That cost three wrong diagnoses in one day — whole-file rewriting, the
+        # supervisor being the right place, the outer loop being the right layer
+        # — and each one needed a fresh run with fresh instrumentation to settle,
+        # because the evidence from the previous run no longer existed. Keeping
+        # it makes a past run re-analysable instead of re-runnable, which for a
+        # 900-second task is the difference between an answer and an afternoon.
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        n = len(list(trace_dir.glob(f"{task['id']}*.jsonl")))
+        (trace_dir / f"{task['id']}{'' if not n else f'-{n}'}.jsonl").write_text(
+            locals().get("stream") or "")
 
     after = snapshot(workdir)
     row["wrote"] = sorted(n for n in after if before.get(n) != after.get(n))
@@ -320,7 +340,8 @@ def seed_for(backlog: dict, tasks: list, i: int) -> Path | None:
 
 
 def run_independent(backlog: dict, binp: str, model: str | None, timeout: int,
-                    fast: bool, think: str | None) -> dict:
+                    fast: bool, think: str | None,
+                    trace_dir: Path | None = None) -> dict:
     """Every task on its own, seeded from a snapshot — the harness arm of the
     comparison with `bare.py`.
 
@@ -341,7 +362,8 @@ def run_independent(backlog: dict, binp: str, model: str | None, timeout: int,
         if seed:
             for f in seed.glob("*.py"):
                 shutil.copy(f, workdir / f.name)
-        row = run_task(binp, task, workdir, {}, model, timeout, fast, think)
+        row = run_task(binp, task, workdir, {}, model, timeout, fast, think,
+                       trace_dir)
         shutil.rmtree(workdir, ignore_errors=True)
         rows.append(row)
         attempted += 1
@@ -367,7 +389,7 @@ def run_independent(backlog: dict, binp: str, model: str | None, timeout: int,
 
 def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
              keep: bool, keep_going: bool = False, fast: bool = False,
-             think: str | None = None) -> dict:
+             think: str | None = None, trace_dir: Path | None = None) -> dict:
     """The readiness gate. A task runs when every id in `needs` has passed.
 
     Deliberately sequential. Tasks share one directory and a backlog does not
@@ -406,7 +428,7 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
         tid = ready[0]
         remaining.remove(tid)
         row = run_task(binp, tasks[tid], workdir, produced, model, timeout,
-                       fast, think)
+                       fast, think, trace_dir)
         row["tainted"] = tainted
         rows.append(row)
         if row["passed"]:
@@ -520,6 +542,11 @@ def main() -> int:
     ap.add_argument("--think", metavar="LEVEL")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--json")
+    ap.add_argument("--trace", metavar="DIR", type=Path,
+                    help="save each task's raw event stream here. worksmith "
+                         "already emits every call, result and check failure; "
+                         "without this the run reduces it to counters and the "
+                         "evidence is gone when a diagnosis turns out wrong.")
     ap.add_argument("--keep", action="store_true",
                     help="keep the scratch dir when the end-to-end check fails")
     ap.add_argument("--bin", help="run this instead of worksmith. The dispatcher "
@@ -551,10 +578,10 @@ def main() -> int:
                            "task": [t for t in backlog["task"] if t["id"] in keep]}
             if args.independent or args.task:
                 r = run_independent(backlog, binp, args.model, args.timeout,
-                                    args.fast, args.think)
+                                    args.fast, args.think, args.trace)
             else:
                 r = dispatch(backlog, binp, args.model, args.timeout, args.keep,
-                             args.keep_going, args.fast, args.think)
+                             args.keep_going, args.fast, args.think, args.trace)
             r["run"] = i
             results.append(r)
             if args.json:
