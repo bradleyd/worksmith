@@ -45,6 +45,16 @@ if mode == "slow":
 
 FAILURES = []
 
+# The `perfect` stub writes the reference solution, so every assertion below
+# assumes the reference is correct. It has already been wrong once — an agent
+# overwrote reference/money.py mid-sweep — and the symptom was this file failing
+# in a way that pointed at the dispatcher. Check the premise before the tests.
+_v = subprocess.run([sys.executable, str(HERE / "verify.py")],
+                    capture_output=True, text=True)
+if _v.returncode != 0:
+    sys.exit("reference is not pristine; fix it before trusting these tests:\n"
+             + _v.stdout + _v.stderr)
+
 
 def check(label, got, want):
     if got != want:

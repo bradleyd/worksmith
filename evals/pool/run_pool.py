@@ -32,7 +32,80 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run import MANIFEST, REPO, parse_events, worksmith_bin  # noqa: E402
+
+
+def server_status(model: str | None) -> dict | None:
+    """Counters from a local model server, if it keeps any.
+
+    oMLX exposes `/api/status` unauthenticated. It answers the question tok/s
+    cannot: this workload is prefill-dominated — a fresh process per task means
+    the same ~2,900-token system prompt is re-sent on every turn of every task —
+    so the numbers that matter are the cache hit rate and the prefill/generate
+    split, neither of which shows up in tokens per second.
+
+    Returns None for anything that does not answer, which includes every hosted
+    provider. A sweep must not fail because a server keeps no statistics.
+    """
+    if not model:
+        return None
+    try:
+        from floor import provider_of
+        base, key, _ = provider_of(model)
+    except SystemExit:
+        return None
+    url = base.rsplit("/v1", 1)[0] + "/api/status"
+    r = subprocess.run(["curl", "-s", "--max-time", "5", url,
+                        "-H", f"Authorization: Bearer {key}"],
+                       capture_output=True, text=True)
+    try:
+        d = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    return d if "total_prompt_tokens" in d else None
+
+
+def status_delta(before: dict | None, after: dict | None,
+                 wall: float) -> dict | None:
+    """What the server did during *this backlog*, and nothing else.
+
+    The server's counters are cumulative since it started, so every figure here
+    is a subtraction. That matters more than it sounds: `cache_efficiency` and
+    `avg_*_tps` as served are lifetime averages, and reporting them beside one
+    sweep's pass rates would attribute another run's cache warmth to this one.
+    Efficiency is therefore recomputed from the delta, and throughput is derived
+    from this backlog's own token counts and wall clock rather than borrowed.
+
+    The lifetime rates are still carried, under names that say so, because they
+    are the only clean read on what the hardware does — a per-run rate includes
+    process spawn, tool execution and check runs, which is the right number for
+    "how long will a sweep take" and the wrong one for "how fast is the GPU".
+    """
+    if not before or not after:
+        return None
+    d = {k: after.get(k, 0) - before.get(k, 0)
+         for k in ("total_prompt_tokens", "total_completion_tokens",
+                   "total_cached_tokens", "total_requests")}
+    prompt, cached, gen = (d["total_prompt_tokens"], d["total_cached_tokens"],
+                           d["total_completion_tokens"])
+    d["cache_efficiency"] = round(100 * cached / prompt, 1) if prompt else None
+    d["uncached_prompt_tokens"] = max(prompt - cached, 0)
+    # The ratio this workload lives or dies by: a fresh process per task re-sends
+    # the whole system prompt every turn, so prompt tokens dwarf generated ones.
+    d["prompt_per_completion"] = round(prompt / gen, 1) if gen else None
+    d["effective_generation_tps"] = round(gen / wall, 1) if wall else None
+    d["lifetime_prefill_tps"] = after.get("avg_prefill_tps") or 0
+    d["lifetime_generation_tps"] = after.get("avg_generation_tps") or 0
+    # Where the time went, using the hardware's own rates: the uncached prompt
+    # tokens are what actually cost prefill, which is the whole point of a cache.
+    pre, gtps = d["lifetime_prefill_tps"], d["lifetime_generation_tps"]
+    if pre and gtps:
+        d["prefill_secs"] = round(d["uncached_prompt_tokens"] / pre, 1)
+        d["generate_secs"] = round(gen / gtps, 1)
+        tot = d["prefill_secs"] + d["generate_secs"]
+        d["prefill_share"] = round(100 * d["prefill_secs"] / tot, 1) if tot else None
+    return d
 
 
 def load(path: Path) -> dict:
@@ -162,6 +235,26 @@ def run_task(binp: str, task: dict, workdir: Path, produced: dict,
     return row
 
 
+def reference_ok(backlog: dict) -> bool:
+    """Does the reference still pass the backlog's own end-to-end check?
+
+    Checked rather than assumed because it has already been wrong once: an
+    agent run under `--approve-all` wrote its own broken `format_cents` over
+    `reference/money.py` (worksmith does not confine writes to the cwd —
+    PLAN.md §10a item 1). Nothing complained. The corrupted key then failed a
+    dispatcher test, which is the lucky version; the unlucky version is
+    `--keep-going` splicing broken code into a run and scoring the result.
+    """
+    ref = backlog["dir"] / "reference"
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        for f in list(ref.glob("*.py")) + list((backlog["dir"] / "files").iterdir()):
+            shutil.copy(f, d / f.name)
+        r = subprocess.run(backlog["validate"], shell=True, cwd=d,
+                           capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def repair(workdir: Path, backlog: dict) -> list[str]:
     """Splice the reference solution in, so a failed task stops being a wall.
 
@@ -178,6 +271,10 @@ def repair(workdir: Path, backlog: dict) -> list[str]:
     ref = backlog["dir"] / "reference"
     if not ref.is_dir():
         return []
+    if not reference_ok(backlog):
+        sys.exit(f"reference for {backlog['name']} does not pass its own "
+                 "end-to-end check — refusing to splice it in. Run "
+                 "`python3 evals/pool/verify.py`.")
     names = []
     for f in sorted(ref.glob("*.py")):
         shutil.copy(f, workdir / f.name)
@@ -203,6 +300,7 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
     22-deep chain with no parallelism available to leave on the table.
     """
     workdir = setup(backlog)
+    status_before = server_status(model)
     tasks = {t["id"]: t for t in backlog["task"]}
     done: set[str] = set()
     produced: dict[str, list[str]] = {}
@@ -256,6 +354,8 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
     # An end-to-end pass means nothing once the reference has been spliced in.
     e2e = subprocess.run(["bash", "-lc", backlog["validate"]], cwd=workdir,
                          capture_output=True, text=True)
+    wall = round(sum(r["elapsed"] for r in rows), 1)
+    server = status_delta(status_before, server_status(model), wall)
     scored = [r for r in rows if not r.get("tainted")]
     solved = sum(1 for r in scored if r["passed"])
     total_tok = sum(r["gen_tokens"] for r in scored)
@@ -276,9 +376,18 @@ def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
         # more and succeeds more is not more expensive per unit of work.
         "gen_tokens_per_solved": round(total_tok / solved) if solved else None,
         "timed_out": [r["id"] for r in rows if r["timed_out"]],
-        "wall_clock": round(sum(r["elapsed"] for r in rows), 1),
+        "wall_clock": wall,
+        "server": server,
         "task_rows": rows,
     }
+    if server and server.get("cache_efficiency") is not None:
+        print(f"  server: cache {server['cache_efficiency']}% · "
+              f"prompt {server['total_prompt_tokens']:,} tok / completion "
+              f"{server['total_completion_tokens']:,} tok "
+              f"({server['prompt_per_completion']}:1)"
+              + (f" · prefill {server['prefill_share']}% of compute"
+                 if server.get("prefill_share") is not None else ""),
+              file=sys.stderr)
     if not result["end_to_end"]:
         result["end_to_end_output"] = (e2e.stdout + e2e.stderr).strip()[-600:]
 
