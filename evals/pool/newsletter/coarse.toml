@@ -1,0 +1,54 @@
+name = "newsletter-coarse"
+granularity = "coarse"
+description = "Three tasks — the same work, bundled the way a person would type it"
+validate = "bash check.sh"
+files = ["check.sh"]
+
+[[task]]
+id = "scaffold"
+prompt = """
+Set up the project. Create a directory ideas/ and a directory drafts/. Create
+ideas/topics.md whose first line is exactly '# Topics', followed by exactly
+three bullet points, each on its own line starting with '- ', each naming a
+distinct topic about testing local AI models.
+"""
+validate = "test -d ideas && test -d drafts && head -1 ideas/topics.md | grep -qx '# Topics' && test $(grep -c '^- ' ideas/topics.md) -eq 3"
+
+[[task]]
+id = "article"
+needs = ["scaffold"]
+prompt = """
+Write drafts/article1.md about testing local AI models. Its first line must be
+a level-1 heading: '# ' followed by a title of at least three words. Below it,
+an introduction of at least 60 words. Then a line exactly '## Background'
+followed by at least 80 words. Then a line exactly '## What we tried' followed
+by at least 80 words.
+"""
+validate = '''
+head -1 drafts/article1.md | grep -Eq '^# +\S+( +\S+){2,}' &&
+grep -qx '## Background' drafts/article1.md &&
+grep -qx '## What we tried' drafts/article1.md &&
+test $(sed -n '/^## Background/,$p' drafts/article1.md | tail -n +2 | wc -w) -ge 80 &&
+test $(sed -n '/^## What we tried/,$p' drafts/article1.md | tail -n +2 | wc -w) -ge 80
+'''
+
+[[task]]
+id = "metadata"
+needs = ["article"]
+prompt = """
+Create drafts/article1.meta.json with keys title (the article title without the
+leading '# '), status set to "draft", and word_count set to the number of
+whitespace-separated words in drafts/article1.md. Create README.md listing each
+file in drafts/ as a markdown bullet starting with '- '. Create a Makefile with
+a target named check whose recipe prints the word count of drafts/article1.md,
+indented with a tab.
+"""
+validate = '''
+python3 -c "
+import json; d=json.load(open('drafts/article1.meta.json'))
+assert d['status']=='draft' and len(d['title'].split())>=3
+assert d['word_count']==len(open('drafts/article1.md').read().split())
+print('ok')" &&
+grep -q '^- .*article1\.md' README.md &&
+grep -qE '^check:' Makefile && make -n check >/dev/null 2>&1
+'''
