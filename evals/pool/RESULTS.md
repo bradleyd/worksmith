@@ -1,3 +1,67 @@
+# Pool sweeps — results
+
+Newest first. Each sweep says what held, what did not, and what it found wrong
+with its own design; a result whose caveats are not written next to it gets
+quoted later without them.
+
+# Sweep 2 — local MLX, Qwen3.5-4B-4bit, 2026-08-29
+
+**The result the branch was built to get.**
+
+| backlog | solved | end-to-end | tok/solved | wall |
+|---|---|---|---|---|
+| coarse | 0/3 | fail | — | 900s (timed out on task 1) |
+| medium | 2/8 | fail | 15,228 | 1,340s |
+| fine | **22/22** | **pass** | **3,288** | 2,784s |
+
+One model, one specification, one grader. Cut into three tasks it cannot finish
+the first. Cut into twenty-two it finishes all of them, and the shared
+end-to-end check — which drives the CLI as a subprocess and knows nothing about
+how the work was divided — passes on the program it actually wrote. Nothing was
+spliced in; `--keep-going` was not used.
+
+Cost per solved task fell 4.6x from medium to fine, so the granularity that
+made it possible also made it cheaper. Wall clock tripled, which is the trade
+this project takes.
+
+**Three of the 22 passed while the model was failing.** `pf-read` ended
+`stuck: repeated bash 5 times`, `fr-rows` and one other hit the 900s clock — and
+their checks passed anyway, because the work was already correct and only the
+model's stopping was broken. The check is the arbiter, not the model's account
+of itself. That is the whole thesis in three rows.
+
+**Floor check first, and it is what makes this readable.** Bare, no harness, no
+tools, one shot at the smallest task: 2B **0/5**, 9B **1/3**, 4B **5/5**
+(`evals/pool/floor.py`). The 2B is below the floor, so granularity has nothing
+to work with. The 27B is above it (33/33 everywhere), so there is no headroom.
+The 4B sits between, which is why it is the rung that shows the effect.
+
+## The caveat this sweep found in its own design
+
+Weak models given a medium task **implement the whole specification**. Both the
+9B and the 4B, asked only for `parse_amount`, wrote `cli.py`, `money.py`,
+`records.py` and `report.py` — then failed, debugging four files against a check
+that tests one function.
+
+That is the shared-`SPEC.md` decision biting back. Making it complete and
+identical removed the information confound; it also hands a weak model the whole
+job on every task, so a "small task" is not small in practice.
+
+And it introduces a confound not seen when the backlogs were written: **fine
+tasks are not only smaller, they are more self-contained.**
+
+- medium: "Implement parse_amount in money.py, per SPEC.md section 1." → must
+  read the whole spec
+- fine: "Extend format_cents to insert thousands separators:
+  format_cents(123456) == '$1,234.56'." → expected values inline, never needs
+  the spec
+
+So the gain above may be self-containment rather than size. Separable with one
+more backlog: `medium-inline.toml`, the same 8 tasks at the same granularity
+with expected values inlined. Performing like fine means the lever is
+self-containment; performing like medium means it is size. **Until that runs,
+"granularity helps" is the honest claim and "task size is the lever" is not.**
+
 # Sweep 1 — OpenRouter, 2026-08-29
 
 Three backlogs (3 / 8 / 22 tasks), one shared spec, one shared end-to-end check.
