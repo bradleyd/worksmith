@@ -241,6 +241,8 @@ pub struct Agent {
     max_steps: usize,
     max_retries: usize,
     stuck_threshold: u32,
+    /// Consecutive *identical* check failures before the turn is called stuck.
+    stuck_check_threshold: u32,
     keep_recent_turns: usize,
     tool_ctx: ToolContext,
     steering: Steering,
@@ -290,6 +292,10 @@ impl Agent {
             max_steps,
             max_retries,
             stuck_threshold,
+            // Deliberately not `stuck_threshold`: a repeated tool call may
+            // still be gathering information, while a check that failed
+            // identically has already said everything it is going to.
+            stuck_check_threshold: 3,
             keep_recent_turns,
             tool_ctx,
             steering: Steering::new(),
@@ -456,6 +462,7 @@ impl Agent {
             max_steps: self.max_steps,
             max_retries: self.max_retries,
             stuck_threshold: self.stuck_threshold,
+            stuck_check_threshold: self.stuck_check_threshold,
             keep_recent_turns: self.keep_recent_turns,
             tool_ctx,
             // A fork gets a fresh mailbox — its supervisor attaches its own.
@@ -495,6 +502,10 @@ impl Agent {
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
         let mut failures = 0usize;
+        // The previous check failure, normalised, and how many times running it
+        // has repeated. See the use below.
+        let mut last_failure: Option<String> = None;
+        let mut same_failure = 0u32;
         // Whether the turn has actually changed anything. Fifty steps and no
         // edits is the harness knowing the loop is not working, with nothing
         // to judge — the sharpest mechanical signal of the three.
@@ -604,6 +615,28 @@ impl Agent {
                             }
                             retries_left -= 1;
                             failures += 1;
+                            // Counting failures is not the same as counting
+                            // *identical* failures. Three different errors is a
+                            // model working through a problem; three of the same
+                            // is a model that has stopped learning anything from
+                            // the check. Measured on qwen3.5-4B: one task failed
+                            // the same assertion nine times across valid edits,
+                            // spending 900s and 27k tokens before the clock, not
+                            // the harness, ended it.
+                            let sig = crate::supervisor::normalise_check(&reason);
+                            if last_failure.as_deref() == Some(sig.as_str()) {
+                                same_failure += 1;
+                            } else {
+                                last_failure = Some(sig);
+                                same_failure = 1;
+                            }
+                            if same_failure >= self.stuck_check_threshold {
+                                break TurnOutcome::Stuck(format!(
+                                    "`{}` failed {same_failure} times with identical output; \
+                                     re-planning is not reaching it",
+                                    v.describe()
+                                ));
+                            }
                             // One failure is the loop working — that is the
                             // whole differentiator. Two in a row is the loop
                             // not converging, and a second identical re-plan

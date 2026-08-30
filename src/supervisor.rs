@@ -285,7 +285,7 @@ impl Supervisor {
 /// **moves every time the model edits anything above it** — so a raw comparison
 /// stops matching exactly when the model is editing, which is when it needs to
 /// match. Everything else is left alone: the assertion text is the signal.
-fn normalise_check(detail: &str) -> String {
+pub(crate) fn normalise_check(detail: &str) -> String {
     static RES: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
         std::sync::OnceLock::new();
     let res = RES.get_or_init(|| {
