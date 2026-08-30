@@ -52,6 +52,18 @@ and 4a; compaction no longer trades the whole context for a sentence.
   `rustopedia/` (its circuit breaker guards patch-format drift, which worksmith
   structurally cannot have, since tool calls are schema-validated).
 
+- **An unattended worker can approve its own outward-facing actions.**
+  `approve_write_outside_cwd` (`tools/mod.rs:270`) does gate writes that leave
+  the project, so the earlier note here blaming a missing confinement was wrong:
+  the eval overwrote its own answer key because it passes `--approve-all`, which
+  approves the gate on the model's behalf. That is the eval's choice and fine
+  for the eval. The open question is what a *spawned worker* inherits. Nobody is
+  watching a background worker, so it answering its own approval prompt is the
+  same hazard `PAIR_PLAN.md` names for checkpoints and solves with
+  `RefuseWhenUnattended`. Worth checking which approver `worker.rs` hands out
+  before the supervisor grows any policy role, since enforcement lives in the
+  tool layer and the supervisor only observes.
+
 - **`config check` accepts `--trust-project` and ignores it.** The flag is on
   the subcommand's `--help`, but `run_config_check` never passes it:
   `Check::run(cwd, probe)` consults only the trust store, so an untrusted

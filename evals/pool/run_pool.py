@@ -256,8 +256,9 @@ def reference_ok(backlog: dict) -> bool:
 
     Checked rather than assumed because it has already been wrong once: an
     agent run under `--approve-all` wrote its own broken `format_cents` over
-    `reference/money.py` (worksmith does not confine writes to the cwd —
-    PLAN.md §10a item 1). Nothing complained. The corrupted key then failed a
+    `reference/money.py`. Not because worksmith fails to confine writes:
+    `approve_write_outside_cwd` gates exactly that. Because every run here passes
+    `--approve-all`, so the gate approved itself. The corrupted key then failed a
     dispatcher test, which is the lucky version; the unlucky version is
     `--keep-going` splicing broken code into a run and scoring the result.
     """

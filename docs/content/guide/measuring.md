@@ -124,10 +124,13 @@ reasoning. So the quantisation control was comparing thinking against no
 thinking. Worksmith itself was never wrong here, it picks the right spelling per
 provider.
 
-An agent running with `--approve-all` also overwrote the reference solution the
-whole eval grades against, because nothing confines a write to the working
-directory. The corrupted answer key surfaced as a test failure, which was the
-lucky version.
+An agent also overwrote the reference solution the whole eval grades against.
+The first diagnosis was that nothing confines a write to the working directory,
+and that was wrong: `approve_write_outside_cwd` already gates exactly this and
+tells the model not to retry. What happened is that every eval run passes
+`--approve-all`, so the gate fired and approved itself. The eval turned off the
+protection and then blamed the harness for not having one. The corrupted answer
+key surfaced as a test failure, which was the lucky version.
 
 ## What we still do not know
 
