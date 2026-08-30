@@ -145,6 +145,14 @@ check("timeout keeps token count", row.get("gen_tokens"), 100)
 check("timeout keeps tool calls", row.get("tool_calls"), 1)
 check("timeout is not confidently-wrong", row.get("confidently_wrong"), False)
 
+# --independent: every task attempted from its own snapshot, nothing blocked.
+# This is the arm that gets set beside bare.py, so "nothing blocked" is the
+# property that makes the two numbers subtractable.
+res = run("idle", "fine.toml", "--independent")
+check("independent attempts every task", res.get("ran"), 22)
+check("independent blocks nothing", res.get("blocked"), [])
+check("independent has no end-to-end claim", res.get("end_to_end"), None)
+
 if FAILURES:
     print("\n".join(FAILURES), file=sys.stderr)
     print(f"\n{len(FAILURES)} failed", file=sys.stderr)

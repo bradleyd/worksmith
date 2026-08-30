@@ -294,6 +294,64 @@ def repair(workdir: Path, backlog: dict) -> list[str]:
     return names
 
 
+def seed_for(backlog: dict, tasks: list, i: int) -> Path | None:
+    """The snapshot a task starts from. Same rule as `bare.py`, deliberately:
+    the two arms are only comparable if they start from identical states."""
+    snaps = backlog["dir"] / "snapshots"
+    task = tasks[i]
+    if "seed" in task:
+        return (snaps / task["seed"]) if task["seed"] else None
+    if i == 0:
+        return None
+    d = snaps / f"{i:02d}-{tasks[i - 1]['id']}"
+    return d if d.is_dir() else None
+
+
+def run_independent(backlog: dict, binp: str, model: str | None, timeout: int,
+                    fast: bool, think: str | None) -> dict:
+    """Every task on its own, seeded from a snapshot — the harness arm of the
+    comparison with `bare.py`.
+
+    The chained mode answers "how far does a backlog get before something
+    blocks", which is a different question and the one that produced results
+    decided by a single coin flip at task 8. This answers "what fraction of
+    these tasks does the harness solve", per task, with no task's fate
+    depending on another's — which is the only shape that can be set beside a
+    one-shot bare number and subtracted.
+    """
+    tasks = backlog["task"]
+    rows, solved, attempted = [], 0, 0
+    for i, task in enumerate(tasks):
+        if not task.get("validate"):
+            continue
+        seed = seed_for(backlog, tasks, i)
+        workdir = setup(backlog)
+        if seed:
+            for f in seed.glob("*.py"):
+                shutil.copy(f, workdir / f.name)
+        row = run_task(binp, task, workdir, {}, model, timeout, fast, think)
+        shutil.rmtree(workdir, ignore_errors=True)
+        rows.append(row)
+        attempted += 1
+        solved += row["passed"]
+        mark = "PASS " if row["passed"] else ("TIME " if row["timed_out"] else "FAIL ")
+        print(f"  {mark}{task['id']:<16} {row['elapsed']:>6.1f}s "
+              f"gen_tok={row['gen_tokens']:<6} outcome={row['outcome']}",
+              file=sys.stderr)
+    return {"backlog": backlog["name"], "granularity": backlog.get("granularity"),
+            "mode": "independent", "tasks": len(tasks), "ran": attempted,
+            "scored": attempted, "solved": solved, "blocked": [], "tainted": [],
+            "repaired": [], "timed_out": [r["id"] for r in rows if r["timed_out"]],
+            "slept_during": [r["id"] for r in rows if r.get("slept_secs")],
+            "confidently_wrong": sum(1 for r in rows if r["confidently_wrong"]),
+            "end_to_end": None,
+            "gen_tokens": sum(r["gen_tokens"] for r in rows),
+            "gen_tokens_per_solved": (round(sum(r["gen_tokens"] for r in rows) / solved)
+                                      if solved else None),
+            "wall_clock": round(sum(r["elapsed"] for r in rows), 1),
+            "server": None, "task_rows": rows}
+
+
 def dispatch(backlog: dict, binp: str, model: str | None, timeout: int,
              keep: bool, keep_going: bool = False, fast: bool = False,
              think: str | None = None) -> dict:
@@ -426,6 +484,11 @@ def main() -> int:
                     help="per task, seconds. Keep it above worksmith's "
                          "stream-idle timeout (600s) so a stalled provider is "
                          "reported by worksmith rather than killed here.")
+    ap.add_argument("--independent", action="store_true",
+                    help="run every task on its own, seeded from its snapshot, "
+                         "instead of as a blocking chain. This is the arm that "
+                         "compares with bare.py: same tasks, same starting "
+                         "states, harness the only difference.")
     ap.add_argument("--keep-going", action="store_true",
                     help="on failure, splice in the reference solution and carry "
                          "on, so every task is attempted. Gives a per-task pass "
@@ -460,8 +523,12 @@ def main() -> int:
         for i in range(args.repeat):
             tag = backlog["name"] + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
             print(f"\n=== {tag} ({len(backlog['task'])} tasks) ===", file=sys.stderr)
-            r = dispatch(backlog, binp, args.model, args.timeout, args.keep,
-                         args.keep_going, args.fast, args.think)
+            if args.independent:
+                r = run_independent(backlog, binp, args.model, args.timeout,
+                                    args.fast, args.think)
+            else:
+                r = dispatch(backlog, binp, args.model, args.timeout, args.keep,
+                             args.keep_going, args.fast, args.think)
             r["run"] = i
             results.append(r)
             if args.json:
