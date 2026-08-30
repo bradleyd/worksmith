@@ -4,6 +4,56 @@ Newest first. Each sweep says what held, what did not, and what it found wrong
 with its own design; a result whose caveats are not written next to it gets
 quoted later without them.
 
+# Sweep 3 — the confound wins, 2026-08-29
+
+**Self-containment is the lever. Task size is not.** This inverts the branch's
+thesis, on its own data.
+
+Qwen3.5-4B-4bit, granularity held fixed at 8 tasks with the same dependency
+graph, the same checks and the same grader. The only variable is how the task is
+phrased:
+
+| backlog | tasks | phrasing | solved | per-task |
+|---|---|---|---|---|
+| coarse | 3 | "per SPEC.md §1–2" | 0/3 | 0% |
+| medium | 8 | "per SPEC.md section 1" | 2/8 | 25% |
+| **medium-inline** | **8** | **criteria inlined** | **7/8** | **87.5%** |
+| fine | 22 | criteria inlined | 18–22/22 | 82–100% |
+
+Two readings, and the data separates them cleanly:
+
+- **Hold size, change phrasing** (medium → medium-inline, both 8 tasks):
+  25% → 87.5%. Nearly all of the effect.
+- **Hold phrasing, change size** (medium-inline → fine, both self-contained,
+  8 → 22 tasks): 87.5% → 82–100%. Nothing beyond noise.
+
+So the earlier sweeps measured self-containment and attributed it to
+granularity, because every fine task happened to be both. `medium.toml` says
+"implement parse_amount per SPEC.md section 1"; `medium-inline.toml` says
+`parse_amount("$1,234.56") == 123456` and lists the cases that must raise. The
+model then stops reading a four-module specification and implementing all of it
+— which is what the `wrote=` column showed weak models doing all along.
+
+**What this changes.** "Cut the work into 22 pieces" was expensive advice: it
+needs a planner that can decompose to that grain, which POOL_PLAN §3 called the
+likelier failure and never tested. "Write tasks that carry their own acceptance
+criteria" is cheaper, is already what `--until` does at the session level, and
+generalises past this fixture.
+
+**Caveats.** One run of `medium-inline`; the effect is large (2/8 → 7/8) but
+unreplicated. Both spec-referencing backlogs are also the ones whose prompts are
+shortest, so "inlined" and "longer prompt" are not yet separated — though a
+longer prompt making a weak model *better* is itself the interesting direction.
+`fine` did not run in this sweep: the disk filled and the results write failed
+with ENOSPC after the first backlog.
+
+**Server metrics, first sweep with them wired in** (per-backlog deltas, not
+lifetime): cache 82.5%, prompt 4,168,827 tokens against completion 82,257 —
+**50.7:1** — and prefill 38.1% of compute. The ratio is the number to remember:
+a fresh process per task re-sends the system prompt on every turn, so this
+workload is dominated by prompt tokens by a factor of fifty, and only the cache
+keeps prefill from swamping generation entirely.
+
 # Sweep 2 — local MLX, Qwen3.5-4B-4bit, 2026-08-29
 
 **The result the branch was built to get.**
