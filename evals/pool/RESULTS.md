@@ -4,6 +4,56 @@ Newest first. Each sweep says what held, what did not, and what it found wrong
 with its own design; a result whose caveats are not written next to it gets
 quoted later without them.
 
+# Sweep 5 — the bare arm, and what the branch actually found, 2026-08-30
+
+**Task shape does not help the model. The loop does.**
+
+Every task run with no harness at all — no tools, no retries, no supervisor, no
+timeout — one shot each, three attempts, seeded from a per-task snapshot so each
+is measured independently rather than as a link in a chain. Qwen3.5-4B-4bit.
+
+| backlog | tasks | phrasing | bare pass rate |
+|---|---|---|---|
+| medium | 8 | "per SPEC.md section 1" | 13/22 = **59%** |
+| medium-inline | 8 | criteria inlined | 12/20 = **60%** |
+| fine | 22 | criteria inlined | 35/62 = **56%** |
+
+- **Granularity: no effect.** 8 tasks vs 22, same phrasing: 60% vs 56%.
+- **Self-containment: no effect.** Same 8 tasks, same seeds, phrasing the only
+  variable: 59% vs 60%. Sweep 3's claim is dead, and its 7/8-vs-2/8 was noise.
+
+**What that leaves, and it is the useful part.** Bare, this model solves ~57% of
+these tasks. Inside worksmith's loop it solved 18-22 of 22 of the same tasks.
+The lift is the harness, and it is roughly the +34 points the original
+differentiator eval measured on a 9B — now reproduced per-task, on a different
+model, against a control that removes every harness policy rather than just
+turning off `--until`.
+
+So the branch's premise was wrong in an instructive way. Cutting work small does
+not make a weak model more accurate at each piece; per-attempt accuracy is flat
+at ~57% whatever the size or phrasing. What it changes is **blast radius and
+checkpoint density**. At 57% per attempt a 3-task backlog dies almost at once —
+which is the 0/3 coarse result at every model size, on every provider. A 22-task
+backlog fails just as often per task, but each failure is one small piece the
+validation loop can catch and retry rather than a whole module going wrong at
+once.
+
+That claim is consistent with every number collected here, including the two
+that had to be retracted, and it does not require a planner that can decompose
+to 22 pieces — which POOL_PLAN §3 named as the likelier failure and never
+tested.
+
+**Why the earlier sweeps said otherwise.** Of the first 67 harness-run tasks, 8
+failed and **7 of those 8 were ended by a harness policy** — the supervisor's
+repeat-abort (threshold 3) or the subprocess timeout — not by a wrong answer.
+Both are numbers somebody picked. The chained sweeps were largely measuring when
+worksmith gives up, with task shape as a minor input, and no amount of repeating
+them would have fixed that.
+
+**Cost.** The bare arm is 114 trials in minutes. A single chained sweep is one to
+two hours and yields one coin flip. Everything above should have been measured
+this way first.
+
 # Sweep 4 — sweep 3 does not replicate, 2026-08-30
 
 **Retraction.** Sweep 3's conclusion was drawn from one run of each backlog. Run
