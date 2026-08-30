@@ -20,3 +20,5 @@ __pycache__/
 # Pool sweep scratch output (evals/pool/run_pool.py --json / its log).
 evals/pool/last-run.log
 evals/pool/last-run.json
+evals/pool/queued.log
+evals/pool/frontier.log
