@@ -49,13 +49,21 @@ enough to need it.
 **A tighter measurement, on 22 tasks.** The eval above turns validation off by
 flipping one flag, which still leaves the model its tools and its retries. So we
 built a control that removes the harness entirely: one shot at the task, no
-tools, no supervisor, no timeout, graded by the same check. A Qwen3.5-4B scores
-56% that way. The same model on the same tasks with the harness in the loop
-scores 95%. A bare 9B, more than twice the parameters, manages 80%.
+tools, no supervisor, no timeout, graded by the same check. Three attempts per
+task, every arm.
 
-For reference, Claude Sonnet 5 one-shots all 22 tasks, three times out of three,
-for 26 cents. The local model is free and takes 35 minutes instead of a few.
-Pick accordingly.
+A Qwen3.5-4B scores 56% that way, and 97% with the harness in the loop. A bare
+9B, more than twice the parameters, manages 80%.
+
+The pass rate undersells it. Counting tasks rather than attempts, the same 4B
+goes from 9 that always pass to 20, and from 6 it never passes to none. Nothing
+in the suite is beyond the harness.
+
+Claude Sonnet 5 one-shots all 22 tasks, three times out of three, for 26 cents,
+and is 22 always-pass with no coin flips against the 4B's 20 and 2. Per task
+that is three points. Across a 22 step chain those two coin flips compound, so
+the harness closes most of the gap and not all of it. The local model is free
+and takes 111 minutes instead of a few.
 
 Getting to those numbers took four wrong answers first, and they are written up
 alongside the right one in [Measuring the harness](https://worksmith.sh/guide/measuring/).

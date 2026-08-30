@@ -22,14 +22,19 @@ the loop.
 | arm | passed | always | flaky | never | cost |
 |---|---|---|---|---|---|
 | Claude Sonnet 5, one shot | 66/66, 100% | 22 | 0 | 0 | $0.26 |
-| Qwen3.5-4B + worksmith | 21/22, 95% | pending | pending | pending | free |
+| Qwen3.5-4B + worksmith | 64/66, 97% | 20 | 2 | 0 | free |
 | Qwen3.5-9B, one shot, local 4-bit | 52/65, 80% | 13 | 8 | 1 | free |
 | Qwen3.5-9B, one shot, hosted | 51/65, 78% | 15 | 5 | 2 | $0.0088 |
-| Qwen3.5-4B, one shot | 35/62, 56% | pending | pending | pending | free |
+| Qwen3.5-4B, one shot | 35/62, 56% | 9 | 7 | 6 | free |
 
-The 4B goes from 56% alone to 95% inside the loop, on identical tasks. That is
-worth more than doubling the model: a bare 9B, more than twice the parameters,
-manages 80%.
+Three attempts per task, every arm, same tasks from the same starting states.
+
+The 4B goes from 56% alone to 97% inside the loop. That is worth more than
+doubling the model: a bare 9B, more than twice the parameters, manages 80%.
+
+The consistency columns say it better than the pass rate does. The same 4B goes
+from 9 tasks that always pass to 20, and from 6 tasks it never passes to none.
+There is no task in the suite the harness cannot eventually get right.
 
 Cost is not the interesting part, and we should say so plainly. Sonnet did the
 whole suite for 26 cents, about four tenths of a cent per solved task. Nobody is
@@ -52,6 +57,17 @@ Sonnet has none.
 This matters more than it looks, because chained work compounds. At 95% per
 task, a 22 step chain finishes 32% of the time. At 99% it finishes 80% of the
 time. Consistency is not a nice property here, it is the whole thing.
+
+Which is where the claim stops. Sonnet is 22 always-pass and no coin flips. The
+4B with the harness is 20 and 2. Per task that gap is three points. Across a 22
+step chain those two coin flips compound to about 44% against Sonnet's 100%, so
+the harness closes most of the distance and not all of it.
+
+The two flaky tasks are `pa-reject` and `cli-print`, and both are the same
+failure: the model rewrites the whole file instead of editing it. `pa-reject`
+averages 1,201 generated tokens per model call against a suite median of 140,
+across 23 consecutive calls. So the remaining gap has a name and a known fix,
+which is anchored search and replace patches rather than whole file writes.
 
 ## The four wrong answers
 
@@ -115,10 +131,6 @@ lucky version.
 
 ## What we still do not know
 
-The consistency column for the harness arm is not filled in yet. One pass gives
-21 of 22 and no variance data, and after the 7/8 then 2/8 episode a single pass
-is not evidence.
-
 Three attempts per task is weak resolution for this. A task with a true 90% rate
 still shows 3/3 about three quarters of the time, and 90% per task is a disaster
 across 22 of them.
@@ -127,6 +139,13 @@ Every number here is one fixture of Python coding tasks and one model family. A
 second fixture built around file and directory work, closer to how people
 actually delegate, turned out too easy to separate anything: the 4B passed both
 the 3 task and the 14 task versions.
+
+The Sonnet arm runs on OpenRouter and the 4B runs on a Mac, so the two differ in
+more than the model: different serving stack, different sampling defaults,
+different everything below the API. That is unavoidable if the claim is about
+local models, but it means this compares one local setup against the hosted
+frontier rather than model against model. The 111 minutes is partly the 4B and
+partly a 4-bit MLX model on a Pro-tier chip at about 45 tok/s.
 
 Quantisation is the one thing we can rule out. Local 4-bit scored 80% and the
 same model hosted scored 78%, which is inside the noise.
