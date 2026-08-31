@@ -583,6 +583,39 @@ shows its evidence now, and it can take a question.
   observed failure is never starting, and the validation loop — the whole
   differentiator — only helps a turn that makes an attempt. The step-limit
   checkpoint is the same idea arriving after the budget is gone.
+- **A dashboard, and the case for it is already written down five times.**
+  Suggested from use, borrowing the idea from Neovim's start screen — an
+  overlay or a tab giving a system overview rather than another line of status.
+
+  It is worth taking seriously because **five separate entries above are the
+  same complaint**: the fan-out roster that never prints, the footer whose
+  every number reads zero while workers run, the agent count that truncates off
+  the right edge, the worker tail you cannot follow, and "how does the user know
+  what to do next". Each was filed as its own bug. They are one structural fact:
+  **the TUI has a single status line and a linear transcript, and a fan-out is
+  neither.** N things happening at once cannot be rendered as a stream, and no
+  amount of fixing individual lines changes that.
+
+  What it would hold, all of which the harness already knows and currently
+  cannot show together: each worker with its state, elapsed time, check result
+  and files touched; per-model token and cost totals including the workers';
+  the session's own context usage kept separate from theirs; and what is
+  blocked on the user.
+
+  **Overlay or tab is the wrong first question.** The real one is whether you
+  want to *check* it or *watch* it. The complaints are all of the form "I did
+  not know what was happening while it ran", which is watching — so a pane that
+  can stay up, not a modal you dismiss. The existing `Overlay` is modal and owns
+  the keyboard, so it is the wrong machinery to reuse despite being the closest.
+
+  **Sequencing matters more than the design.** `src/tui.rs` is 5,153 lines and
+  is already the file `LOOSE_ENDS` calls the wound — a 27B made zero edits in it
+  across 404 steps. A dashboard is several hundred more lines. Building it
+  before `TUI_REFACTOR.md` §3 (R1 splits `App` into focused structs, R4 breaks
+  up `handle_command`) makes the project's own thesis harder to demonstrate in
+  the project's own codebase. After the split it is a new module with a clear
+  seam, which is the difference between paying the debt and adding to it.
+
 - **A notification hook.** `[notify] on = [...]` running a shell command off the
   event bus. One-way only: inbound control would mean the approval gate answers
   to something other than a person at the terminal. The valuable event is
