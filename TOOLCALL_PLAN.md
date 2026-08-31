@@ -468,6 +468,53 @@ tests pass" cannot see it, which is the same shape as the scaffold check that
 could not fail: **the test suite is not the specification, and a model under a
 fence will find whatever the fence left open.**
 
+## Measured: is the parser needed, or is `--fast` the fix?
+
+`evals/pool/expenses/medium.toml`, 8 tasks, `--independent --keep-going`,
+`openrouter/qwen/qwen3.5-9b`, same binary both arms. One variable: thinking on
+(config default, 2000-token budget) against `--fast`.
+
+| | rescued | gen tokens | tasks done |
+|---|---|---|---|
+| thinking on | **118 / 219 (54%)** | 62,381 | **7 / 8** |
+| `--fast` | **0 / 172 (0%)** | 29,104 | 5 / 8 |
+
+Per task, rescued/total:
+
+| task | thinking | `--fast` |
+|---|---|---|
+| parse-file | 52/90 | 0/18 |
+| parse-amount | 21/35 | 0/27 |
+| parse-line | 17/26 | 0/36 |
+| totals | 16/23 | 0/28 |
+| cli | 9/11 | 0/11 |
+| format-cents | 3/8 | 0/22 |
+| format-report | 0/19 | 0/22 |
+| ranked | 0/7 | 0/8 |
+
+**The format drop is a symptom of reasoning, and the effect is absolute.** Not
+reduced — eliminated. Zero across 172 tool calls, against 54% across 219. Six of
+eight tasks hit it with thinking on, and the worst was 58%. That is a large
+enough N of tool calls to call settled.
+
+**But `--fast` is not the fix, and the run says so.** It passes fewer tasks: 5/8
+against 7/8. Eight tasks is thin and two tasks is inside the noise, so treat the
+direction as suggestive rather than established — but it points the opposite way
+from "switch the workers to `--fast`", and nothing here supports making that the
+default. Note also that it is not the same three tasks failing: `format-report`
+failed *with* thinking and passed without.
+
+**So the conclusion is the reverse of the one this run was launched to check.**
+The parser is not a stopgap for a misconfigured model; it is what makes thinking
+survivable on a small model, and thinking is worth roughly two tasks in eight.
+Turning reasoning off to dodge the format drop trades the capability for the
+symptom. Keep both: thinking on, and the parser catching what it costs.
+
+The cheap read stands on its own: 62k generated tokens against 29k for the same
+eight tasks. Reasoning on this model is a little over 2x the tokens for a
+couple more passes, which is the trade to make deliberately per job rather than
+globally.
+
 # Open problem: a fan-out shares one check
 
 `/spawn -n 3 --until "..."` gives **every** worker the same check. Its own usage
