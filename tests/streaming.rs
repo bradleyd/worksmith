@@ -185,16 +185,13 @@ data: [DONE]\n\n";
     assert!(left.contains("Now I check the result."));
     assert!(!left.contains("<function="), "the block was taken, not copied: {left}");
 
-    // And it is said out loud: a model drifting out of structured tool calling
-    // is worth knowing about when choosing one.
-    let mut warned = false;
-    while let Ok(ev) = rx.try_recv() {
-        if let StreamEvent::Warning(m) = ev {
-            assert!(m.contains("bash") && m.contains("reasoning"), "{m}");
-            warned = true;
-        }
-    }
-    assert!(warned, "the rescue is announced, not silent");
+    // And it is said out loud — on the completion, not down the sink. The sink
+    // reaches the display and stops there, so a warning sent that way is never
+    // written to the session and the rate cannot be recovered afterwards. The
+    // agent emits this one through `emit`, which persists it.
+    let note = completion.rescued.expect("the rescue is announced, not silent");
+    assert!(note.contains("bash") && note.contains("reasoning"), "{note}");
+    while rx.try_recv().is_ok() {}
 }
 
 #[tokio::test]

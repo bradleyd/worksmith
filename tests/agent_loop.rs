@@ -101,6 +101,7 @@ fn tool_call(name: &str, args: &str) -> Completion {
         tool_calls: vec![ToolCall { id: "c1".into(), name: name.into(), arguments: args.into() }],
         usage: Default::default(),
         finish_reason: Some("tool_calls".into()),
+        rescued: None,
     }
 }
 
@@ -117,6 +118,7 @@ fn truncated_call(name: &str, partial_args: &str) -> Completion {
         tool_calls: vec![ToolCall { id: "c1".into(), name: name.into(), arguments: partial_args.into() }],
         usage: Default::default(),
         finish_reason: Some("length".into()),
+        rescued: None,
     }
 }
 
@@ -505,6 +507,7 @@ fn reasoning_only() -> Completion {
         tool_calls: vec![],
         usage: Default::default(),
         finish_reason: Some("length".into()),
+        rescued: None,
     }
 }
 

@@ -363,6 +363,12 @@ pub struct Completion {
     /// Accumulated reasoning/thinking, if the provider exposed it.
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    /// Set when `tool_calls` was empty and a call had to be read out of the
+    /// text (see `llm::rescue`). Carried on the completion rather than sent
+    /// down the stream sink, because the sink reaches the display and nothing
+    /// else: a warning emitted there is never written to the session, so the
+    /// rate is unrecoverable afterwards — and the rate is the whole signal.
+    pub rescued: Option<String>,
     pub usage: Usage,
     pub finish_reason: Option<String>,
 }

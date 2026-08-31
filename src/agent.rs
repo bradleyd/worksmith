@@ -276,6 +276,11 @@ pub struct Agent {
     /// The provider's prompt-token count for the most recent completion — what
     /// the next request will cost, as opposed to what we estimate it costs.
     last_prompt_tokens: AtomicU32,
+    /// How many tool calls this agent has had to read out of the model's text
+    /// so far. Counted rather than latched: the first occurrence is news, and
+    /// the *rate* is the thing worth knowing — the first fan-out to use it ran
+    /// at 62%, which is a different fact about the model than "it happened".
+    rescued_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl Agent {
@@ -317,6 +322,7 @@ impl Agent {
             route: Arc::new(Mutex::new(None)),
             pairing: Arc::new(AtomicBool::new(false)),
             last_prompt_tokens: AtomicU32::new(0),
+            rescued_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -497,6 +503,7 @@ impl Agent {
             pairing: Arc::new(AtomicBool::new(false)),
             // Its own context, so its own accounting.
             last_prompt_tokens: AtomicU32::new(0),
+            rescued_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1253,7 +1260,33 @@ impl Agent {
             self.emit(session, Event::ModelCallFinished);
 
             let err = match completion {
-                Ok(c) => return Ok(c),
+                Ok(c) => {
+                    // Said here, through `emit`, so it reaches the session file
+                    // as well as the screen. The client cannot do this: the
+                    // stream sink goes to the display and nothing else, so the
+                    // first fan-out to lean on the rescue left no record of any
+                    // of it.
+                    if let Some(note) = &c.rescued {
+                        let n = self
+                            .rescued_calls
+                            .fetch_add(c.tool_calls.len(), Ordering::Relaxed)
+                            + c.tool_calls.len();
+                        // The first one explains itself; after that the running
+                        // count is the useful part, and twenty paragraphs is
+                        // not.
+                        let message = if n == c.tool_calls.len() {
+                            note.clone()
+                        } else {
+                            format!(
+                                "read {} more tool call(s) out of the model's text \
+                                 ({n} so far this turn)",
+                                c.tool_calls.len()
+                            )
+                        };
+                        self.emit(session, Event::Warning { message });
+                    }
+                    return Ok(c);
+                }
                 Err(e) => e,
             };
 
@@ -1943,6 +1976,7 @@ pub(crate) mod scripted {
                 }],
                 usage: Usage { completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
                 finish_reason: Some("tool_calls".to_string()),
+                rescued: None,
             }
         }
 
@@ -1954,6 +1988,7 @@ pub(crate) mod scripted {
                 tool_calls: Vec::new(),
                 usage: Usage { completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
                 finish_reason: Some("stop".to_string()),
+                rescued: None,
             }
         }
     }
@@ -2077,6 +2112,33 @@ mod checkpoint_tests {
         assert_eq!(asked.len(), 1, "exactly once, not once per retry: {asked:?}");
         assert!(asked[0].0.contains("failed twice"), "{:?}", asked[0].0);
         assert!(asked[0].1.contains("AssertionError: nope"), "the question carries the failure");
+    }
+
+    /// A rescued tool call is recorded, not just displayed.
+    ///
+    /// It shipped going down the stream sink, which reaches the screen and
+    /// stops there — the forwarder holds the bus, not the session. The first
+    /// fan-out to lean on the rescue read 24 of its 39 tool calls out of the
+    /// model's text and left no record of a single one, so the rate was only
+    /// recoverable by grepping session files for the synthetic `text_call_`
+    /// ids. The rate is the whole signal.
+    #[tokio::test]
+    async fn a_rescued_tool_call_is_written_to_the_session() {
+        let mut rescued = ScriptedClient::calling("ls", "{}");
+        rescued.rescued = Some("the model wrote its `ls` call as text".to_string());
+        let (agent, _asked, mut session, _d) = agent_with(vec![rescued], vec![], 2);
+        let _ = agent
+            .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let log = std::fs::read_to_string(session.path()).unwrap();
+        assert!(
+            log.contains("wrote its `ls` call as text"),
+            "the note has to survive in the session file, not only on screen"
+        );
+        // And repeats report the running count rather than the paragraph again.
+        assert!(log.contains("so far this turn"), "later ones carry the count");
     }
 
     /// The checkpoint carries the evidence, not a summary of it. The first one
