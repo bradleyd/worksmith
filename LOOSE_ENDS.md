@@ -298,6 +298,36 @@ shows its evidence now, and it can take a question.
   `rustopedia/` (its circuit breaker guards patch-format drift, which worksmith
   structurally cannot have, since tool calls are schema-validated).
 
+- **A worker that dies alone should be able to ask, and deliberately cannot.**
+  Requested from use after a worker hit `stopped · hit step limit (50)` with
+  pairing on and nothing was asked: *"with pair on this should also signal the
+  user for help"*.
+
+  It is refused on purpose. `fork_with` (`agent.rs:417`) hands a worker
+  `NoOneToAsk`, and the argument is written down: a blocking question stalls a
+  background task against a user who does not know it was asked, and a fan-out
+  of five would queue five questions behind one composer.
+  `a_spawned_worker_never_inherits_pairing` pins it.
+
+  **The reasoning is about a fan-out and the complaint is about a single
+  worker,** which is the whole tension. One worker, attended, pairing on, is the
+  case where the argument does not apply and the checkpoint would have been
+  worth more than the step limit: the harness *knew* it was going nowhere at
+  step 50 and ended the turn instead of spending a sentence on it. That is
+  exactly the "50 steps, nothing written" checkpoint the main session already
+  has.
+
+  So the shape of the answer is probably not "workers pair" but **only one
+  worker may hold the composer at a time**, with the rest either skipping or
+  queueing behind it — which makes the fan-out-of-five objection an
+  implementation detail rather than a reason. The step-limit and stuck triggers
+  are the two worth offering; a worker asking mid-task is a different and much
+  weaker case.
+
+  Note this now interacts with the timing work: a checkpoint from a background
+  worker has to say *which* worker and *when*, or it arrives as a question from
+  nowhere. `WorkerSummary` carries `started`/`finished` since `bc2e892`.
+
 - **A worker's approvals queue behind the composer; its checkpoints were
   deliberately spared that and its approvals were not.** `fork_with`
   (`agent.rs:417`) replaces the asker with `NoOneToAsk` and argues for it: a
