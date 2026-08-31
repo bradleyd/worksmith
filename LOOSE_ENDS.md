@@ -15,6 +15,46 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
+- **A small model drops out of structured tool calls and the turn is scored
+  empty.** Seen live, hosted qwen3.5-9b, mid-session: the model emitted
+  `<tool_call><function=bash><parameter=command>python -m pytest …` as ordinary
+  text instead of through the API's `tool_calls` field. Worksmith saw content
+  with no tool calls, called the reply empty, nudged, and the model did the same
+  thing again — "Stopped going in circles: the model returned an empty
+  response."
+
+  The intent was fine; only the channel was wrong. `rustopedia/`'s
+  `SMALLCODE_ADOPTION.md` §5 is the fix and names it: a **forgiving tool call
+  parser** that recognises a tool-call block in the text when the structured
+  field is empty, and runs it. Small models drop the format under load, and
+  refusing to meet them there costs a whole turn each time.
+
+  May also explain results we blamed on something else. The hosted 9B sweep
+  produced `stuck: the model returned an empty response` repeatedly and it was
+  attributed entirely to thinking being on. Same signature, two possible causes,
+  and the traces are kept now so it can be checked rather than argued.
+
+- **A checkpoint asks for help without showing the evidence.** The same
+  incident: the "Going in circles" checkpoint offered only `the model returned
+  an empty response`. It did not show the `<tool_call>` XML that *was* the
+  problem, so the user had to read it out of the transcript to answer usefully.
+
+  The retry directives in `rustopedia/retry_loop.rs` already do this properly —
+  they hand back the real file slice around the failure rather than a summary.
+  A checkpoint should carry the same: the last assistant message, or the last
+  couple of tool calls and their results.
+
+- **The checkpoint wants a directive and cannot take a question.** The answer is
+  appended as `"You were repeating yourself (…). The user says:\n\n{a}\n\n
+  Follow that."` (`agent.rs`). So asking "what seems to be the issue?" is passed
+  to the model as an instruction to follow, and it spends the one intervention
+  the turn allows, since `offered_a_way_in` blocks a second. Pairing is meant to
+  be a conversation; right now it is one imperative sentence.
+
+- **Pair mode has no visual identity.** When the harness stops to ask, it looks
+  like any other prompt. It should read as a different mode — that the loop is
+  waiting on *you*, what triggered it, and what a useful answer looks like.
+
 - **A big source file can eat a small context, and the only defence is advice
   the model already follows.** Reported from real use: `max-steps = 100` hit
   repeatedly on qwen3.8 via OpenRouter while working on documents, because
