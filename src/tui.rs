@@ -262,6 +262,13 @@ struct App {
     /// Prices for the session's model, when the config gives them. A local
     /// model has none, and showing $0.00 would be a claim rather than a fact.
     prices: crate::config::ModelSettings,
+    /// The whole `[models]` table, so a worker running on a different model is
+    /// costed at *its* price. `--worker-model` and `[agents] model` exist so a
+    /// cheap fan-out can run under an expensive judge, and billing a 9B
+    /// fan-out at 27B rates would replace a missing number with a wrong one.
+    model_prices: std::collections::HashMap<String, crate::config::ModelSettings>,
+    /// Worker spend, per model, refreshed from the manager each frame.
+    agent_tokens: std::collections::HashMap<Option<String>, (u64, u64)>,
     /// Reasoning streamed so far in the current step, so the count climbs live
     /// instead of only appearing once the step is over.
     step_reasoning_chars: usize,
@@ -366,6 +373,8 @@ impl App {
             last_reasoning_tokens: 0,
             total_in_tokens: 0,
             prices: crate::config::ModelSettings::default(),
+            model_prices: std::collections::HashMap::new(),
+            agent_tokens: std::collections::HashMap::new(),
             step_reasoning_chars: 0,
             last_finish_reason: None,
             total_out_tokens: 0,
@@ -1027,6 +1036,7 @@ async fn run_loop(
     app.session_path = session.lock().await.path().to_path_buf();
     app.insert_escape = config.insert_escape();
     app.prices = model_settings.clone();
+    app.model_prices = config.models.clone();
     app.fanout_auto = fanout_auto;
     app.think_label = agent.thinking_mode().label();
     app.synthesize = synthesize;
@@ -1144,6 +1154,12 @@ async fn run_loop(
         // Rebuild the wrapped-row cache only if content/width changed, then draw.
         app.agents_running = workers.running_count();
         app.agents_queued = workers.queued_count();
+        // Polled, not plumbed. Forwarding worker `Usage` onto the parent bus
+        // would also feed `last_prompt_tokens`, and `ctx` would then flicker
+        // between this session's window and whichever worker reported last —
+        // a number that is actively wrong rather than merely absent. Context
+        // belongs to one conversation; spend belongs to the run.
+        app.agent_tokens = workers.token_totals();
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
         app.ensure_rows(width);
         terminal.draw(|f| ui(f, &app))?;
@@ -3847,14 +3863,39 @@ fn footer_string(app: &App) -> String {
         Some(l) => format!("  think:{l}"),
         None => String::new(),
     };
+    // Worker spend, priced per model. Kept separate from the session's own
+    // rather than blended: "what did this session cost" and "what did the
+    // fan-out cost" are different questions, and the second is the one the
+    // cost-per-solved-task work actually measures.
+    // Output tokens are what the footer shows; input is folded into the cost
+    // below, where it belongs — on a billed API it is normally the larger half,
+    // but as a bare number it says less than the money does.
+    let agent_out: u64 = app.agent_tokens.values().map(|(_, o)| o).sum();
+    let agent_cost: f64 = app
+        .agent_tokens
+        .iter()
+        .filter_map(|(model, (i, o))| match model {
+            Some(m) => app.model_prices.get(m).and_then(|p| p.cost(*i, *o)),
+            None => app.prices.cost(*i, *o),
+        })
+        .sum();
+    let agent_spend = match (agent_out, agent_cost) {
+        (0, _) => String::new(),
+        (o, c) if c >= 0.01 => format!("  ⧉{o} tok (${c:.2})"),
+        (o, _) => format!("  ⧉{o} tok"),
+    };
+    // Ahead of cost and think, because "work is happening in the background"
+    // outranks a running total — and because this used to sit last in an
+    // 89-character string that truncates at terminal width, so the one
+    // time-critical field was the first to fall off the edge.
     let agents = if app.agents_running > 0 || app.agents_queued > 0 {
         let queued =
             if app.agents_queued > 0 { format!(" · {} queued", app.agents_queued) } else { String::new() };
-        format!("  ↑{} agents{}", app.agents_running, queued)
+        format!("  ⧉{} agents{}", app.agents_running, queued)
     } else {
         String::new()
     };
-    let tail = format!("{reasoning}{cut}{cost}{fast}{agents}");
+    let tail = format!("{agents}{reasoning}{cut}{cost}{agent_spend}{fast}");
     format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail
@@ -3897,7 +3938,8 @@ fn footer_legend() -> Vec<OverlayItem> {
         ("⚠cut", "the last answer was cut off at max-tokens (finish reason `length`) — truncated, not finished"),
         ("$N", "cost this session — only shown when the model has prices; a free/local model shows nothing"),
         ("think:<label>", "current thinking mode (off / on / a budget like 2k / an effort)"),
-        ("↑N agents", "workers running (plus · M queued when any are waiting)"),
+        ("⧉N agents", "workers running (plus · M queued when any are waiting). Placed before the token and cost fields on purpose: it used to sit last and was the first thing an 80-column terminal truncated away."),
+        ("⧉N tok ($M)", "output tokens and cost spent by *workers*, kept separate from this session's ↓ and $. Priced per worker model, since --worker-model exists so a cheap fan-out can run under an expensive judge."),
     ]
     .into_iter()
     .map(|(label, description)| OverlayItem {
@@ -4174,7 +4216,7 @@ mod tests {
     #[test]
     fn footer_legend_rows_are_well_formed() {
         let rows = footer_legend();
-        assert_eq!(rows.len(), 8, "one row per footer glyph");
+        assert_eq!(rows.len(), 9, "one row per footer glyph");
         for r in &rows {
             assert!(!r.label.is_empty(), "a row with no glyph");
             assert!(!r.description.trim().is_empty(), "{} has no meaning", r.label);
@@ -4926,6 +4968,55 @@ mod tests {
         a.set_input("what does /memory do".into());
         a.refresh_hint();
         assert!(a.hint.is_none());
+    }
+
+    #[test]
+    fn the_footer_costs_a_worker_at_its_own_model_price() {
+        // Reported with prices set and workers running: the cost never moved.
+        // Worker events go to the worker's own bus and never reach the
+        // parent's, so the footer — fed entirely from the parent — described a
+        // session doing nothing next to a counter saying an agent was busy.
+        //
+        // Per model, because `--worker-model` exists so a cheap fan-out can run
+        // under an expensive judge. Blending would swap a missing number for a
+        // wrong one.
+        let mut a = app();
+        a.prices = crate::config::ModelSettings {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        };
+        a.model_prices.insert(
+            "cheap/9b".to_string(),
+            crate::config::ModelSettings {
+                input: Some(0.10),
+                output: Some(0.20),
+                ..Default::default()
+            },
+        );
+        // One million in, one million out, on the cheap worker model.
+        a.agent_tokens.insert(Some("cheap/9b".to_string()), (1_000_000, 1_000_000));
+        a.agents_running = 1;
+
+        let f = footer_string(&a);
+        assert!(f.contains("⧉1000000 tok"), "worker output is shown: {f}");
+        // 1.0M * 0.10 + 1.0M * 0.20 = $0.30 at the worker's price, not $3.00 at
+        // the session's.
+        assert!(f.contains("$0.30"), "priced at the worker's model, not the session's: {f}");
+        assert!(!f.contains("$3.00"), "must not bill a 9B at the judge's rate: {f}");
+    }
+
+    #[test]
+    fn the_agent_count_comes_before_the_costs_it_used_to_hide_behind() {
+        // It was last in a string that truncates at terminal width, so on an
+        // 80-column terminal the one time-critical field was the first to be
+        // cut — which is why it was reported as "no indication that there are
+        // agents running".
+        let mut a = app();
+        a.agents_running = 2;
+        let f = footer_string(&a);
+        let agents = f.find("2 agents").expect("shown at all");
+        assert!(agents < 60, "near the front, not off the edge: {agents} in {f:?}");
     }
 
     #[test]

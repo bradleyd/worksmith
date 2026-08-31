@@ -58,6 +58,11 @@ struct Runtime {
     result: String,
     /// Completion tokens this worker has spent.
     tokens: u32,
+    /// Prompt tokens it has been charged for. Recorded because on a billed API
+    /// the whole prompt is charged on every step, so this is normally the
+    /// *larger* half — and it used to be dropped on the floor, which made a
+    /// fan-out's cost unknowable rather than merely unshown.
+    prompt_tokens: u64,
     /// Supervisor interventions so far.
     nudges: usize,
     /// A bounded transcript of what this worker did, for `/agents tail`. Its
@@ -93,6 +98,8 @@ pub struct WorkerSummary {
     pub session_id: String,
     /// Completion tokens this worker spent.
     pub tokens: u32,
+    /// Prompt tokens it was charged for.
+    pub prompt_tokens: u64,
     /// How many times the supervisor nudged this worker.
     pub nudges: usize,
     /// Why the supervisor stopped it, if it did.
@@ -165,6 +172,7 @@ impl Worker {
             result: r.result.clone(),
             session_id: self.session_id.clone(),
             tokens: r.tokens,
+            prompt_tokens: r.prompt_tokens,
             nudges: r.nudges,
             escalation: r.escalation.clone(),
             group: self.group,
@@ -235,6 +243,9 @@ pub struct WorkerManager {
     groups: HashMap<u64, GroupInfo>,
     counter: usize,
     next_group: u64,
+    /// Totals from workers that have been dropped, so the running figure never
+    /// goes backwards when they are cleared.
+    retired_tokens: HashMap<Option<String>, (u64, u64)>,
 }
 
 impl WorkerManager {
@@ -252,6 +263,7 @@ impl WorkerManager {
             groups: HashMap::new(),
             counter: 0,
             next_group: 0,
+            retired_tokens: HashMap::new(),
         }
     }
 
@@ -476,6 +488,7 @@ impl WorkerManager {
             log_total: 0,
             escalation: None,
             finished: None,
+            prompt_tokens: 0,
         }));
         let cancel = CancellationToken::new();
 
@@ -618,6 +631,27 @@ impl WorkerManager {
         Ok(())
     }
 
+    /// Tokens every worker has spent, keyed by the model that spent them.
+    ///
+    /// Per model rather than one total, because `--worker-model` and
+    /// `[agents] model` exist precisely so cheap workers can run under an
+    /// expensive judge — costing a 9B fan-out at 27B rates would be a new wrong
+    /// number in place of the old missing one. `None` means the worker ran on
+    /// the session's own model.
+    ///
+    /// Includes retired workers, so the figure does not fall when `/new` drops
+    /// them: spend already happened and a total that goes down is a lie.
+    pub fn token_totals(&self) -> HashMap<Option<String>, (u64, u64)> {
+        let mut out = self.retired_tokens.clone();
+        for w in &self.workers {
+            let r = w.runtime.lock().unwrap();
+            let e = out.entry(w.model.clone()).or_insert((0, 0));
+            e.0 += r.prompt_tokens;
+            e.1 += r.tokens as u64;
+        }
+        out
+    }
+
     /// Workers that reached a terminal state since the last call (each returned
     /// once). Used to surface completions to the user without polling.
     pub fn take_newly_finished(&mut self) -> Vec<WorkerSummary> {
@@ -747,7 +781,10 @@ fn update_last(g: &mut Runtime, e: Event) {
                 g.last = l.to_string();
             }
         }
-        Event::Usage { completion_tokens, .. } => g.tokens += completion_tokens,
+        Event::Usage { prompt_tokens, completion_tokens, .. } => {
+            g.tokens += completion_tokens;
+            g.prompt_tokens += prompt_tokens as u64;
+        }
         Event::Nudge { reason } => g.last = format!("↻ {reason}"),
         Event::Validation { ok, .. } => {
             g.last = if ok { "✓ validated".into() } else { "✗ validation failed".into() }
@@ -845,6 +882,7 @@ mod log_tests {
             log_total: 0,
             escalation: None,
             finished: None,
+            prompt_tokens: 0,
         };
         for i in 0..(LOG_LINES + 50) {
             log_line(&mut rt, i.to_string());

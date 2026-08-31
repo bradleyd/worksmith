@@ -317,6 +317,7 @@ mod tests {
             model: None,
             started: std::time::SystemTime::now(),
             finished: None,
+            prompt_tokens: 0,
         }
     }
 
