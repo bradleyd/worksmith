@@ -26,6 +26,9 @@ pub struct OpenAiCompatClient {
     sort: Option<String>,
     /// A dropped reasoning budget is worth saying once, not once per step.
     warned_no_budget: std::sync::atomic::AtomicBool,
+    /// Likewise for a model writing its tool calls as text: the first one is
+    /// news, the twentieth is noise.
+    warned_text_tool_call: std::sync::atomic::AtomicBool,
     /// What the client's `read_timeout` was set to, so a stall can name the
     /// setting that ended it instead of reporting "operation timed out".
     stream_idle: std::time::Duration,
@@ -46,6 +49,7 @@ impl OpenAiCompatClient {
             budget_param: None,
             sort: None,
             warned_no_budget: std::sync::atomic::AtomicBool::new(false),
+            warned_text_tool_call: std::sync::atomic::AtomicBool::new(false),
             stream_idle: std::time::Duration::from_secs(crate::llm::DEFAULT_STREAM_IDLE_SECS),
         }
     }
@@ -259,7 +263,17 @@ impl LlmClient for OpenAiCompatClient {
             }
         }
 
-        Ok(acc.into_completion())
+        let mut completion = acc.into_completion();
+        // Last, with `content`, `reasoning` and `tool_calls` all known: if the
+        // model wrote a tool call as prose because it dropped the format, read
+        // it rather than scoring the turn empty. Does nothing at all unless
+        // `tool_calls` came back empty.
+        if let Some(note) = crate::llm::rescue::rescue_text_tool_calls(&mut completion, &req.tools)
+            && !self.warned_text_tool_call.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = sink.send(StreamEvent::Warning(note)).await;
+        }
+        Ok(completion)
     }
 }
 

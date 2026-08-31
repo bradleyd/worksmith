@@ -127,3 +127,120 @@ async fn a_mid_stream_error_fails_instead_of_returning_nothing() {
     let msg = format!("{err:#}");
     assert!(msg.contains("rate-limited upstream"), "the provider's reason must survive: {msg}");
 }
+
+#[tokio::test]
+async fn a_tool_call_written_as_text_in_reasoning_is_read_and_run() {
+    common::isolate_home();
+    // The failure this exists for, end to end. A small model under load drops
+    // out of structured tool calling and writes the call into its *reasoning*,
+    // which is display-only. `content` is genuinely empty and `tool_calls` is
+    // genuinely empty, so worksmith scored the turn "the model returned an
+    // empty response", nudged, and got the same thing back — one turn spent
+    // refusing to read what the model plainly said.
+    //
+    // Note the wrapper tags arrive split across chunks, which is why nothing in
+    // the parser may depend on seeing `<tool_call>` intact.
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"reasoning\":\"<tool_\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"reasoning\":\"call>\\n<function=bash>\\n<parameter=command>\\n\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"reasoning\":\"python3 -m unittest tests.test_items -q\\n</parameter>\\n\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"reasoning\":\"</function>\\n</tool_call>Now I check the result.\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: [DONE]\n\n";
+
+    let base = spawn_mock(sse);
+    let client = OpenAiCompatClient::new(reqwest::Client::new(), base, None);
+
+    let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
+    let req = ChatRequest {
+        model: "mock".into(),
+        messages: vec![Message::user("run the tests")],
+        tools: vec![worksmith::llm::ToolDef {
+            name: "bash".into(),
+            description: "run a command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } }
+            }),
+        }],
+        temperature: None,
+        top_p: None,
+        top_k: None,
+        max_tokens: None,
+        thinking: None,
+        sort: None,
+    };
+
+    let completion = client.stream(req, tx, CancellationToken::new()).await.unwrap();
+
+    assert_eq!(completion.tool_calls.len(), 1, "the call was read out of the reasoning");
+    assert_eq!(completion.tool_calls[0].name, "bash");
+    assert_eq!(
+        completion.tool_calls[0].arguments,
+        r#"{"command":"python3 -m unittest tests.test_items -q"}"#
+    );
+    // The block is gone from the reasoning — otherwise the same call is both
+    // shown as thinking and executed — but the sentence after it stays.
+    let left = completion.reasoning.unwrap();
+    assert!(left.contains("Now I check the result."));
+    assert!(!left.contains("<function="), "the block was taken, not copied: {left}");
+
+    // And it is said out loud: a model drifting out of structured tool calling
+    // is worth knowing about when choosing one.
+    let mut warned = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let StreamEvent::Warning(m) = ev {
+            assert!(m.contains("bash") && m.contains("reasoning"), "{m}");
+            warned = true;
+        }
+    }
+    assert!(warned, "the rescue is announced, not silent");
+}
+
+#[tokio::test]
+async fn a_model_that_only_talks_about_a_tool_call_is_left_alone() {
+    common::isolate_home();
+    // The guard rail, end to end: ordinary prose that mentions a tool must not
+    // become a tool call. Fabricating one is a worse failure than the one the
+    // parser fixes.
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"I would use the bash tool here, \"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"but the tests are already passing.\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: [DONE]\n\n";
+
+    let base = spawn_mock(sse);
+    let client = OpenAiCompatClient::new(reqwest::Client::new(), base, None);
+
+    let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let completion = client
+        .stream(
+            ChatRequest {
+                model: "mock".into(),
+                messages: vec![Message::user("are the tests passing?")],
+                tools: vec![worksmith::llm::ToolDef {
+                    name: "bash".into(),
+                    description: "run a command".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }],
+                temperature: None,
+                top_p: None,
+                top_k: None,
+                max_tokens: None,
+                thinking: None,
+                sort: None,
+            },
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let _ = drain.await;
+
+    assert!(completion.tool_calls.is_empty(), "no call was invented");
+    assert_eq!(
+        completion.content.as_deref(),
+        Some("I would use the bash tool here, but the tests are already passing.")
+    );
+}

@@ -1,7 +1,13 @@
 # Plan: a forgiving tool-call parser
 
-**Start here.** This is the next thing to build. It is written to be picked up
-cold, so it carries its own evidence.
+**Built, 2026-08-31.** `src/llm/rescue.rs`, promoted from `stream()` in
+`openai.rs`. 13 unit tests plus two end-to-end tests through the real client and
+the mock SSE server (`tests/streaming.rs`). Everything below is kept as written
+— it is the reasoning the thing was built from — with a section at the end
+recording where the code had to depart from it. Unmeasured against a live
+model; **the MUD run below is the first real exercise.**
+
+The rest of this file, from "After the parser", is still ahead.
 
 ## The failure
 
@@ -141,6 +147,48 @@ sketch rather than an implementation, so there is nothing to port directly.
   reimplements it.
 
 
+## What the plan got wrong
+
+Two, both found in the code rather than at runtime, and both worth keeping
+because the same mistakes are available to whoever touches this next.
+
+**The `<tool_call>` wrapper never reaches the parser in `content`.**
+`strip_toolcall_noise` (`openai.rs:526`) removes `<tool_call>` and its variants
+from every content delta before they are accumulated, and it has to: providers
+leak fragments of that wrapper into ordinary text, which is the bug it was
+written for. A parser anchored on `<tool_call>` would therefore have fired on
+`reasoning`, which is not stripped, and never once on `content` — passing its
+own tests and half-working in production. The shapes anchor on `<function=` and
+on the JSON object, both of which survive. The stripping is also split across
+deltas, so a wrapper can arrive as `<tool_` + `call>` and be only half removed;
+the end-to-end test sends it that way deliberately.
+
+**A third shape had to be accepted.** The classic Hermes format really is
+`<tool_call>{"name": "bash", "arguments": {…}}</tool_call>` — JSON, not the
+`<function=` XML — and after stripping it arrives as a bare object with no
+fence. So: XML, fenced JSON, and a bare JSON object *that is the entire field*.
+The last one is the narrow case on purpose: an object sitting inside prose is
+far more likely to be the model showing its work than asking for a tool, and
+the object must carry no keys beyond `name` / `arguments` / `parameters`.
+
+**And one thing the plan did not think of.** XML parameters carry no types, so
+`<parameter=limit>40</parameter>` would arrive as the string `"40"` and fail
+`read`'s schema on the way in — a promoted call that fails at the tool boundary
+costs the same turn as an unread one. The advertised `ToolDef.parameters` is
+already in hand for the name check, so the value is coerced by what the schema
+says the key should be, and left a string whenever the schema does not say.
+
+Placement moved one line. `into_completion` has no `sink`, so it cannot say the
+rescue happened; the call sits immediately after it in `stream()`, where
+`req.tools` also supplies the advertised-name check without `ToolRegistry`
+being involved. Same moment, same three fields known together.
+
+The `ScriptedClient` test the plan suggested was dropped for a better one: the
+mock SSE server in `tests/streaming.rs` drives the real client, so the
+noise-stripper and the delta accumulation are in the loop instead of stubbed
+past. A scripted `Completion` would have sailed straight over the wrapper
+problem above.
+
 ---
 
 # After the parser: the MUD fan-out test
@@ -168,6 +216,15 @@ Plus 130 tests across four files: 17 rooms, 26 items, 35 combat, 52 parser.
    `pip: command not found`. Either install pytest or convert the tests to
    `unittest` from the standard library. Stdlib is safer: the goal is testing
    the harness, not the runner.
+
+   **Checked 2026-08-31, and the checks below are well-formed.** The fixture is
+   clean at `701b479`, all four test files still use pytest idioms, `pytest` is
+   still absent (Homebrew python 3.14), and `tests/__init__.py` exists — without
+   it `python3 -m unittest tests.test_items` could not resolve the module at
+   all, which would have been the missing-runner mistake a second time. All four
+   `--until` commands exit 1 today and can therefore both fail and pass. That
+   makes the conversion the workers' *task* rather than pre-work: the spawn
+   prompts below already ask for it.
 
 2. **The scaffold check could not fail for the reason it existed.**
    `python3 -c 'import rooms…' && pytest --collect-only` passes just as happily

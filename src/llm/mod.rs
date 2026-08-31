@@ -3,6 +3,7 @@
 //! OpenRouter, RunPod, local). Anthropic is a later second implementation.
 
 pub mod openai;
+pub mod rescue;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

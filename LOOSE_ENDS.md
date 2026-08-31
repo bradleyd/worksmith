@@ -11,7 +11,8 @@ is usually the fastest route back in.
 provider tables / model tables all merged field-by-field (four separate keys
 that parsed, validated, and were then silently dropped); `worksmith config
 check` built, which found the fourth itself on its first run; `/model` steps 3
-and 4a; compaction no longer trades the whole context for a sentence.
+and 4a; compaction no longer trades the whole context for a sentence; the
+forgiving tool-call parser (`llm/rescue.rs`).
 
 ## Bugs
 
@@ -41,23 +42,39 @@ and 4a; compaction no longer trades the whole context for a sentence.
   the timestamps above disprove.
 
 - **A small model drops out of structured tool calls and the turn is scored
-  empty.** *Planned in `TOOLCALL_PLAN.md`, which is the next thing to build.* Seen live, hosted qwen3.5-9b, mid-session: the model emitted
-  `<tool_call><function=bash><parameter=command>python -m pytest …` as ordinary
-  text instead of through the API's `tool_calls` field. Worksmith saw content
-  with no tool calls, called the reply empty, nudged, and the model did the same
-  thing again — "Stopped going in circles: the model returned an empty
-  response."
+  empty.** *Fixed — `src/llm/rescue.rs`.* Seen live, hosted qwen3.5-9b: the
+  model emitted `<tool_call><function=bash><parameter=command>python -m pytest…`
+  as ordinary text instead of through the API's `tool_calls` field. Worksmith
+  saw no calls, scored the reply empty, nudged, and got the same thing back —
+  "Stopped going in circles: the model returned an empty response."
 
-  The intent was fine; only the channel was wrong. `rustopedia/`'s
-  `SMALLCODE_ADOPTION.md` §5 is the fix and names it: a **forgiving tool call
-  parser** that recognises a tool-call block in the text when the structured
-  field is empty, and runs it. Small models drop the format under load, and
-  refusing to meet them there costs a whole turn each time.
+  The reply is now read rather than re-requested: when `tool_calls` comes back
+  empty, `content` and then `reasoning` are scanned for a call, and a call to an
+  *advertised* tool with arguments that parse is promoted to a real one. The
+  block is taken out of the field it came from so the same call is not both
+  spoken and executed, and the prose around it stays. Announced once per session
+  on the warning channel, because a model doing this is drifting and that is
+  worth knowing when choosing one.
 
-  May also explain results we blamed on something else. The hosted 9B sweep
-  produced `stuck: the model returned an empty response` repeatedly and it was
-  attributed entirely to thinking being on. Same signature, two possible causes,
-  and the traces are kept now so it can be checked rather than argued.
+  **Two things the plan had wrong, both found in the code:**
+
+  1. The `<tool_call>` wrapper is *already stripped from `content`* by
+     `strip_toolcall_noise` (`openai.rs:526`), which has to be there because
+     providers leak fragments of it into ordinary text. A parser anchored on
+     that wrapper would have found nothing in the channel it was written for.
+     It anchors on `<function=` and on the JSON object instead. The same
+     stripping is why a third shape is accepted: the classic Hermes
+     `<tool_call>{"name":…}</tool_call>` arrives here as a bare object, and it
+     is taken only when it is the entire field.
+  2. `Accumulator::into_completion` cannot emit the warning — the sink is not
+     in scope. The rescue runs one line later in `stream()`, where `req.tools`
+     supplies the advertised-name check without `ToolRegistry` being involved
+     at all.
+
+  Not measured against a model yet. The check is the count of `stuck: the model
+  returned an empty response` outcomes across a hosted-9B run, which should fall
+  to near zero; the regression to watch is the harness arm's 162/164 on
+  HumanEval, scored 2026-08-30 with the parser absent.
 
 - **A checkpoint asks for help without showing the evidence.** The same
   incident: the "Going in circles" checkpoint offered only `the model returned
@@ -170,79 +187,6 @@ and 4a; compaction no longer trades the whole context for a sentence.
   wrong (a worker may legitimately need to push) and queueing five surprise
   prompts is what the asker comment already rejects for checkpoints. Unmeasured:
   every worker run recorded here was a single worker on a single task.
-
-- **A big source file can eat a small context, and the only defence is advice
-  the model already follows.** Reported from real use: `max-steps = 100` hit
-  repeatedly on qwen3.8 via OpenRouter while working on documents, because
-  reading large Rust files exhausts a 32,768-token window.
-
-  `cap()` (`tools/mod.rs:94`) trims a result at `MAX_TOOL_RESULT_BYTES` and
-  appends a notice telling the model to grep for what it needs rather than page
-  through. The comment above it records this failing anyway: *fifty steps, 46
-  reads, seventeen of them the same file, and not one edit* — while the model
-  used `offset`/`limit` for 41 of them. It obeyed and still lost the turn, so
-  the fix is not better wording.
-
-  **What the cap does for Markdown and not for code** is the shape of the fix.
-  On truncation it pulls headings from the whole file first, so the notice can
-  name what was cut. A `.md` file gets an outline; a 5,000-line `.rs` file gets
-  "about 24 further reads, do not". `rustopedia/` already has the missing half:
-  `File Skeletons` and `Current Code Facts` list every struct, enum, field and
-  fn in the touched files, which turns `src/tui.rs` from 5,070 lines of text
-  into roughly 100 lines of signatures with line numbers, followed by one
-  targeted read.
-
-  Not measured here. Every task in `evals/pool/` works on files of 20 to 80
-  lines, so nothing in the suite exercises this and the evidence is one report
-  plus one code comment. A fixture with a genuinely large file would settle both
-  the size of the problem and whether a skeleton fixes it.
-
-- **The two tool-output caps are fixed constants and share a name.**
-  `tools/mod.rs:88` is 8,000 bytes, `agent.rs:29` is 24,000, both called
-  `MAX_TOOL_RESULT_BYTES`, and neither is derived from the model's context
-  window. At 8,000 bytes a read costs roughly 2,000 tokens: 6% of a 32k window
-  each, so a dozen reads is most of it and compaction then discards the earliest
-  ones. The same constant on a 262k model is trivially small. `ResolvedModel`
-  already carries `settings.context`, which is what the footer and compaction
-  use, so scaling from it is small. Two constants with one name is worth fixing
-  regardless: it reads as one value until you grep.
-
-- **A task can fail nine checks in a row and nothing notices it is going
-  nowhere.** `pa-reject` on Qwen3.5-4B, three isolated runs: 0/3, taking 327s,
-  900s (timed out) and 436s, burning 9,033 / 24,939 / 13,650 generated tokens.
-  In every run the model read the file, made valid `edit` calls, ran its check,
-  failed, and edited again.
-
-  **It is not a tool-choice problem.** Across those three runs: 32 `edit` calls,
-  **zero** `edit` errors, and **zero** `write` calls. The model reaches for the
-  right tool and uses it correctly. An earlier note here claimed whole-file
-  rewriting, built on one run averaging 1,201 generated tokens per model call;
-  the three instrumented runs average 311, 500 and 580, and the theory does not
-  survive them. Corrected rather than deleted, because the wrong version is in
-  the git history.
-
-  What actually happens is a no-progress loop: valid edits, the same check
-  failing the same way, over and over. The harness cannot see it. The supervisor
-  keys its repeat detector on `format!("{name}::{arguments}")`
-  (`supervisor.rs:159`), so it only catches literally identical calls — which is
-  why what finally stopped two of these runs was noticing the same `bash`
-  command five times, several minutes in, rather than the nine failed checks.
-  And `agent.rs:610` already counts consecutive validation failures, but counts
-  *any* failures: three different errors is a model working through a problem,
-  three identical ones is not, and it treats them alike.
-
-  **The fix is small and the plumbing exists.** `Event::Validation { ok, detail }`
-  (`event.rs:61`) is already emitted on every failed check with the check's
-  output as `detail`, and `Supervisor` already has the
-  `HashMap<String, u32>` + threshold + nudge-then-escalate shape. What is missing
-  is a match arm. Normalise the detail first: our own failures carry a temp path
-  and a `line 32` that moves every time the model edits above it, so a raw hash
-  changes precisely when the model is editing, which is when you need it not to.
-
-  Not needed, having checked: search/replace (that is `edit`, already anchored
-  and unique-match), a `write` nudge (never called), or a port from
-  `rustopedia/` (its circuit breaker guards patch-format drift, which worksmith
-  structurally cannot have, since tool calls are schema-validated).
 
 - **An unattended worker can approve its own outward-facing actions.**
   `approve_write_outside_cwd` (`tools/mod.rs:270`) does gate writes that leave
