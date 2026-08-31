@@ -1,0 +1,9 @@
+date,category,description,amount
+2026-01-03,Groceries,"Milk, eggs",$12.50
+2026-01-04,groceries,Bread,$3.25
+
+2026-01-05,Transit,Bus pass,$75.00
+2026-01-06,GROCERIES,Refund,-$4.75
+2026-01-09,transit,Taxi,"$1,234.56"
+2026-01-11,Dining,Lunch,$11.00
+2026-01-12,Dining,Refund,-$11.00

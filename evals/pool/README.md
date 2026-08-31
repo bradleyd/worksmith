@@ -1,0 +1,110 @@
+# Pool backlogs
+
+Hand-written task backlogs for the granularity sweep (`POOL_PLAN.md` §4). No
+planner is involved — that is the point. Phase 1 asks only whether a small model
+executes small tasks reliably; whether anything can *write* these lists is a
+separate question, and mixing the two makes a bad number unattributable.
+
+## The confound this format exists to remove
+
+The obvious way to write a fine-grained backlog is to spell out every function
+name, signature and edge case, and the obvious way to write a coarse one is to
+gesture at the job. Run those against each other and a win for fine-grained is
+unreadable: it may be the small tasks, or it may be that the fine backlog simply
+*told the model more*. The eval already had to guard the same thing once —
+guided beat raw on the 9B and the finding only counted because guided leaked no
+information the goal did not already carry.
+
+So: **`SPEC.md` is shared, complete, and identical for every backlog.** Every
+module, signature, edge case, and the exact report layout live there. Backlog
+prompts point at spec sections; they do not add requirements. The only thing
+that varies across `coarse.toml`, `medium.toml` and `fine.toml` is **how the
+same specified work is cut up and handed out.**
+
+For the same reason every backlog gets per-task checks at its own granularity.
+Giving fine-grained tasks checks and coarse ones none would move enforcement and
+size together, which is two variables again.
+
+## Layout
+
+```
+expenses/
+  SPEC.md          the specification — shared, identical, the only source of requirements
+  files/           dropped into each scratch dir: expenses.csv, check.py
+  coarse.toml      3 tasks
+  medium.toml      8 tasks
+  fine.toml        22 tasks
+  reference/       a correct solution, used only by verify.py
+```
+
+`files/check.py` is the shared end-to-end check. It drives `cli.py` as a
+subprocess and compares stdout byte for byte, so it knows nothing about which
+modules exist or how the work was divided — a grader that could tell the
+granularities apart would not be grading the same thing three times. It also
+writes CSVs of its own (no header, `$5` with no decimal part, an empty file) so
+it is not only checking the fixture the model was handed.
+
+## Running a backlog
+
+```
+python3 evals/pool/run_pool.py evals/pool/expenses/coarse.toml
+python3 evals/pool/run_pool.py evals/pool/expenses/*.toml --json sweep.json
+```
+
+**Phase 1 needs no Rust.** A disposable worker is just another `worksmith`
+process — separate invocation, fresh context, its own `--until` — so the
+readiness gate, per-task acceptance and blocked dependents all live in
+`run_pool.py`, and the number that decides the experiment can be had before
+`worker.rs` is touched. Dependency gating in the Rust manager is what makes the
+pool a *feature* inside worksmith; it is not what makes it measurable, and doing
+it first would have been building the product to run the experiment that says
+whether to build the product.
+
+Dispatch is sequential. Two ready tasks share one directory and a backlog does
+not declare which file a task writes — in `medium.toml`, `parse-amount` and
+`format-cents` are both roots and both write `money.py`, so running them at once
+clobbers one and scores it as a model failure. Concurrency needs a `writes` key
+first, and it would buy only wall clock, which this project spends freely.
+
+## test_dispatch.py
+
+```
+python3 evals/pool/test_dispatch.py
+```
+
+Drives the dispatcher with stub agents instead of a model: one that writes the
+reference solution, one that writes nothing and reports `done`, one that starts
+working too late. Between them they check that tasks run in dependency order,
+that output is attributed to the task that produced it, that a failure blocks
+its dependents rather than running them on a broken dependency, and that
+"declared success, check disagrees" is counted.
+
+The dispatcher is as much under test as the model is, and none of that needs a
+model run to answer.
+
+## verify.py
+
+```
+python3 evals/pool/verify.py
+```
+
+Runs every per-task check and every end-to-end check against `reference/`. An
+answer key nobody graded is how a day gets spent discovering the model was right
+and the check was wrong. It also refuses a cycle or a dangling `needs`.
+
+It cannot prove a check is *strict* enough. Nothing can; that is what the runs
+are for.
+
+## Known cost of fine granularity, recorded before the runs
+
+`fine.toml` is not mostly a chain, it is entirely one: twenty-two tasks, twenty-
+two deep, never more than one runnable at a time, because each extends the file
+the last one wrote. Pool concurrency does nothing for it and its wall clock will
+be worse than coarse.
+
+Accepted, not apologised for. The target user runs a local model on a Mac and is
+already slow, so seconds are not the scarce resource. Work, then correct, then
+fast.
+
+Tokens are a different currency and are still scarce: cost per *solved* task can
+kill this experiment (`POOL_PLAN.md` §8), wall clock cannot.

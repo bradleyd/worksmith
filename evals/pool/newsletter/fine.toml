@@ -1,0 +1,130 @@
+name = "newsletter-fine"
+granularity = "fine"
+description = "Fourteen tasks — one action and one artifact each"
+validate = "bash check.sh"
+files = ["check.sh"]
+
+# The expenses fixture asked every task to regenerate a 60-line file, so a
+# "small" task never produced a small artifact and granularity could not vary
+# what mattered. These tasks are small the way real delegated work is small:
+# one directory, one file, one section. Most are a single tool call, and every
+# check is mechanical — a file exists, a heading matches, a count clears a
+# threshold — so nothing here needs a judge.
+
+[[task]]
+id = "mkdir-ideas"
+prompt = "Create a directory named ideas/ in the current directory."
+validate = "test -d ideas"
+
+[[task]]
+id = "topics-file"
+needs = ["mkdir-ideas"]
+prompt = "Create the file ideas/topics.md whose first line is exactly: # Topics"
+validate = "head -1 ideas/topics.md | grep -qx '# Topics'"
+
+[[task]]
+id = "topics-list"
+needs = ["topics-file"]
+prompt = """
+Add exactly three bullet points to ideas/topics.md, each on its own line
+starting with '- ', each naming a distinct topic about testing local AI models.
+Keep the '# Topics' heading as the first line.
+"""
+validate = "test $(grep -c '^- ' ideas/topics.md) -eq 3 && head -1 ideas/topics.md | grep -qx '# Topics'"
+
+[[task]]
+id = "mkdir-drafts"
+prompt = "Create a directory named drafts/ in the current directory."
+validate = "test -d drafts"
+
+[[task]]
+id = "article-title"
+needs = ["mkdir-drafts"]
+prompt = """
+Create the file drafts/article1.md. Its first line must be a level-1 markdown
+heading: a '# ' followed by a title of at least three words about testing local
+AI models. Write nothing else yet.
+"""
+validate = "head -1 drafts/article1.md | grep -Eq '^# +\\S+( +\\S+){2,}'"
+
+[[task]]
+id = "intro"
+needs = ["article-title"]
+prompt = """
+In drafts/article1.md, write an introduction paragraph of at least 60 words
+below the title. Leave the title line unchanged.
+"""
+validate = "test $(tail -n +2 drafts/article1.md | wc -w) -ge 60"
+
+[[task]]
+id = "background-heading"
+needs = ["intro"]
+prompt = "In drafts/article1.md, add a line that is exactly '## Background' after the introduction."
+validate = "grep -qx '## Background' drafts/article1.md"
+
+[[task]]
+id = "background-body"
+needs = ["background-heading"]
+prompt = "In drafts/article1.md, write at least 80 words under the '## Background' heading."
+validate = "test $(sed -n '/^## Background/,$p' drafts/article1.md | tail -n +2 | wc -w) -ge 80"
+
+[[task]]
+id = "tried-heading"
+needs = ["background-body"]
+prompt = "In drafts/article1.md, add a line that is exactly '## What we tried' after the Background section."
+validate = "grep -qx '## What we tried' drafts/article1.md"
+
+[[task]]
+id = "tried-body"
+needs = ["tried-heading"]
+prompt = "In drafts/article1.md, write at least 80 words under the '## What we tried' heading."
+validate = "test $(sed -n '/^## What we tried/,$p' drafts/article1.md | tail -n +2 | wc -w) -ge 80"
+
+[[task]]
+id = "meta-json"
+needs = ["article-title"]
+prompt = """
+Create drafts/article1.meta.json containing a JSON object with two keys: title,
+a string holding the article title without the leading '# ', and status, the
+string "draft".
+"""
+validate = '''
+python3 -c "
+import json; d=json.load(open('drafts/article1.meta.json'))
+assert d['status']=='draft', d
+assert isinstance(d['title'],str) and len(d['title'].split())>=3, d
+print('ok')"
+'''
+
+[[task]]
+id = "meta-wordcount"
+needs = ["meta-json", "tried-body"]
+prompt = """
+Add a word_count key to drafts/article1.meta.json whose value is the number of
+whitespace-separated words in drafts/article1.md. Keep the other keys.
+"""
+validate = '''
+python3 -c "
+import json; d=json.load(open('drafts/article1.meta.json'))
+actual=len(open('drafts/article1.md').read().split())
+assert d['word_count']==actual, (d.get('word_count'), actual)
+assert d['status']=='draft'
+print('ok')"
+'''
+
+[[task]]
+id = "readme"
+needs = ["article-title"]
+prompt = """
+Create README.md listing every file in drafts/ as a markdown bullet, one per
+line, each starting with '- ' and naming the file.
+"""
+validate = "grep -q '^- .*article1\\.md' README.md"
+
+[[task]]
+id = "makefile"
+prompt = """
+Create a Makefile with a target named check whose recipe prints the number of
+words in drafts/article1.md. Use a tab to indent the recipe, as make requires.
+"""
+validate = "grep -qE '^check:' Makefile && make -n check >/dev/null 2>&1"

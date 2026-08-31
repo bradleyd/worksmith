@@ -1,0 +1,195 @@
+name = "expenses-medium-inline"
+granularity = "medium-inline"
+description = "Eight tasks — medium granularity, acceptance criteria inlined"
+# No `spec` key: that is the variable under test.
+validate = "python3 check.py"
+files = ["expenses.csv", "check.py"]
+
+[[task]]
+id = "parse-amount"
+seed = "03-fc-signs"
+prompt = """
+Implement parse_amount(s: str) -> int in money.py — a text amount to cents.
+parse_amount("$12.50") == 1250. parse_amount("$1,234.56") == 123456 (commas are
+thousands separators). parse_amount("$5") == 500 (no decimal part is legal).
+parse_amount("-$4.75") == -475 (the minus comes before the dollar sign).
+Surrounding whitespace is stripped. Anything else raises ValueError, including
+"$-5.00", "12.5", "$1.234", "$1,23.45" and "".
+"""
+validate = '''
+python3 - <<'PY'
+from money import parse_amount
+assert parse_amount("$12.50") == 1250
+assert parse_amount("$1,234.56") == 123456
+assert parse_amount("$5") == 500
+assert parse_amount("-$4.75") == -475
+assert parse_amount("  $5.00 ") == 500
+for bad in ("$-5.00", "12.5", "$1.234", "", "$1,23.45"):
+    try:
+        parse_amount(bad); raise AssertionError(bad)
+    except ValueError:
+        pass
+print("ok")
+PY
+'''
+
+[[task]]
+id = "format-cents"
+seed = ""
+prompt = """
+Implement format_cents(n: int) -> str in money.py — cents to text.
+format_cents(1250) == "$12.50". format_cents(123456) == "$1,234.56".
+format_cents(-475) == "-$4.75" (the minus goes before the dollar sign).
+format_cents(0) == "$0.00".
+"""
+validate = '''
+python3 - <<'PY'
+from money import format_cents
+assert format_cents(1250) == "$12.50"
+assert format_cents(123456) == "$1,234.56"
+assert format_cents(-475) == "-$4.75"
+assert format_cents(0) == "$0.00"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "parse-line"
+seed = "08-pa-reject"
+needs = ["parse-amount"]
+prompt = """
+Implement parse_line(line: str) -> dict in records.py — one CSV row to a record.
+Fields are date,category,description,amount in that order. Parse with the csv
+module, not str.split: a description may be quoted and contain commas, so
+parse_line('2026-01-03,Groceries,"Milk, eggs",$12.50') returns
+{"date": "2026-01-03", "category": "groceries", "description": "Milk, eggs",
+"amount": 1250}. date and description are kept verbatim; category is stripped
+and lowercased; amount goes through money.parse_amount and is an int. A row that
+is not exactly four fields raises ValueError.
+"""
+validate = '''
+python3 - <<'PY'
+from records import parse_line
+r = parse_line('2026-01-03,Groceries,"Milk, eggs",$12.50')
+assert r == {"date": "2026-01-03", "category": "groceries",
+             "description": "Milk, eggs", "amount": 1250}, r
+assert parse_line("2026-01-06, GROCERIES ,Refund,-$4.75")["category"] == "groceries"
+try:
+    parse_line("a,b,c"); raise AssertionError("3 fields")
+except ValueError:
+    pass
+print("ok")
+PY
+'''
+
+[[task]]
+id = "parse-file"
+seed = "12-pl-reject"
+needs = ["parse-line"]
+prompt = """
+Implement parse_file(path: str) -> list[dict] in records.py — a file to records,
+in file order, each via parse_line. A first line beginning "date," (case
+insensitive) is a header and is skipped. Blank lines are skipped. A file with no
+records returns []. The provided expenses.csv has 7 records; the first has
+description "Milk, eggs" and the last has amount -1100.
+"""
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+rows = parse_file("expenses.csv")
+assert len(rows) == 7, len(rows)
+assert rows[0]["description"] == "Milk, eggs"
+assert rows[-1]["amount"] == -1100
+open("h.csv", "w").write("2026-02-01,Books,Vol 1,$5\n")
+assert len(parse_file("h.csv")) == 1
+open("e.csv", "w").write("date,category,description,amount\n")
+assert parse_file("e.csv") == []
+print("ok")
+PY
+'''
+
+[[task]]
+id = "totals"
+seed = "15-pf-blanks"
+needs = ["parse-file"]
+prompt = """
+Implement totals_by_category(rows) -> dict[str, int] in report.py — the net cents
+per category. A category whose net is zero is still present in the result. For
+the provided expenses.csv the result is
+{"groceries": 1100, "transit": 130956, "dining": 0}.
+"""
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import totals_by_category
+t = totals_by_category(parse_file("expenses.csv"))
+assert t == {"groceries": 1100, "transit": 130956, "dining": 0}, t
+print("ok")
+PY
+'''
+
+[[task]]
+id = "ranked"
+seed = "16-totals"
+prompt = """
+Implement ranked(totals) -> list[tuple[str, int]] in report.py — (category, total)
+sorted by total descending, ties broken by category name ascending.
+ranked({"a": 5, "b": 9}) == [("b", 9), ("a", 5)].
+ranked({"books": 10, "art": 10}) == [("art", 10), ("books", 10)].
+ranked({}) == [].
+"""
+validate = '''
+python3 - <<'PY'
+from report import ranked
+assert ranked({"a": 5, "b": 9}) == [("b", 9), ("a", 5)]
+assert ranked({"books": 10, "art": 10}) == [("art", 10), ("books", 10)]
+assert ranked({}) == []
+print("ok")
+PY
+'''
+
+[[task]]
+id = "format-report"
+seed = "18-ranked-ties"
+needs = ["totals", "ranked", "format-cents"]
+prompt = """
+Implement format_report(rows) -> str in report.py — the whole report, no trailing
+newline. Every line is a category left-justified to width 12 followed by an
+amount right-justified to width 10 (22 characters). In order: the CATEGORY/TOTAL
+header pair; one line per category in ranked order with amounts via
+format_cents; exactly 22 "-" characters; then TOTAL and the grand total as that
+same pair. For the provided expenses.csv it is exactly:
+
+CATEGORY         TOTAL
+transit      $1,309.56
+groceries       $11.00
+dining           $0.00
+----------------------
+TOTAL        $1,320.56
+"""
+validate = '''
+python3 - <<'PY'
+from records import parse_file
+from report import format_report
+want = """CATEGORY         TOTAL
+transit      $1,309.56
+groceries       $11.00
+dining           $0.00
+----------------------
+TOTAL        $1,320.56"""
+got = format_report(parse_file("expenses.csv"))
+assert got == want, f"\n{got!r}\n{want!r}"
+print("ok")
+PY
+'''
+
+[[task]]
+id = "cli"
+seed = "20-fr-total"
+needs = ["format-report", "parse-file"]
+prompt = """
+Implement cli.py. `python3 cli.py <path>` prints format_report(parse_file(path))
+and a trailing newline, exiting 0. If the file does not exist, print
+"error: no such file: <path>" to stderr, print nothing to stdout, and exit 2.
+"""
+validate = "python3 check.py"

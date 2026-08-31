@@ -1,0 +1,105 @@
+name = "newsletter-fine-unchecked"
+granularity = "fine-unchecked"
+description = "Fourteen tasks, no per-task checks — isolates verification density from task size"
+validate = "bash check.sh"
+files = ["check.sh"]
+
+# Same fourteen tasks as fine.toml, same order, same dependencies — with
+# every per-task check removed. fine.toml gives the model fourteen places
+# to be caught and corrected; coarse.toml gives it three. That difference
+# travels with granularity in both fixtures, so a fine win is equally well
+# explained by "more checkpoints" as by "smaller tasks". This arm holds
+# granularity fixed and removes the checkpoints, which is the only way to
+# tell those two apart. The end-to-end check is kept: something has to
+# grade the run.
+
+[[task]]
+id = "mkdir-ideas"
+prompt = "Create a directory named ideas/ in the current directory."
+
+[[task]]
+id = "topics-file"
+needs = ["mkdir-ideas"]
+prompt = "Create the file ideas/topics.md whose first line is exactly: # Topics"
+
+[[task]]
+id = "topics-list"
+needs = ["topics-file"]
+prompt = """
+Add exactly three bullet points to ideas/topics.md, each on its own line
+starting with '- ', each naming a distinct topic about testing local AI models.
+Keep the '# Topics' heading as the first line.
+"""
+
+[[task]]
+id = "mkdir-drafts"
+prompt = "Create a directory named drafts/ in the current directory."
+
+[[task]]
+id = "article-title"
+needs = ["mkdir-drafts"]
+prompt = """
+Create the file drafts/article1.md. Its first line must be a level-1 markdown
+heading: a '# ' followed by a title of at least three words about testing local
+AI models. Write nothing else yet.
+"""
+
+[[task]]
+id = "intro"
+needs = ["article-title"]
+prompt = """
+In drafts/article1.md, write an introduction paragraph of at least 60 words
+below the title. Leave the title line unchanged.
+"""
+
+[[task]]
+id = "background-heading"
+needs = ["intro"]
+prompt = "In drafts/article1.md, add a line that is exactly '## Background' after the introduction."
+
+[[task]]
+id = "background-body"
+needs = ["background-heading"]
+prompt = "In drafts/article1.md, write at least 80 words under the '## Background' heading."
+
+[[task]]
+id = "tried-heading"
+needs = ["background-body"]
+prompt = "In drafts/article1.md, add a line that is exactly '## What we tried' after the Background section."
+
+[[task]]
+id = "tried-body"
+needs = ["tried-heading"]
+prompt = "In drafts/article1.md, write at least 80 words under the '## What we tried' heading."
+
+[[task]]
+id = "meta-json"
+needs = ["article-title"]
+prompt = """
+Create drafts/article1.meta.json containing a JSON object with two keys: title,
+a string holding the article title without the leading '# ', and status, the
+string "draft".
+"""
+
+[[task]]
+id = "meta-wordcount"
+needs = ["meta-json", "tried-body"]
+prompt = """
+Add a word_count key to drafts/article1.meta.json whose value is the number of
+whitespace-separated words in drafts/article1.md. Keep the other keys.
+"""
+
+[[task]]
+id = "readme"
+needs = ["article-title"]
+prompt = """
+Create README.md listing every file in drafts/ as a markdown bullet, one per
+line, each starting with '- ' and naming the file.
+"""
+
+[[task]]
+id = "makefile"
+prompt = """
+Create a Makefile with a target named check whose recipe prints the number of
+words in drafts/article1.md. Use a tab to indent the recipe, as make requires.
+"""

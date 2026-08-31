@@ -25,6 +25,10 @@ docs say so out loud.
 - [**The validation loop**](validation-loop.md) — why the loop exists, what
   "done" means, how a failure becomes a re-plan, and the two evals that bound
   the claim: decisive on a weak model, dead weight on a capable one.
+- [**Measuring the harness**](measuring.md) — the 22 task comparison: 56% for a
+  4B alone, 95% for the same model in the loop, 100% for Sonnet at 26 cents.
+  Includes the four results we retracted and the measurement bugs that produced
+  them.
 - **Workers** (coming soon) — one `/spawn` into N workers, the supervisor that
   is the same nudge/escalate mechanism applied to many, and the worker
   validator that closes the same hole in the background.

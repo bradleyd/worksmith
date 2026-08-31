@@ -15,6 +15,63 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
+- **A task can fail nine checks in a row and nothing notices it is going
+  nowhere.** `pa-reject` on Qwen3.5-4B, three isolated runs: 0/3, taking 327s,
+  900s (timed out) and 436s, burning 9,033 / 24,939 / 13,650 generated tokens.
+  In every run the model read the file, made valid `edit` calls, ran its check,
+  failed, and edited again.
+
+  **It is not a tool-choice problem.** Across those three runs: 32 `edit` calls,
+  **zero** `edit` errors, and **zero** `write` calls. The model reaches for the
+  right tool and uses it correctly. An earlier note here claimed whole-file
+  rewriting, built on one run averaging 1,201 generated tokens per model call;
+  the three instrumented runs average 311, 500 and 580, and the theory does not
+  survive them. Corrected rather than deleted, because the wrong version is in
+  the git history.
+
+  What actually happens is a no-progress loop: valid edits, the same check
+  failing the same way, over and over. The harness cannot see it. The supervisor
+  keys its repeat detector on `format!("{name}::{arguments}")`
+  (`supervisor.rs:159`), so it only catches literally identical calls — which is
+  why what finally stopped two of these runs was noticing the same `bash`
+  command five times, several minutes in, rather than the nine failed checks.
+  And `agent.rs:610` already counts consecutive validation failures, but counts
+  *any* failures: three different errors is a model working through a problem,
+  three identical ones is not, and it treats them alike.
+
+  **The fix is small and the plumbing exists.** `Event::Validation { ok, detail }`
+  (`event.rs:61`) is already emitted on every failed check with the check's
+  output as `detail`, and `Supervisor` already has the
+  `HashMap<String, u32>` + threshold + nudge-then-escalate shape. What is missing
+  is a match arm. Normalise the detail first: our own failures carry a temp path
+  and a `line 32` that moves every time the model edits above it, so a raw hash
+  changes precisely when the model is editing, which is when you need it not to.
+
+  Not needed, having checked: search/replace (that is `edit`, already anchored
+  and unique-match), a `write` nudge (never called), or a port from
+  `rustopedia/` (its circuit breaker guards patch-format drift, which worksmith
+  structurally cannot have, since tool calls are schema-validated).
+
+- **An unattended worker can approve its own outward-facing actions.**
+  `approve_write_outside_cwd` (`tools/mod.rs:270`) does gate writes that leave
+  the project, so the earlier note here blaming a missing confinement was wrong:
+  the eval overwrote its own answer key because it passes `--approve-all`, which
+  approves the gate on the model's behalf. That is the eval's choice and fine
+  for the eval. The open question is what a *spawned worker* inherits. Nobody is
+  watching a background worker, so it answering its own approval prompt is the
+  same hazard `PAIR_PLAN.md` names for checkpoints and solves with
+  `RefuseWhenUnattended`. Worth checking which approver `worker.rs` hands out
+  before the supervisor grows any policy role, since enforcement lives in the
+  tool layer and the supervisor only observes.
+
+- **`config check` accepts `--trust-project` and ignores it.** The flag is on
+  the subcommand's `--help`, but `run_config_check` never passes it:
+  `Check::run(cwd, probe)` consults only the trust store, so an untrusted
+  project config is reported `not trusted` and every key in it is silently
+  omitted from the report. Found while adding `[models."omlx/..."]` tables to
+  this repo's project config — they did not appear, and the natural reading is
+  that the tables are broken rather than that the report is. `main.rs:1479`.
+
 - **`/pair` bare toggles instead of reporting.** Every other state command
   (`/validate`, `/route`, `/mouse`) reports when given no argument. `/pair`
   flips it, so checking whether pairing is on turns it off. Bare should report;

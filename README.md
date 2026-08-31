@@ -46,6 +46,41 @@ capability a model lacks, and above some line it is pure overhead.
 That narrows the pitch on purpose. This earns its keep when the model is weak
 enough to need it.
 
+**On somebody else's benchmark.** HumanEval, all 164 problems, hosted
+qwen3.5-9b. The model alone scores 83%. With the harness it scores 99%.
+
+Shown the tests as plain text and left to answer in one shot, it scores 82%. So
+the gain is not that the check leaks the answer, it is that the model is made to
+run it: 28 problems rescued that it failed one shot, one lost that it had
+passed. Two cents for the run.
+
+**A tighter measurement, on 22 tasks.** The eval above turns validation off by
+flipping one flag, which still leaves the model its tools and its retries. So we
+built a control that removes the harness entirely: one shot at the task, no
+tools, no supervisor, no timeout, graded by the same check. Three attempts per
+task, every arm.
+
+A Qwen3.5-4B scores 56% that way, and 97% with the harness in the loop. A bare
+9B, more than twice the parameters, manages 80%.
+
+The pass rate undersells it. Counting tasks rather than attempts, the same 4B
+goes from 9 that always pass to 20, and from 6 it never passes to none. Nothing
+in the suite is beyond the harness.
+
+Claude Sonnet 5 one-shots all 22 tasks, three times out of three, for 26 cents,
+and is 22 always-pass with no coin flips against the 4B's 20 and 2. Per task
+that is three points. Across a 22 step chain those two coin flips compound, so
+the harness closes most of the gap and not all of it. The local model is free
+and takes 111 minutes instead of a few.
+
+Getting to those numbers took four wrong answers first, and they are written up
+alongside the right one in [Measuring the harness](https://worksmith.sh/guide/measuring/).
+Three of them were bugs in the measurement that produced plausible looking
+results: a timeout that discarded the evidence of what it interrupted, two
+timeouts set to the same value so a stall got killed before it could be
+reported, and a "do not think" flag that one provider silently ignores. If you
+want to argue with the claim, start there.
+
 ## Install
 
 **Homebrew** (macOS, no Rust toolchain needed):

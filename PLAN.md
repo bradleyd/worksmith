@@ -1071,6 +1071,19 @@ fraction of the work), and more eval runs of things already answered.
    also answers "watch worker w2 work" — let tabs land as part of this rather
    than as their own goal.
 
+   **Evidence for moving this up, 2026-08-30.** The pool experiment had to
+   rebuild a shadow M9 in Python to answer basic questions, and every number it
+   needed is already on M9's list above: turn count, tokens per solved task,
+   cache hit rate, prefill share of compute, effective tok/s. Two examples of
+   what that bought. A 22-task run took 35 minutes, and the split turned out to
+   be 64% raw generation against 36% prefill, tools and process spawn — which
+   says the speed work is fewer turns, not faster inference, and nothing in
+   worksmith could have told you that. Effective throughput was flat at 23-31
+   tok/s on every task while token counts ranged from 290 to 27,615, so turn
+   count is the entire story and it is the one number a session never reports.
+   The eval harness can compute these only because it parses `--mode json` from
+   outside; a person in the TUI has no way to see any of it.
+
 6. **M11 worktree sandbox.** Already evidence-backed by the three-worker
    `draft-1.md` collision. Collision and undo — *not* a security boundary; that
    is item 4's job.
