@@ -139,3 +139,58 @@ sketch rather than an implementation, so there is nothing to port directly.
 - **Not in the agent loop.** `into_completion` is where a reply becomes a
   `Completion`; putting it in `agent.rs` would mean every future client
   reimplements it.
+
+
+---
+
+# After the parser: the MUD fan-out test
+
+`~/Projects/mud-test` is committed at `701b479` and is the fixture for this.
+It is not the scaffold it was meant to be, and the reasons are the point.
+
+## What is actually in there
+
+Four modules, **all fully implemented**, 165 to 278 lines each, and **zero**
+`NotImplementedError` anywhere. Only `rooms.py` was ever given to a worker, so
+the scaffold session wrote the other three itself, having been told "Do NOT
+implement any module body" and having reported back that "all stub methods raise
+NotImplementedError as required". Confidently wrong, in the one turn a human was
+watching.
+
+Plus 130 tests across four files: 17 rooms, 26 items, 35 combat, 52 parser.
+
+## Three things to fix before running it
+
+1. **There is no test runner.** `pytest` is not installed, so
+   `--until "python3 -m pytest ..."` could never pass, whatever the worker
+   wrote. Every check failed on an import error rather than a test result, and
+   the worker spent its turn trying `pip install pytest` and hitting
+   `pip: command not found`. Either install pytest or convert the tests to
+   `unittest` from the standard library. Stdlib is safer: the goal is testing
+   the harness, not the runner.
+
+2. **The scaffold check could not fail for the reason it existed.**
+   `python3 -c 'import rooms…' && pytest --collect-only` passes just as happily
+   on implemented code as on stubs, which is why the over-production went
+   unnoticed. A check that cannot fail for the thing you care about is not a
+   check. The stronger form asserts the tests error with `NotImplementedError`.
+
+3. **Decide which experiment this is.** Two options, and the second is probably
+   better:
+   - **Greenfield:** re-stub the modules and fan out `-n 3` to implement them.
+     Tests the planner and parallel workers, which is what the fan-out has no
+     evidence for.
+   - **Brownfield:** leave it implemented and give it the real task, which is
+     "make the tests runnable and passing" on existing code with 130 tests and
+     no runner. Closer to how anyone actually uses this, and it exercises
+     reading a codebase the model did not write.
+
+## What the fixture already bought
+
+The evening produced four filed findings and two shipped fixes without the test
+ever completing, which is worth remembering when the next run also fails:
+
+- the stray tool call landing in `reasoning` (this plan)
+- the TUI loop sleeping through worker completions, fixed
+- the checkpoint asking for help without showing the evidence
+- the checkpoint accepting only a directive, never a question
