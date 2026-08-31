@@ -12,7 +12,35 @@ This page is the measurement, the arms it took to isolate it, and the four
 results we published to ourselves and then had to retract. If you want to poke
 holes in the claim, the holes we already found are here.
 
-## The number
+## The number that needs no trust
+
+HumanEval, all 164 problems, hosted `qwen/qwen3.5-9b`. OpenAI's problems,
+OpenAI's tests, and the tests are both the `--until` check and the grader.
+Nothing here was written by us.
+
+| arm | passed |
+|---|---|
+| the model alone, one shot | 135/163, 83% |
+| the model alone, shown the tests as text | 134/163, 82% |
+| **the model with the harness** | **162/164, 99%** |
+
+The middle row is the one to look at first, because it kills the objection a
+reader should raise. If the harness helps only because its check tells the model
+something it did not know, then handing the model the same tests as plain text
+should help too. It does not: 83% against 82%. So the +17 points come from being
+made to check, not from being told.
+
+Per problem: 28 rescued that the model failed one shot, 1 lost that it had
+passed, 1 that failed either way. The harness is not strictly better and that
+one regression stays in the table.
+
+Two cents, about 900 generated tokens per problem.
+
+What it does not cover: HumanEval is one shot function writing, with no existing
+codebase, no chain of dependent tasks and no editing. It tests the validation
+loop and nothing else.
+
+## The number on our own fixture
 
 One fixture, 22 small coding tasks that build a working command line tool.
 Every task carries a check. Each arm runs the same tasks from the same starting

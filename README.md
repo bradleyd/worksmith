@@ -46,6 +46,14 @@ capability a model lacks, and above some line it is pure overhead.
 That narrows the pitch on purpose. This earns its keep when the model is weak
 enough to need it.
 
+**On somebody else's benchmark.** HumanEval, all 164 problems, hosted
+qwen3.5-9b. The model alone scores 83%. With the harness it scores 99%.
+
+Shown the tests as plain text and left to answer in one shot, it scores 82%. So
+the gain is not that the check leaks the answer, it is that the model is made to
+run it: 28 problems rescued that it failed one shot, one lost that it had
+passed. Two cents for the run.
+
 **A tighter measurement, on 22 tasks.** The eval above turns validation off by
 flipping one flag, which still leaves the model its tools and its retries. So we
 built a control that removes the harness entirely: one shot at the task, no
