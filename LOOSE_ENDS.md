@@ -15,26 +15,33 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
-- **A "stopped" worker can still write to your files.** Seen live during a MUD
-  scaffold: the manager reported `agent w1 [stopped] · changed 1 file(s) ...
-  stuck: the model returned an empty response`, and *after* that line an `edit`
-  landed on `rooms.py` (+5 -5).
+- **An edit appeared after a worker was reported stopped, and it is not yet
+  clear which of two bugs that is.** Seen live during a MUD scaffold: the
+  manager printed `agent w1 [stopped] · changed 1 file(s) ... stuck: the model
+  returned an empty response`, and after that line an `edit` landed on
+  `rooms.py` (+5 -5).
 
-  Cancellation is checked once per step, at the top of the loop
-  (`agent.rs:737`), and tool execution is not interruptible. So a call already
-  dispatched runs to completion and its write lands after the worker has been
-  reported stopped. The same shape as an inference server that keeps generating
-  after the client disconnects, which we also hit today with oMLX.
+  Two candidates, with different severity, and the display cannot distinguish
+  them:
 
-  "Stopped" therefore means "will take no further steps", not "has stopped
-  touching your files", and the difference matters most in exactly the case
-  stopping exists for: a worker doing something you want halted. It is also
-  worse for a fan-out, where several workers share one directory and a
-  post-stop write can land on a file another worker has since taken over.
+  1. **A leaked write.** Cancellation is checked once per step at the top of the
+     loop (`agent.rs:737`) and tool execution is not interruptible, so a call
+     already dispatched completes and its write lands after the stop was
+     reported. That would mean "stopped" is "takes no further steps" rather than
+     "has stopped touching your files", which matters most in the case stopping
+     exists for, and more in a fan-out where a post-stop write can land on a
+     file another worker has taken over.
+  2. **Out-of-order rendering.** The tail reads the worker's bounded log while
+     the terminal status comes from the manager's runtime state. Two sources,
+     no ordering between them, so an edit from *before* the stop can print
+     after it. Cosmetic.
 
-  Not yet confirmed whether the tail can also render events out of order, which
-  would make this cosmetic; the mechanism above says it is real. A trace with
-  timestamps would settle it.
+  Ruled out: a worker-level retry. Nothing in `worker.rs` retries or respawns;
+  each worker gets one `run_turn`.
+
+  **Settled by timestamps.** The worker's session file records `ts` on every
+  event, so comparing the `edit` against `turn_complete` says which it is
+  without any new instrumentation.
 
 - **A small model drops out of structured tool calls and the turn is scored
   empty.** Seen live, hosted qwen3.5-9b, mid-session: the model emitted
