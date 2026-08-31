@@ -2228,26 +2228,40 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             }
         }
         "pair" => {
-            let on = match parts.next() {
-                None => !agent.pairing_on(),
-                Some("on") => true,
-                Some("off") => false,
+            match parts.next() {
+                None => {
+                    // Report current pairing state
+                    let on = agent.pairing_on();
+                    app.push(
+                        Kind::Notice,
+                        if on {
+                            "pairing on — the loop will stop at decisions worth your say. Spawned \
+                             workers never will.".to_string()
+                        } else {
+                            "pairing off — the checkpoint is no longer offered to the model".to_string()
+                        },
+                    );
+                }
+                Some("on") => {
+                    agent.set_pairing(true);
+                    app.push(
+                        Kind::Notice,
+                        "pairing on — the loop will stop at decisions worth your say. Spawned \
+                         workers never will.".to_string(),
+                    );
+                }
+                Some("off") => {
+                    agent.set_pairing(false);
+                    app.push(
+                        Kind::Notice,
+                        "pairing off — the checkpoint is no longer offered to the model".to_string(),
+                    );
+                }
                 Some(other) => {
                     app.push(Kind::Error, format!("usage: /pair [on|off] (got {other})"));
                     return Ok(true);
                 }
-            };
-            agent.set_pairing(on);
-            app.push(
-                Kind::Notice,
-                if on {
-                    "pairing on — the loop will stop at decisions worth your say. Spawned \
-                     workers never will."
-                        .to_string()
-                } else {
-                    "pairing off — the checkpoint is no longer offered to the model".to_string()
-                },
-            );
+            }
         }
         "route" => {
             // Deliberately not folded into /fast. `sort` changes *which
