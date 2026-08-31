@@ -171,6 +171,12 @@ impl ThinkingMode {
     }
 }
 
+/// How many times a checkpoint will go round before it gives up on getting an
+/// instruction. A question is answered and the checkpoint asks again — pairing
+/// is a conversation — but a conversation that never reaches an instruction is
+/// still a turn that never ends.
+const MAX_CHECKPOINT_ROUNDS: usize = 4;
+
 /// How many empty completions in a row to absorb with a nudge before calling
 /// the turn stuck. One is usually a thinking model overshooting its budget and
 /// it recovers when told to answer; a run of them is not going to.
@@ -1121,23 +1127,80 @@ impl Agent {
         if !self.pairing_on() {
             return None;
         }
-        self.emit(session, Event::Checkpoint {
-            kind: "ask".to_string(),
-            subject: subject.to_string(),
-            detail: question.to_string(),
-        });
-        // Deliberately not spending `checkpoints_left`. That cap exists to stop
-        // a model being chatty; this fires at most once per validation retry
-        // and once per stuck turn, and it is the high-value one — being crowded
-        // out by three notes would be exactly backwards.
-        let answer = self.tool_ctx.asker.ask_text(subject, question).await;
-        let answer = answer.filter(|a| !a.trim().is_empty())?;
-        self.emit(session, Event::Checkpoint {
-            kind: "answered".to_string(),
-            subject: subject.to_string(),
-            detail: answer.clone(),
-        });
-        Some(answer)
+
+        // Show the work, not a summary of it. The first checkpoint to fire in
+        // anger offered exactly `the model returned an empty response` and
+        // nothing else, so the user had to go read the transcript before they
+        // could say anything useful — and the thing they needed was a
+        // `<tool_call>` block sitting in the model's reasoning. A checkpoint
+        // that asks for help while withholding the evidence is asking the user
+        // to do the harness's work.
+        let evidence = recent_evidence(session);
+        let mut detail = if evidence.is_empty() {
+            question.to_string()
+        } else {
+            format!("{question}\n\nWhat just happened:\n\n{evidence}")
+        };
+
+        for _ in 0..MAX_CHECKPOINT_ROUNDS {
+            self.emit(session, Event::Checkpoint {
+                kind: "ask".to_string(),
+                subject: subject.to_string(),
+                detail: detail.clone(),
+            });
+            // Deliberately not spending `checkpoints_left`. That cap exists to
+            // stop a model being chatty; this fires at most once per validation
+            // retry and once per stuck turn, and it is the high-value one —
+            // being crowded out by three notes would be exactly backwards.
+            let answer = self.tool_ctx.asker.ask_text(subject, &detail).await;
+            let answer = answer.filter(|a| !a.trim().is_empty())?;
+            self.emit(session, Event::Checkpoint {
+                kind: "answered".to_string(),
+                subject: subject.to_string(),
+                detail: answer.clone(),
+            });
+
+            // A directive is what the caller wants: it gets appended to the
+            // conversation as something to follow.
+            if !is_question(&answer) {
+                return Some(answer);
+            }
+
+            // A question is not. Every caller wraps this answer in "the user
+            // says … follow that", so "what seems to be the issue?" used to be
+            // handed to the model as an order — and it spent the single
+            // intervention the turn allows doing it. Answer it here instead,
+            // out of band, and come back round. Nothing is appended to the
+            // conversation and `offered_a_way_in` is untouched, because nothing
+            // was decided yet.
+            let reply = match self
+                .ask(
+                    "You are a coding agent that has stopped mid-task to ask the user for \
+                     help. The user has asked you a question instead of giving you an \
+                     instruction. Answer it directly from the evidence, in at most four \
+                     sentences. Do not propose a plan and do not start working — the user \
+                     is deciding what you should do next.",
+                    &format!("{detail}\n\nThe user asks: {answer}"),
+                    400,
+                )
+                .await
+            {
+                Ok(t) => t.trim().to_string(),
+                // A failed side call must not eat the checkpoint. Say so and
+                // ask again; the user can still give an instruction.
+                Err(e) => format!("(could not answer that: {e})"),
+            };
+            self.emit(session, Event::Checkpoint {
+                kind: "note".to_string(),
+                subject: subject.to_string(),
+                detail: reply.clone(),
+            });
+            detail = format!(
+                "{reply}\n\nSo — what should it do differently? \
+                 (Enter to answer, Esc to end the turn.)"
+            );
+        }
+        None
     }
 
     /// Tool schemas for a request. `checkpoint` is dropped unless pairing is
@@ -1601,10 +1664,141 @@ fn cap_tool_output(s: String) -> String {
     )
 }
 
+/// What the model was just doing, rendered for a human to read.
+///
+/// Six messages back is enough to cover an assistant reply, the calls it
+/// made and what those returned, without pasting the turn back at the user.
+fn recent_evidence(session: &Session) -> String {
+    use crate::llm::Role;
+
+    let msgs = session.messages();
+    let start = msgs.len().saturating_sub(6);
+    let mut lines: Vec<String> = Vec::new();
+    for m in &msgs[start..] {
+        match m.role {
+            Role::Assistant => {
+                match m.content.as_deref().filter(|t| !t.trim().is_empty()) {
+                    Some(t) => lines.push(format!("it said: {}", excerpt(t, 600))),
+                    // On the failure that prompted all this, `content` is
+                    // empty and the words — including a tool call written
+                    // in the wrong channel — are in `reasoning`. That is
+                    // exactly the evidence, so it cannot be skipped just
+                    // because reasoning is display-only.
+                    None => {
+                        if let Some(r) =
+                            m.reasoning.as_deref().filter(|r| !r.trim().is_empty())
+                        {
+                            lines.push(format!("it was thinking: {}", excerpt(r, 600)));
+                        }
+                    }
+                }
+                for c in &m.tool_calls {
+                    lines.push(format!("it called `{}` with {}", c.name, excerpt(&c.arguments, 200)));
+                }
+            }
+            Role::Tool => lines.push(format!(
+                "`{}` returned: {}",
+                m.name.as_deref().unwrap_or("that"),
+                excerpt(m.content.as_deref().unwrap_or("(nothing)"), 300)
+            )),
+            // User messages here are mostly the harness's own nudges, and
+            // repeating them tells the user only what the harness already
+            // told them.
+            Role::User | Role::System => {}
+        }
+    }
+    lines.join("\n")
+}
+
+/// Is this answer a question rather than an instruction?
+///
+/// Deliberately the crudest possible test. Anything cleverer would
+/// occasionally read a directive as a question and refuse to act on it,
+/// which is a worse failure than answering a rhetorical one.
+fn is_question(answer: &str) -> bool {
+    answer.trim().ends_with('?')
+}
+
+/// Trim to `max` characters and say how much was left off, so the number is
+/// visible rather than the cut being silent.
+fn excerpt(s: &str, max: usize) -> String {
+    let s = s.trim();
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}… ({n} characters in all)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::Message;
+
+    #[test]
+    fn evidence_shows_the_reasoning_when_the_message_is_empty() {
+        // The exact shape of the failure this was built for: `content` is
+        // empty, the words are in `reasoning`, and the checkpoint used to
+        // offer nothing but "the model returned an empty response" — sending
+        // the user off to read the transcript to find the tool call sitting
+        // right here.
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+        session.append_message(Message::user("run the tests")).unwrap();
+        session
+            .append_message(Message::assistant(None, vec![]).with_trace(
+                Some("<tool_call><function=bash>…</function></tool_call>".to_string()),
+                Some("stop".to_string()),
+                Some("m".to_string()),
+            ))
+            .unwrap();
+
+        let e = recent_evidence(&session);
+        assert!(e.contains("it was thinking:"), "{e}");
+        assert!(e.contains("<function=bash>"), "the block itself is shown: {e}");
+        assert!(!e.contains("run the tests"), "the user's own words are not evidence: {e}");
+    }
+
+    #[test]
+    fn evidence_shows_calls_and_what_they_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+        session
+            .append_message(Message::assistant(Some("checking".into()), vec![crate::llm::ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"pytest"}"#.into(),
+            }]))
+            .unwrap();
+        session.append_message(Message::tool_result("c1", "bash", "pytest: not found")).unwrap();
+
+        let e = recent_evidence(&session);
+        assert!(e.contains("it said: checking"), "{e}");
+        assert!(e.contains("it called `bash`") && e.contains("pytest"), "{e}");
+        assert!(e.contains("`bash` returned: pytest: not found"), "{e}");
+    }
+
+    #[test]
+    fn a_long_excerpt_says_how_much_was_cut() {
+        let long = "x".repeat(900);
+        let out = excerpt(&long, 600);
+        assert!(out.ends_with("(900 characters in all)"), "{out}");
+        assert!(out.starts_with(&"x".repeat(600)));
+        // Short text is left exactly alone.
+        assert_eq!(excerpt("  hi  ", 600), "hi");
+    }
+
+    #[test]
+    fn a_trailing_question_mark_is_the_whole_test_for_a_question() {
+        assert!(is_question("what seems to be the issue?"));
+        assert!(is_question("why did that fail?\n"));
+        assert!(!is_question("use a regex instead"));
+        // A directive that happens to contain a question mark is still a
+        // directive: reading it as a question would refuse to act on it,
+        // which is the worse mistake of the two.
+        assert!(!is_question("is it the regex? if so, replace it with split()"));
+    }
 
     #[test]
     fn split_keeps_recent_turns_on_user_boundaries() {
@@ -1883,6 +2077,104 @@ mod checkpoint_tests {
         assert_eq!(asked.len(), 1, "exactly once, not once per retry: {asked:?}");
         assert!(asked[0].0.contains("failed twice"), "{:?}", asked[0].0);
         assert!(asked[0].1.contains("AssertionError: nope"), "the question carries the failure");
+    }
+
+    /// The checkpoint carries the evidence, not a summary of it. The first one
+    /// to fire in anger offered `the model returned an empty response` and
+    /// nothing else, so the user had to go read the transcript before they
+    /// could answer.
+    #[tokio::test]
+    async fn the_checkpoint_shows_what_the_model_was_doing() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::done("I rewrote the regex")],
+            vec![Some("try split() instead".to_string())],
+            50,
+        );
+        let v = AlwaysFails("AssertionError: nope");
+        let _ = agent
+            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let asked = asked.lock().unwrap();
+        assert!(asked[0].1.contains("What just happened:"), "{}", asked[0].1);
+        assert!(asked[0].1.contains("it said: I rewrote the regex"), "{}", asked[0].1);
+    }
+
+    /// A question is answered, not obeyed. Every caller wraps the answer in
+    /// "the user says … follow that", so "what seems to be the issue?" used to
+    /// be handed to the model as an order — and it spent the single
+    /// intervention the turn allows doing it.
+    #[tokio::test]
+    async fn a_question_is_answered_and_the_checkpoint_asks_again() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::done("the regex never matches an empty line")],
+            vec![
+                Some("what seems to be the issue?".to_string()),
+                Some("use split() instead".to_string()),
+            ],
+            50,
+        );
+        let v = AlwaysFails("AssertionError: nope");
+        let _ = agent
+            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 2, "asked, answered, asked again: {asked:?}");
+        assert!(
+            asked[1].1.contains("the regex never matches an empty line"),
+            "the second ask carries the answer to the first: {}",
+            asked[1].1
+        );
+        assert!(asked[1].1.contains("what should it do differently"), "{}", asked[1].1);
+
+        // And the question never became an instruction.
+        let said: Vec<&str> = session
+            .messages()
+            .iter()
+            .filter(|m| m.role == crate::llm::Role::User)
+            .filter_map(|m| m.content.as_deref())
+            .collect();
+        assert!(
+            said.iter().any(|t| t.contains("use split() instead")),
+            "the directive is what reaches the model: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|t| t.contains("what seems to be the issue?")),
+            "the question is not: {said:?}"
+        );
+    }
+
+    /// A conversation that never reaches an instruction is still a turn that
+    /// never ends. Bounded, and the bound is a normal ending rather than an
+    /// error.
+    #[tokio::test]
+    async fn questions_forever_still_end_the_turn() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::done("because the check fails")],
+            vec![
+                Some("why?".to_string()),
+                Some("but why?".to_string()),
+                Some("really, why?".to_string()),
+                Some("no, why?".to_string()),
+                Some("this one is never reached?".to_string()),
+            ],
+            50,
+        );
+        let v = AlwaysFails("AssertionError: nope");
+        let out = agent
+            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(asked.lock().unwrap().len(), MAX_CHECKPOINT_ROUNDS, "it stops asking");
+        assert!(
+            matches!(out.outcome, TurnOutcome::ValidationFailed(_)),
+            "and ends the ordinary way: {:?}",
+            out.outcome
+        );
     }
 
     /// Nobody to ask is a skip, not a failure. Every eval and `--print` run

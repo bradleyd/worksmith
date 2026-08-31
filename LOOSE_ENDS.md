@@ -12,7 +12,8 @@ provider tables / model tables all merged field-by-field (four separate keys
 that parsed, validated, and were then silently dropped); `worksmith config
 check` built, which found the fourth itself on its first run; `/model` steps 3
 and 4a; compaction no longer trades the whole context for a sentence; the
-forgiving tool-call parser (`llm/rescue.rs`).
+forgiving tool-call parser (`llm/rescue.rs`); both checkpoint complaints — it
+shows its evidence now, and it can take a question.
 
 ## Bugs
 
@@ -76,22 +77,37 @@ forgiving tool-call parser (`llm/rescue.rs`).
   to near zero; the regression to watch is the harness arm's 162/164 on
   HumanEval, scored 2026-08-30 with the parser absent.
 
-- **A checkpoint asks for help without showing the evidence.** The same
-  incident: the "Going in circles" checkpoint offered only `the model returned
-  an empty response`. It did not show the `<tool_call>` XML that *was* the
-  problem, so the user had to read it out of the transcript to answer usefully.
+- **A checkpoint asks for help without showing the evidence.** *Fixed —
+  `recent_evidence` in `agent.rs`.* The same incident: the "Going in circles"
+  checkpoint offered only `the model returned an empty response`. It did not
+  show the `<tool_call>` XML that *was* the problem, so the user had to read it
+  out of the transcript to answer usefully.
 
-  The retry directives in `rustopedia/retry_loop.rs` already do this properly —
-  they hand back the real file slice around the failure rather than a summary.
-  A checkpoint should carry the same: the last assistant message, or the last
-  couple of tool calls and their results.
+  Every checkpoint now carries the last six messages rendered for a human —
+  what the model said, what it called, what came back — appended to the question
+  under "What just happened". `reasoning` is included when `content` is empty,
+  which is the whole point: on this exact failure the words are in the reasoning
+  and nowhere else. The retry directives in `rustopedia/retry_loop.rs` were the
+  model for it, handing back the real slice rather than a summary.
 
-- **The checkpoint wants a directive and cannot take a question.** The answer is
-  appended as `"You were repeating yourself (…). The user says:\n\n{a}\n\n
-  Follow that."` (`agent.rs`). So asking "what seems to be the issue?" is passed
-  to the model as an instruction to follow, and it spends the one intervention
-  the turn allows, since `offered_a_way_in` blocks a second. Pairing is meant to
-  be a conversation; right now it is one imperative sentence.
+- **The checkpoint wants a directive and cannot take a question.** *Fixed —
+  `harness_checkpoint`.* The answer was appended as `"You were repeating
+  yourself (…). The user says:\n\n{a}\n\nFollow that."`, so asking "what
+  seems to be the issue?" was passed to the model as an instruction to follow,
+  and it spent the one intervention the turn allows, since `offered_a_way_in`
+  blocks a second.
+
+  An answer ending in `?` is now answered instead of obeyed: a side call
+  (`Agent::ask`, given the same evidence) replies, the reply is shown, and the
+  checkpoint asks again. Nothing is appended to the conversation and
+  `offered_a_way_in` is untouched, because nothing was decided. Bounded at
+  `MAX_CHECKPOINT_ROUNDS` = 4 — a conversation that never reaches an
+  instruction is still a turn that never ends — and running out is a normal
+  ending, not an error.
+
+  The question test is `ends_with('?')` and deliberately nothing cleverer.
+  Anything smarter occasionally reads a directive as a question and refuses to
+  act on it, which is the worse of the two mistakes.
 
 - **Pair mode has no visual identity.** When the harness stops to ask, it looks
   like any other prompt. It should read as a different mode — that the loop is
