@@ -19,8 +19,33 @@ cd /Users/bradleydsmith/Projects/mud-test && python -m pytest tests/ -v 2>&1 | h
 </tool_call>
 ```
 
-That is a well-formed intention in the wrong channel. The provider returns it in
-`content`, `tool_calls` is empty, and worksmith concludes the model said nothing.
+That is a well-formed intention in the wrong channel.
+
+**And usually the wrong channel is `reasoning`, not `content`.** A second sighting
+the same evening, rendered by the TUI with its `thinking` prefix:
+
+```
+thinking <tool_call>
+  <function=bash>
+  <parameter=command>
+  pip3 install pytest -q 2>&1 | tail -5
+  </parameter>
+  </function>
+  </tool_call>The background worker task ran but I need to verify …
+```
+
+That is the whole explanation for "empty response": `content` genuinely is
+empty, the call went into the provider's `reasoning` field, and `reasoning` is
+display-only and is never sent back to the model (`StreamEvent::ReasoningDelta`).
+So the model issues a tool call and worksmith throws it away.
+
+**A parser that reads only `content` will therefore never fire.** It has to
+consider `reasoning` as well. Note also that the reasoning holds prose *after*
+the block, so extraction must take the block and leave the rest rather than
+assuming the whole field is a call.
+
+With `tool_calls` empty and `content` empty, worksmith concludes the model said
+nothing.
 It nudges (`Your last response was empty. Make a tool call or give your answer.`),
 the model does the same thing again, and the turn ends
 `stuck: the model returned an empty response`.
@@ -44,8 +69,8 @@ this is checkable rather than arguable.
 `content`, `reasoning` and `tool_calls` are known together, and the only place
 this belongs.
 
-The rule: **if `tool_calls` is empty and `content` parses as a tool call, promote
-it.** Never when structured calls are present , a model that produced both is
+The rule: **if `tool_calls` is empty and a tool call can be parsed out of
+`content` or `reasoning`, promote it.** Never when structured calls are present , a model that produced both is
 already being understood, and reinterpreting its prose would invent calls it did
 not make.
 
@@ -60,8 +85,9 @@ than the failure it fixes.
 2. **A fenced JSON object** naming a tool:
    ` ```json {"name": "bash", "arguments": {...}} ``` `
 
-Anything else is left as content. When a block is promoted, strip it from
-`content` so the text is not both spoken and executed.
+Anything else is left alone. When a block is promoted, strip it from whichever
+field it came from so the text is not both spoken and executed, and keep the
+surrounding prose: the sighting above has a sentence after the block.
 
 ## Guard rails
 
