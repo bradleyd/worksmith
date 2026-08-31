@@ -145,11 +145,47 @@ shows its evidence now, and it can take a question.
   [w1] bash  python3 playcheck.py                      exit 1
   ```
 
+  **The double gear is not hierarchy, it only looks like it.** Worth saying
+  because the obvious reading is that the tail is showing parent → child. It is
+  not: the log line carries one glyph and `Kind::Tool` adds another. Making it
+  real is the better fix — `tree`-style `├─` / `└─` so a worker's calls are
+  visibly nested under the worker, instead of every line repeating `[w1]`:
+
+  ```
+  w1  implement main.py
+  ├─ bash   python3 -m unittest discover tests -q      ok
+  ├─ edit   main.py                                    +38 -11
+  └─ bash   python3 playcheck.py                       exit 1
+  ```
+
   Related, and partly self-inflicted: the rescued-tool-call notice now prints
   into this same stream (`⚠ read 3 more tool call(s) out of the model's text`).
   It is correct and it is worth recording, but on a model running at 54% it
   lands every few lines. Keeping it in the session while showing it once per
   turn in the tail is probably the balance.
+
+- **The footer's running-agent count is the first thing truncated away.** The
+  indicator exists and its data is live — `app.agents_running` is recomputed
+  every frame at `tui.rs:1138` and rendered as `↑{n} agents` at `tui.rs:3792`.
+  But `footer_string` puts it **last**:
+
+  ```
+   {model}  ctx {pct}% ({a}/{b})  ↓{out}{reasoning}{cut}{cost}{think}{agents}
+  ```
+
+  and the footer is one `Paragraph` with no wrap, so it truncates at terminal
+  width. Measured with `openrouter/qwen/qwen3.8-27b`: 59 characters before
+  `agents` bare, 78 with cost and think both on, and **89** once `↑3 agents` is
+  appended. On an 80-column terminal the running-agent count is precisely what
+  falls off the edge — the most time-critical item in the footer sits in the
+  position most likely to be cut. Reported as "there is no indication that there
+  are agents running", which is what an intermittently-truncated indicator looks
+  like from the outside.
+
+  Two fixes and they are independent: move it left, ahead of cost and think,
+  since "work is happening in the background" outranks a running total; and give
+  it a glyph of its own so it reads as a state rather than another number. `↑`
+  is doing double duty — it already means output tokens two fields earlier.
 
 - **A finished fan-out does not tell you what happened, and buries the one line
   that does.** Reported from the first real three-worker run, unprompted: *"I
