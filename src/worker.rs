@@ -112,6 +112,10 @@ pub struct WorkerSummary {
     pub group: Option<u64>,
     /// Set when this worker runs on a model other than the parent's.
     pub model: Option<String>,
+    /// The last `--until` result, when this worker had one. The single most
+    /// important fact about a finished worker and, until now, the only one that
+    /// never reached the transcript.
+    pub check_passed: Option<bool>,
     /// When it was spawned, and when it reached a terminal state.
     pub started: SystemTime,
     pub finished: Option<SystemTime>,
@@ -181,6 +185,7 @@ impl Worker {
             escalation: r.escalation.clone(),
             group: self.group,
             model: self.model.clone(),
+            check_passed: r.check_passed,
             started: self.started,
             finished: r.finished,
         }

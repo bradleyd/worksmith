@@ -99,35 +99,78 @@ pub fn record_in_group(
     }
 }
 
-/// The one-line transcript announcement for a finished worker.
+/// What a finished worker leaves in the transcript.
+///
+/// Reported three times from use, most bluntly as: *"I feel like as a user I
+/// might not know what to do after this."* The old version led with the
+/// model's own prose — up to 300 characters of it — and never printed the one
+/// fact that decides what happens next: **whether the check passed**. That was
+/// visible only to whoever happened to be tailing the worker.
+///
+/// So: the facts first, in the order a reader needs them — did it pass, what
+/// did it touch, how long did it take — then a line saying what to do about it,
+/// and the model's summary last and shorter. The harness already knows all of
+/// this; none of it needed a new subsystem, only a decision about what matters.
 pub fn worker_headline(w: &WorkerSummary) -> String {
-    let glyph = match w.status {
-        WorkerStatus::Done => "✓",
-        WorkerStatus::Failed => "✗",
-        _ => "◼",
+    let glyph = match (w.check_passed, w.status) {
+        (Some(true), _) => "✓",
+        (Some(false), _) => "✗",
+        (None, WorkerStatus::Done) => "✓",
+        (None, WorkerStatus::Failed) => "✗",
+        (None, _) => "◼",
     };
-    let summary = if w.result.trim().is_empty() {
-        w.last.clone()
-    } else {
-        truncate(&w.result, 300)
+
+    // The check outranks the status label: "stopped" with a passing check and
+    // "done" with a failing one are both real, and the check is the one that
+    // says whether the work is usable.
+    let verdict = match w.check_passed {
+        Some(true) => " · check passed".to_string(),
+        Some(false) => " · CHECK FAILED".to_string(),
+        None => String::new(),
     };
+
+    let took = match (w.finished, w.started) {
+        (Some(end), start) => match end.duration_since(start) {
+            Ok(d) if d.as_secs() < 60 => format!(" in {}s", d.as_secs()),
+            Ok(d) => format!(" in {}m{:02}s", d.as_secs() / 60, d.as_secs() % 60),
+            Err(_) => String::new(),
+        },
+        _ => String::new(),
+    };
+
     let changed = if w.changed.is_empty() {
-        String::new()
+        " · changed nothing".to_string()
     } else {
-        format!(" · changed {} file(s): {}", w.changed.len(), w.changed.join(", "))
+        format!(" · changed {}", w.changed.join(", "))
     };
     let stopped = match &w.escalation {
         Some(reason) => format!(" · supervisor stopped it ({reason})"),
         None => String::new(),
     };
     let empty = if w.did_nothing() { " · produced nothing" } else { "" };
+
+    // What to actually do about it. A finished worker is a decision point, and
+    // the two things a reader wants are the diff and the full result.
+    let mut next: Vec<String> = Vec::new();
+    if !w.changed.is_empty() {
+        next.push(format!("git diff {}", w.changed.join(" ")));
+    }
+    next.push(format!("/agents show {}", w.id));
+    if w.check_passed == Some(false) || w.escalation.is_some() {
+        next.push(format!("/agents tail {}", w.id));
+    }
+
+    let summary = if w.result.trim().is_empty() {
+        w.last.clone()
+    } else {
+        truncate(&w.result, 160)
+    };
+
     format!(
-        "{glyph} agent {} [{}]{}{}{}: {}",
+        "{glyph} agent {} [{}]{took}{verdict}{changed}{stopped}{empty}\n  → {}\n  {}",
         w.id,
         w.status.label(),
-        changed,
-        stopped,
-        empty,
+        next.join("  ·  "),
         summary
     )
 }
@@ -318,6 +361,7 @@ mod tests {
             started: std::time::SystemTime::now(),
             finished: None,
             prompt_tokens: 0,
+            check_passed: None,
         }
     }
 
@@ -400,5 +444,73 @@ mod tests {
         assert!(report.contains("stopped by supervisor: token budget exceeded"));
         // With no result text, the last-known line stands in.
         assert!(report.contains("done"));
+    }
+}
+
+#[cfg(test)]
+mod headline_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn worker() -> WorkerSummary {
+        WorkerSummary {
+            id: "w1".into(),
+            task: "fix /pair".into(),
+            status: WorkerStatus::Stopped,
+            last: "✓ validated".into(),
+            tool_calls: 7,
+            changed: vec!["src/tui.rs".into()],
+            result: "Modified the /pair command handler.".into(),
+            session_id: "s".into(),
+            tokens: 100,
+            prompt_tokens: 900,
+            nudges: 2,
+            escalation: Some("still off track after 2 nudges".into()),
+            group: None,
+            model: None,
+            check_passed: Some(true),
+            started: SystemTime::now() - Duration::from_secs(492),
+            finished: Some(SystemTime::now()),
+        }
+    }
+
+    /// The exact line that prompted this: a worker that passed its check,
+    /// announced as "stopped · supervisor stopped it", with the pass nowhere on
+    /// screen and nothing saying what to do next.
+    #[test]
+    fn a_finished_worker_leads_with_whether_its_check_passed() {
+        let h = worker_headline(&worker());
+        assert!(h.contains("check passed"), "the deciding fact is present: {h}");
+        assert!(h.starts_with('✓'), "and the glyph follows the check, not the status: {h}");
+        assert!(h.contains("8m12s"), "how long ago it ran: {h}");
+        assert!(h.contains("git diff src/tui.rs"), "what to do about it: {h}");
+        assert!(h.contains("/agents show w1"), "where the full result is: {h}");
+        // The supervisor's own account survives — it is still true, just no
+        // longer the headline.
+        assert!(h.contains("still off track"), "{h}");
+    }
+
+    #[test]
+    fn a_failing_check_says_so_loudly_and_offers_the_tail() {
+        let mut w = worker();
+        w.check_passed = Some(false);
+        w.escalation = None;
+        let h = worker_headline(&w);
+        assert!(h.contains("CHECK FAILED"), "{h}");
+        assert!(h.starts_with('✗'), "{h}");
+        assert!(h.contains("/agents tail w1"), "a failure wants the transcript: {h}");
+    }
+
+    /// No `--until` means no verdict to report, and the line must not invent
+    /// one — "done" without a check is a much weaker claim.
+    #[test]
+    fn a_worker_with_no_check_claims_nothing_about_one() {
+        let mut w = worker();
+        w.check_passed = None;
+        w.status = WorkerStatus::Done;
+        w.escalation = None;
+        let h = worker_headline(&w);
+        assert!(!h.contains("check"), "{h}");
+        assert!(h.starts_with('✓'), "{h}");
     }
 }
