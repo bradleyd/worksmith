@@ -1277,10 +1277,18 @@ impl Agent {
                         let message = if n == c.tool_calls.len() {
                             note.clone()
                         } else {
+                            // Says "recovered" and "ran normally" on purpose. This
+                            // rides the warning channel, so it renders behind a `⚠`
+                            // immediately above the call it rescued — which read as
+                            // "something is wrong with this call" when it is the
+                            // opposite. The call succeeded; the model's formatting
+                            // is what slipped.
+                            let k = c.tool_calls.len();
                             format!(
-                                "read {} more tool call(s) out of the model's text \
-                                 ({n} so far this turn)",
-                                c.tool_calls.len()
+                                "recovered {k} more tool call{} the model wrote as text \
+                                 — {} ran normally ({n} this turn)",
+                                if k == 1 { "" } else { "s" },
+                                if k == 1 { "it" } else { "they" },
                             )
                         };
                         self.emit(session, Event::Warning { message });
@@ -2138,7 +2146,12 @@ mod checkpoint_tests {
             "the note has to survive in the session file, not only on screen"
         );
         // And repeats report the running count rather than the paragraph again.
-        assert!(log.contains("so far this turn"), "later ones carry the count");
+        assert!(log.contains("this turn"), "later ones carry the count");
+        // Never phrased so it reads as a fault in the call it rescued: it rides
+        // the warning channel, so it renders behind a `⚠` directly above that
+        // call, and "read a tool call out of the model's text" was taken to mean
+        // the call had failed. It had not — it ran normally.
+        assert!(log.contains("recovered"), "it says the call was recovered, not that it broke");
     }
 
     /// The checkpoint carries the evidence, not a summary of it. The first one

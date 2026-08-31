@@ -58,7 +58,7 @@ pub(crate) fn rescue_text_tool_calls(
         }
         let named: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
         let what = if named.len() == 1 {
-            format!("its `{}` call", named[0])
+            format!("a `{}` call", named[0])
         } else {
             format!("{} tool calls (`{}`)", named.len(), named.join("`, `"))
         };
@@ -74,10 +74,10 @@ pub(crate) fn rescue_text_tool_calls(
         }
 
         return Some(format!(
-            "the model wrote {what} as text in `{}` instead of using the API's tool-call \
-             field; worksmith read it and ran it anyway. Said once per session — a model \
-             doing this is drifting out of structured tool calling, which is worth knowing \
-             when choosing one.",
+            "recovered {what}: the model wrote it as text in `{}` instead of using the \
+             API's tool-call field. Nothing failed — the call ran normally. Reported \
+             because a model doing this is drifting out of structured tool calling, which \
+             is worth knowing when choosing one.",
             field.name(),
         ));
     }
