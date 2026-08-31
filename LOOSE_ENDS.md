@@ -109,6 +109,40 @@ shows its evidence now, and it can take a question.
   Anything smarter occasionally reads a directive as a question and refuses to
   act on it, which is the worse of the two mistakes.
 
+- **A finished fan-out does not tell you what happened, and buries the one line
+  that does.** Reported from the first real three-worker run, unprompted: *"I
+  don't know what is done, not done, and what I should do next. If I didn't tail
+  the agents I would be wondering what is happening."*
+
+  What the transcript actually gave, for a worker that **passed**: one `[done]`
+  line carrying the first ~200 characters of the model's prose summary, then
+  **fifteen** `⚙ [w3]` lines replaying that whole summary — every bullet about
+  every method it implemented — and only then, last, the line that matters:
+
+  ```
+  ⚙ [w3] ✓ `python3 -m unittest tests.test_parser -q`
+  ```
+
+  The check result is the only fact worth reading and it is at the bottom of a
+  screen of prose the model wrote about itself. Three workers doing this at once
+  interleave.
+
+  **What it should say is what the harness already knows without judging
+  anything**: which workers are done, which passed their `--until`, which files
+  each changed, and — for the one that failed — what its terminal reason was.
+  In this run that would have been three lines, and the third would have carried
+  its own next action: w2 stopped on `the model spent its whole output budget
+  reasoning … raise max-tokens, or run with --fast`.
+
+  **`/agents` already exists** ("list workers, or tail one live",
+  `tui.rs:139`), so the roster is built. Nothing points at it, and it is not
+  what fires when the last worker finishes. A fan-out completing is exactly the
+  moment to print the roster unasked.
+
+  Related and separate: the worker prose is emitted line by line as `⚙ [wN]`
+  items rather than as one collapsed block, so a verbose worker cannot be
+  scrolled past as a unit.
+
 - **Pair mode has no visual identity.** When the harness stops to ask, it looks
   like any other prompt. It should read as a different mode — that the loop is
   waiting on *you*, what triggered it, and what a useful answer looks like.
