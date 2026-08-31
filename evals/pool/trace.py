@@ -2,6 +2,7 @@
 """Read one task's event stream as a timeline of what the loop actually did.
 
     python3 evals/pool/trace.py traces/pa-reject.jsonl
+    python3 evals/pool/trace.py ~/.worksmith/sessions/<id>.jsonl
 
 Answers the questions that counters cannot, and that cost three wrong
 diagnoses in one day:
@@ -47,11 +48,21 @@ def main() -> int:
     events = []
     for line in Path(sys.argv[1]).read_text().splitlines():
         line = line.strip()
-        if line:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Two shapes, same events. `--mode json` prints them bare; a session
+        # file wraps each one as {"type": "event", "data": {...}} alongside
+        # `message` and `meta` records. Reading both means a real TUI session is
+        # as analysable as an eval run, which is most of what M9 was wanted for
+        # and needs no new instrumentation.
+        if rec.get("type") == "event" and isinstance(rec.get("data"), dict):
+            events.append(rec["data"])
+        elif "type" in rec and rec["type"] not in ("message", "meta"):
+            events.append(rec)
 
     step = 0
     pending: dict[str, str] = {}      # call id -> "name args"
