@@ -1,5 +1,24 @@
 # Plan: the work pool — small tasks, fed by the harness
 
+> **Verdict, 2026-08-30: the hypothesis was wrong, and the branch was worth
+> running anyway.** Cutting work into smaller tasks does not make a weak model
+> more accurate per task. Measured with the harness removed entirely, per-task
+> accuracy is flat at 56-60% whether the same work is cut into 8 pieces or 22,
+> and whether a task carries its own acceptance criteria or points at a shared
+> spec. Two intermediate results looked decisive on a single run each and
+> neither replicated.
+>
+> What smaller tasks do change is blast radius: at that accuracy a 3-task
+> backlog dies almost immediately, which is the 0/3 coarse result at every model
+> size on every provider, while a 22-task backlog fails as often per task but
+> each failure is one small piece the loop can catch.
+>
+> The plan below is left as written. It is the argument that was made before the
+> measurements, and the measurements are in `evals/pool/RESULTS.md`. Section 8's
+> kill list is the part that aged best: it named in advance what would falsify
+> this, and something else falsified it first.
+
+
 Branch `pool-experiment`, and it is meant to be throwaway. Section 8 says what
 result kills it.
 
