@@ -113,11 +113,6 @@ and 4a; compaction no longer trades the whole context for a sentence.
   flips it, so checking whether pairing is on turns it off. Bare should report;
   `/pair on|off` should set.
 
-- **A checkpoint's "Fifty steps, nothing written" subject is hardcoded.** The
-  body interpolates `self.max_steps` correctly; the subject does not. With
-  `max-steps = 100` it reads "Fifty steps, nothing written / It has used all
-  100 steps". `agent.rs`, the `IdleReason::MaxSteps` arm.
-
 - **Enter on an empty composer does nothing while a checkpoint is pending.**
   The handler returns early on empty input *before* it checks `pending_ask`, so
   the prompt says "Enter to send · Esc to skip" and bare Enter does neither. It

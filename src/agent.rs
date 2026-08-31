@@ -530,7 +530,7 @@ impl Agent {
                         && let Some(a) = self
                             .harness_checkpoint(
                                 session,
-                                "Fifty steps, nothing written",
+                                &format!("{} steps, nothing written", self.max_steps),
                                 &format!(
                                     "It has used all {} steps without editing anything — it is \
                                      still trying to understand the code. Point it at the right \
@@ -1626,6 +1626,260 @@ mod tests {
         assert!(
             !matches!(msgs[split].role, Role::Tool),
             "never starts the kept slice at an orphaned tool result"
+        );
+    }
+}
+
+/// Drive the loop without a model.
+///
+/// The three checkpoint triggers are the harness's own judgement calls — fifty
+/// steps with nothing written, going in circles, a check that failed twice —
+/// and until now the only way to see one fire was to point a real model at a
+/// task hard enough to provoke it. That cost 900-second runs to answer
+/// questions about control flow, and answered them badly: the same afternoon
+/// produced three confident diagnoses about which loop something fired in, all
+/// wrong, each corrected by evidence that a test could have supplied in
+/// milliseconds.
+///
+/// So: a client that returns a script, and an asker that records what it was
+/// asked. Neither is a mock of a model's *judgement*, which would be worthless.
+/// They pin down what the loop does with a given sequence of replies.
+#[cfg(test)]
+pub(crate) mod scripted {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::llm::{ChatRequest, Completion, LlmClient, StreamEvent, ToolCall, Usage};
+    use crate::tools::approval::Asker;
+
+    /// Replies in order. The last one repeats once the script runs out, so a
+    /// test that wants "the model keeps doing this" does not have to say it
+    /// fifty times.
+    pub struct ScriptedClient {
+        replies: Mutex<Vec<Completion>>,
+        pub calls: Arc<Mutex<usize>>,
+    }
+
+    impl ScriptedClient {
+        pub fn new(replies: Vec<Completion>) -> Self {
+            Self { replies: Mutex::new(replies), calls: Arc::new(Mutex::new(0)) }
+        }
+
+        /// A reply that calls one tool.
+        pub fn calling(name: &str, args: &str) -> Completion {
+            Completion {
+                content: None,
+                reasoning: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("c{name}"),
+                    name: name.to_string(),
+                    arguments: args.to_string(),
+                }],
+                usage: Usage::default(),
+                finish_reason: Some("tool_calls".to_string()),
+            }
+        }
+
+        /// A reply that says it is finished.
+        pub fn done(text: &str) -> Completion {
+            Completion {
+                content: Some(text.to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                finish_reason: Some("stop".to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedClient {
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _sink: mpsc::Sender<StreamEvent>,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Completion> {
+            *self.calls.lock().unwrap() += 1;
+            let mut r = self.replies.lock().unwrap();
+            Ok(if r.len() > 1 { r.remove(0) } else { r[0].clone() })
+        }
+    }
+
+    /// Records every checkpoint put to it and answers from a script. An empty
+    /// script means nobody answered, which is the `--print` and eval case.
+    pub struct RecordingAsker {
+        pub asked: Arc<Mutex<Vec<(String, String)>>>,
+        answers: Mutex<Vec<Option<String>>>,
+    }
+
+    impl RecordingAsker {
+        pub fn new(answers: Vec<Option<String>>) -> Self {
+            Self { asked: Arc::new(Mutex::new(Vec::new())), answers: Mutex::new(answers) }
+        }
+    }
+
+    #[async_trait]
+    impl Asker for RecordingAsker {
+        async fn ask_text(&self, subject: &str, question: &str) -> Option<String> {
+            self.asked.lock().unwrap().push((subject.to_string(), question.to_string()));
+            let mut a = self.answers.lock().unwrap();
+            if a.is_empty() { None } else { a.remove(0) }
+        }
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use tokio_util::sync::CancellationToken;
+
+    use super::scripted::{RecordingAsker, ScriptedClient};
+    use super::*;
+    use crate::event::EventBus;
+    use crate::tools::{ToolContext, ToolRegistry};
+    use crate::validation::Validator;
+
+    /// A check that fails with the same reason forever. The two-failures
+    /// checkpoint is the one worth pinning down, and it needs the check to
+    /// keep failing rather than to be interesting.
+    struct AlwaysFails(&'static str);
+
+    #[async_trait]
+    impl Validator for AlwaysFails {
+        async fn validate(&self) -> Result<(), String> {
+            Err(self.0.to_string())
+        }
+        fn describe(&self) -> String {
+            "check".to_string()
+        }
+    }
+
+    fn agent_with(
+        replies: Vec<crate::llm::Completion>,
+        answers: Vec<Option<String>>,
+        max_steps: usize,
+    ) -> (Agent, Arc<Mutex<Vec<(String, String)>>>, Session, tempfile::TempDir) {
+        let asker = Arc::new(RecordingAsker::new(answers));
+        let asked = asker.asked.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            asker,
+            ..Default::default()
+        };
+        let session =
+            Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+        let agent = Agent::new(
+            Arc::new(ScriptedClient::new(replies)),
+            Arc::new(ToolRegistry::new()),
+            EventBus::new(),
+            "test/model".to_string(),
+            None,
+            None,
+            max_steps,
+            2,
+            3,
+            128_000,
+            8,
+            ctx,
+        )
+        .with_pairing(true);
+        (agent, asked, session, dir)
+    }
+
+    /// The trigger that matters most for pairing, and the one a real run hit at
+    /// step 41 of a 49-step task: the check has failed twice, re-planning is
+    /// not moving it, and a sentence from the user is worth more than another
+    /// re-plan directive.
+    #[tokio::test]
+    async fn a_check_failing_twice_asks_the_user() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::done("finished")],
+            vec![Some("try a regex instead".to_string())],
+            50,
+        );
+        let v = AlwaysFails("AssertionError: nope");
+        let _ = agent
+            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "exactly once, not once per retry: {asked:?}");
+        assert!(asked[0].0.contains("failed twice"), "{:?}", asked[0].0);
+        assert!(asked[0].1.contains("AssertionError: nope"), "the question carries the failure");
+    }
+
+    /// Nobody to ask is a skip, not a failure. Every eval and `--print` run
+    /// depends on this, and it is why the whole harness measured all day never
+    /// saw a checkpoint.
+    #[tokio::test]
+    async fn with_nobody_to_ask_the_turn_carries_on() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::done("finished")],
+            vec![],
+            50,
+        );
+        let v = AlwaysFails("AssertionError: nope");
+        let out = agent
+            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(asked.lock().unwrap().len(), 1, "it still asks");
+        assert!(
+            matches!(out.outcome, TurnOutcome::ValidationFailed(_)),
+            "and carries on to the normal ending, not an error: {:?}",
+            out.outcome
+        );
+    }
+
+    /// `/pair off` must cost nothing: no checkpoint, and the tool is not even
+    /// advertised.
+    #[tokio::test]
+    async fn pairing_off_asks_nothing() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::done("finished")],
+            vec![Some("hello".to_string())],
+            50,
+        );
+        agent.set_pairing(false);
+        let v = AlwaysFails("nope");
+        let _ = agent
+            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(asked.lock().unwrap().is_empty());
+    }
+
+    /// Steps spent with nothing written. The subject line is checked because
+    /// LOOSE_ENDS records it hardcoding "Fifty" while interpolating the real
+    /// limit into the body, so with `max-steps = 100` it contradicts itself.
+    #[tokio::test]
+    async fn running_out_of_steps_with_no_edits_asks_the_user() {
+        let (agent, asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::calling("ls", "{}")],
+            vec![None],
+            3,
+        );
+        let _ = agent
+            .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
+            .await
+            .unwrap();
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(asked[0].1.contains('3'), "the body names the real limit: {}", asked[0].1);
+        assert!(
+            asked[0].0.starts_with("3 steps"),
+            "and so does the subject, which used to be hardcoded to \"Fifty\" \
+             and contradicted the body at any other limit: {}",
+            asked[0].0
         );
     }
 }
