@@ -376,6 +376,57 @@ from. Whether any worker touches a test file. And whether three workers writing
 three different files in one directory interfere anyway, which nothing has
 measured yet.
 
+## The run, 2026-08-31
+
+Three separate spawns on hosted `qwen/qwen3.5-9b`. Each went through the planner
+(*"planner chose to split this into 1 task(s)"*), so the three-spawn route does
+exercise it — trivially, but the earlier claim that it is never touched was
+wrong.
+
+| worker | module | result |
+|---|---|---|
+| w1 | `items.py` | pass, 30/30 |
+| w3 | `parser.py` | pass, 45/45 |
+| w2 | `combat.py` | failed — `stuck: the model spent its whole output budget reasoning and never answered` |
+
+**No worker edited a test file.** Including w2, for which editing the test was
+the cheap way out of the thing that killed it.
+
+**The parser is the reason any of it worked.** 24 of 39 tool calls across the
+three workers — 62% — were written as text and promoted:
+
+| worker | rescued / total |
+|---|---|
+| w1 | 1 / 6 (16%) |
+| w2 | 6 / 12 (50%) |
+| w3 | **17 / 21 (80%)** |
+
+w3 wrote its `write` call and all eight of its `edit` calls as text. Without the
+rescue it modifies nothing at all and the run is 1 for 3, not 2 for 3. The
+morning's two sightings looked like an occasional slip; under load on a 9B it is
+the majority case.
+
+It also found a defect in the rescue's own reporting — the note went down the
+stream sink, which reaches the display and stops there, so none of the 24 were
+recorded, and the warn-once flag was per-client, which a fan-out's workers
+share. Fixed in `fb5db19`; the rate was only recoverable by grepping session
+files for the synthetic `text_call_` ids.
+
+**w2's failure is one signature.** `Player.set_stats()` was written with a
+required `defense`; the tests call it with three arguments. That single
+mismatch errors ten tests, and it is the ambiguous case — the docstring
+decides, and w2 ran out of output budget before resolving it. It also left
+`combat.py` worse than its own first attempt (4 tests failing, then 11). Re-run
+it alone with `--fast` or a larger `max-tokens`, from a clean `combat.py`.
+
+**And the premise about pytest was wrong.** The workers ran
+`python3 -m pytest` successfully: `Python 3.11.6, pytest-9.1.1,
+/usr/local/bin/python3`. An interactive shell here resolves `python3` to
+Homebrew 3.14, which has no pytest. So "pytest is not installed" was true of the
+terminal and false of the worker, and the two disagree about what `python3`
+means. Harmless now that the tests are stdlib, but it is a live hazard: a
+`--until` can pass for the worker and fail for the human checking by hand.
+
 # Open problem: a fan-out shares one check
 
 `/spawn -n 3 --until "..."` gives **every** worker the same check. Its own usage
