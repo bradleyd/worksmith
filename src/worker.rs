@@ -75,6 +75,10 @@ struct Runtime {
     /// Set when the supervisor pulled this worker off the floor; it wins over
     /// the (necessarily "aborted") turn outcome when reporting.
     escalation: Option<String>,
+    /// The last `--until` result, when this worker had one. `None` means no
+    /// check ran, which is a much weaker claim than a passing one: a worker
+    /// with no validator reports Done merely because the model stopped talking.
+    check_passed: Option<bool>,
     /// When this worker reached a terminal state. Recorded where the status is
     /// set rather than where a reader notices, so it is when the work ended and
     /// not when someone last looked.
@@ -489,6 +493,7 @@ impl WorkerManager {
             escalation: None,
             finished: None,
             prompt_tokens: 0,
+            check_passed: None,
         }));
         let cancel = CancellationToken::new();
 
@@ -779,6 +784,7 @@ fn update_last(g: &mut Runtime, e: Event) {
         }
         Event::Nudge { reason } => g.last = format!("↻ {reason}"),
         Event::Validation { ok, .. } => {
+            g.check_passed = Some(ok);
             g.last = if ok { "✓ validated".into() } else { "✗ validation failed".into() }
         }
         Event::Error { message } => g.last = first_line(&message),
@@ -799,7 +805,12 @@ fn update_last(g: &mut Runtime, e: Event) {
 /// stopped it (still off track after 2 nudges)" with the success nowhere on
 /// screen.
 fn apply_escalation(g: &mut Runtime) {
-    if matches!(g.status, WorkerStatus::Done) {
+    // Only a *passing check* outranks the supervisor. `WorkerStatus::Done` on
+    // its own does not: a worker with no `--until` reports Done because the
+    // model stopped talking, which is exactly the claim a supervisor that
+    // called it hung is disputing. An earlier version keyed on Done alone and
+    // let a genuinely hung worker report success.
+    if g.check_passed == Some(true) {
         return;
     }
     if let Some(reason) = g.escalation.clone() {
@@ -900,6 +911,7 @@ mod log_tests {
             escalation: None,
             finished: None,
             prompt_tokens: 0,
+            check_passed: None,
         };
         for i in 0..(LOG_LINES + 50) {
             log_line(&mut rt, i.to_string());
@@ -976,11 +988,24 @@ mod escalation_tests {
     /// screen. An escalation is a guess about a worker that *looked* stuck; the
     /// check is a fact about whether the work is done.
     #[test]
-    fn an_escalation_does_not_overwrite_a_worker_that_succeeded() {
+    fn an_escalation_does_not_overwrite_a_worker_whose_check_passed() {
         let mut g = Runtime { status: WorkerStatus::Done, ..Default::default() };
+        g.check_passed = Some(true);
         g.escalation = Some("still off track after 2 nudges".into());
         apply_escalation(&mut g);
-        assert_eq!(g.status, WorkerStatus::Done, "it finished the job");
+        assert_eq!(g.status, WorkerStatus::Done, "the check is a fact; the escalation was a guess");
+    }
+
+    /// Done with no check behind it is not the same claim, and must not
+    /// override the supervisor: a worker with no `--until` reports Done because
+    /// the model stopped talking, which is precisely what a supervisor calling
+    /// it hung is disputing.
+    #[test]
+    fn done_without_a_check_does_not_outrank_an_escalation() {
+        let mut g = Runtime { status: WorkerStatus::Done, ..Default::default() };
+        g.escalation = Some("no response from the model for 100s".into());
+        apply_escalation(&mut g);
+        assert_eq!(g.status, WorkerStatus::Stopped);
     }
 
     /// And still reports one when the worker did not finish.
