@@ -41,7 +41,7 @@ and 4a; compaction no longer trades the whole context for a sentence.
   the timestamps above disprove.
 
 - **A small model drops out of structured tool calls and the turn is scored
-  empty.** Seen live, hosted qwen3.5-9b, mid-session: the model emitted
+  empty.** *Planned in `TOOLCALL_PLAN.md`, which is the next thing to build.* Seen live, hosted qwen3.5-9b, mid-session: the model emitted
   `<tool_call><function=bash><parameter=command>python -m pytest …` as ordinary
   text instead of through the API's `tool_calls` field. Worksmith saw content
   with no tool calls, called the reply empty, nudged, and the model did the same
