@@ -245,8 +245,25 @@ degrades to a shared pass/fail on the whole directory.
 Three separate spawns avoid it, at the cost of never exercising the planner,
 which is the one part of the fan-out with no evidence behind it.
 
-Not solved here. What it needs is a per-worker check, which means the planner
-emitting a check alongside each task rather than one check being copied to all,
-and that is the same shape as PLAN.md §8a's `out` key giving each worker its own
-output path. Worth designing with M11 (worktree per worker) rather than before
-it: both exist because workers share one directory and pretend not to.
+Not solved here, and **M11's worktree-per-worker is half the answer, not all of
+it.** The two halves are worth keeping apart, because "worktrees fix it" will
+read as settled later and it is not.
+
+**What a worktree fixes, and it is the more urgent half.** Today three workers
+mutate one directory while a shared check runs inside it, so the check is not
+merely shared, it is *nondeterministic*: worker 1's `--until` can pass or fail
+depending on what worker 2 wrote a second earlier. Every fan-out result taken so
+far carries that, which is one more reason there is no trustworthy multi-worker
+data yet. Isolated trees make each check evaluate a coherent state.
+
+**What a worktree does not fix.** The check is still one command string copied
+to every worker. `--until "python3 -m unittest discover"` in an isolated tree
+still runs *all* the tests, so worker 1 remains gated on modules 2 and 3 it was
+never given. A directory becoming per-worker does not make a command
+per-worker.
+
+So both are needed: worktrees for coherent state, and a per-task check emitted
+by the planner alongside each task rather than one check copied to all. That
+second half is the same shape as PLAN.md §8a's `out` key giving each worker its
+own output path, and both exist for the same underlying reason — workers share
+one directory and the design pretends they do not.
