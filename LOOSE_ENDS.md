@@ -224,6 +224,42 @@ shows its evidence now, and it can take a question.
   this repo's project config — they did not appear, and the natural reading is
   that the tables are broken rather than that the report is. `main.rs:1479`.
 
+- **1,620 sessions in one flat directory, 89% of them junk, and the TUI never
+  shows you which one you are in.** Reported from use: finding a particular
+  session is hard. Measured, and the naming is only half of it.
+
+  `~/.worksmith/sessions/<uuid>.jsonl`, one directory, no nesting. The filename
+  carries no project, no date, and no indication whether it was a main session
+  or a spawned worker — every worker gets its own file, so a fan-out of three
+  adds four.
+
+  **The larger half: the store is 89% throwaway.** Of 1,620 files, **1,447**
+  have a `cwd` under `/var/folders` or `/tmp` — `cargo test` runs and eval-pool
+  fixtures, written into the user's real session store. Only **173** are actual
+  project work, and 124 of those are this repo. So it is not merely that the
+  names are opaque; the signal is one file in nine. Tests and evals should be
+  writing somewhere else, which is a smaller fix than a directory scheme and
+  probably wants doing first.
+
+  **It is also a performance bug on the path that matters.**
+  `most_recent_for_cwd` (`session.rs:169`) opens and parses the first line of
+  *every* file in the directory to find one whose `cwd` matches. That is the
+  `--resume` path, and it gets slower with every test run.
+
+  **And the id is never visible.** `Event::SessionStarted { id }` is emitted and
+  the TUI's handler explicitly drops it (`tui.rs:890`,
+  `SessionStarted { .. } | TurnComplete { .. } => {}`). It is formatted at
+  `tui.rs:2765` for the one-line event summary, so the string exists and simply
+  never reaches the screen. There is no `/session` command and nothing in the
+  footer, so the id you would need in order to go find the file is the one thing
+  you cannot read off the session. `DOCS_PLAN.md` Phase 0.5 already wants it
+  printed on exit; showing it live is the cheaper half.
+
+  The meta line already carries `cwd` and `ts`, so a scheme like
+  `sessions/<project-slug>/<date>-<short-id>.jsonl` needs no new data — only a
+  migration for the existing files, and a decision about what a worker's file is
+  named relative to its parent's.
+
 - **`/pair` bare toggles instead of reporting.** Every other state command
   (`/validate`, `/route`, `/mouse`) reports when given no argument. `/pair`
   flips it, so checking whether pairing is on turns it off. Bare should report;
