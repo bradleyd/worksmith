@@ -114,6 +114,13 @@ base-url = "http://localhost:8000/v1"
 max-steps = 50              # max model<->tool iterations per turn
 max-retries = 3             # validation re-plan attempts before giving up
 stuck-threshold = 3         # identical repeated tool calls before a nudge
+# What one turn may generate before it stops and tells you what it spent.
+# Unset means no cap, which is what it was before this key existed. A worker has
+# had `agents.token-budget` since M7 and a session had only `max-steps`, so the
+# attended path was the *less* protected one. Steps are a poor proxy for cost:
+# one step can be a 40-token tool call or an 8k rewrite. With pairing on this
+# raises a checkpoint first, so you get a say before it stops.
+# token-budget = 60000
 # validate = "cargo test"   # default success check (--until overrides per-run)
 context-limit = 128000      # approx model context (tokens); compact at 75%
 # Pairing: the loop stops at decisions worth your say — puts a question to you

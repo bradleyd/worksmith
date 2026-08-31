@@ -196,6 +196,9 @@ enum IdleReason {
     Stuck(String),
     Blocked(String),
     MaxSteps,
+    /// Completion tokens for this turn passed `token_budget`. Carries the
+    /// total, because "it spent this much" is the whole message.
+    Budget(u32),
     Aborted,
 }
 
@@ -241,6 +244,16 @@ pub struct Agent {
     max_steps: usize,
     max_retries: usize,
     stuck_threshold: u32,
+    /// Completion tokens one turn may spend before it stops and says so.
+    ///
+    /// A worker has had one of these since M7 (`agents.token-budget`,
+    /// escalating past it); the main session has had nothing but `max_steps`,
+    /// which is the protection running backwards — the attended path is the
+    /// unbounded one. Reported from real use: `max-steps = 100` reached
+    /// repeatedly on a 32k window, an hour of wall clock, no result. Steps are
+    /// also a poor proxy for cost: one step can be a 40-token tool call or an
+    /// 8k rewrite.
+    token_budget: Option<u32>,
     keep_recent_turns: usize,
     tool_ctx: ToolContext,
     steering: Steering,
@@ -290,6 +303,7 @@ impl Agent {
             max_steps,
             max_retries,
             stuck_threshold,
+            token_budget: None,
             keep_recent_turns,
             tool_ctx,
             steering: Steering::new(),
@@ -298,6 +312,13 @@ impl Agent {
             pairing: Arc::new(AtomicBool::new(false)),
             last_prompt_tokens: AtomicU32::new(0),
         }
+    }
+
+    /// Cap what one turn may spend (`[agent] token-budget`). `None` is no cap,
+    /// which is what it was before this existed.
+    pub fn with_token_budget(mut self, tokens: Option<u32>) -> Self {
+        self.token_budget = tokens;
+        self
     }
 
     /// Offer the pairing checkpoint, or stop offering it (`[agent] pair`).
@@ -456,6 +477,7 @@ impl Agent {
             max_steps: self.max_steps,
             max_retries: self.max_retries,
             stuck_threshold: self.stuck_threshold,
+            token_budget: self.token_budget,
             keep_recent_turns: self.keep_recent_turns,
             tool_ctx,
             // A fork gets a fresh mailbox — its supervisor attaches its own.
@@ -580,6 +602,37 @@ impl Agent {
                         None => break TurnOutcome::Stuck(r),
                     }
                 }
+                IdleReason::Budget(spent) => {
+                    // Same shape as the step cap: the number on its own is not
+                    // evidence of trouble, so offer a way in before ending it.
+                    // Unattended this skips and the turn stops, which is the
+                    // point — a background turn that has spent its budget
+                    // should not keep spending.
+                    if !offered_a_way_in
+                        && let Some(a) = self
+                            .harness_checkpoint(
+                                session,
+                                &format!("{spent} tokens spent, still going"),
+                                &format!(
+                                    "This turn has generated {spent} tokens without \
+                                     finishing. Say what it should do differently, or how \
+                                     to narrow the job. (Enter to answer, Esc to end the \
+                                     turn.)"
+                                ),
+                            )
+                            .await
+                    {
+                        offered_a_way_in = true;
+                        session.append_message(Message::user(format!(
+                            "You have spent {spent} tokens on this turn without finishing. \
+                             The user says:\n\n{a}\n\nFollow that."
+                        )))?;
+                        continue;
+                    }
+                    break TurnOutcome::Stuck(format!(
+                        "spent {spent} tokens on this turn without finishing"
+                    ));
+                }
                 IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
                 IdleReason::ModelDone => {
                     let Some(v) = validator else {
@@ -679,6 +732,7 @@ impl Agent {
         // The fit-retry is routine; announce it once and record the rest.
         let mut fit_warned = false;
 
+        let mut spent = 0u32;
         for _step in 0..self.max_steps {
             if cancel.is_cancelled() {
                 return Ok(IdleReason::Aborted);
@@ -843,6 +897,7 @@ impl Agent {
             };
 
             self.last_prompt_tokens.store(completion.usage.prompt_tokens, Ordering::Relaxed);
+            spent = spent.saturating_add(completion.usage.completion_tokens);
             self.emit(session, Event::Usage {
                 prompt_tokens: completion.usage.prompt_tokens,
                 completion_tokens: completion.usage.completion_tokens,
@@ -850,6 +905,14 @@ impl Agent {
                 reasoning_tokens: completion.usage.reasoning_tokens,
                 finish_reason: completion.finish_reason.clone(),
             });
+            // Checked after the reply is banked, not before the call: stopping
+            // with the tokens spent and the answer thrown away would be the
+            // worst of both. The turn ends at the next step boundary instead.
+            if let Some(budget) = self.token_budget
+                && spent >= budget
+            {
+                return Ok(IdleReason::Budget(spent));
+            }
 
             // A tool call whose arguments were cut off (hit the output-token
             // limit) is invalid JSON. It must NOT be stored verbatim: re-sending
@@ -1668,6 +1731,12 @@ pub(crate) mod scripted {
             Self { replies: Mutex::new(replies), calls: Arc::new(Mutex::new(0)) }
         }
 
+        /// Completion tokens each scripted reply claims to have cost. Non-zero
+        /// so a budget can be reached: with zero, a turn spends nothing forever
+        /// and the stuck detector fires first, which is a test of the wrong
+        /// thing.
+        pub const REPLY_TOKENS: u32 = 100;
+
         /// A reply that calls one tool.
         pub fn calling(name: &str, args: &str) -> Completion {
             Completion {
@@ -1678,7 +1747,7 @@ pub(crate) mod scripted {
                     name: name.to_string(),
                     arguments: args.to_string(),
                 }],
-                usage: Usage::default(),
+                usage: Usage { completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
                 finish_reason: Some("tool_calls".to_string()),
             }
         }
@@ -1689,7 +1758,7 @@ pub(crate) mod scripted {
                 content: Some(text.to_string()),
                 reasoning: None,
                 tool_calls: Vec::new(),
-                usage: Usage::default(),
+                usage: Usage { completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
                 finish_reason: Some("stop".to_string()),
             }
         }
@@ -1838,6 +1907,45 @@ mod checkpoint_tests {
             "and carries on to the normal ending, not an error: {:?}",
             out.outcome
         );
+    }
+
+    /// A turn that spends its budget stops and says how much it spent, rather
+    /// than running to the step cap. The main session had no such guard while a
+    /// worker has had one since M7, which is the protection backwards: the
+    /// attended path was the unbounded one.
+    #[tokio::test]
+    async fn a_turn_that_spends_its_budget_stops_and_says_so() {
+        let (agent, _asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::calling("ls", "{}")],
+            vec![],
+            100,
+        );
+        let agent = agent.with_token_budget(Some(10));
+        let out = agent
+            .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
+            .await
+            .unwrap();
+        match out.outcome {
+            TurnOutcome::Stuck(r) => {
+                assert!(r.contains("tokens on this turn"), "{r}");
+            }
+            other => panic!("wanted a budget stop, got {other:?}"),
+        }
+    }
+
+    /// No budget set behaves exactly as before: the step cap is the only bound.
+    #[tokio::test]
+    async fn no_budget_is_unbounded_as_it_always_was() {
+        let (agent, _asked, mut session, _d) = agent_with(
+            vec![ScriptedClient::calling("ls", "{}")],
+            vec![],
+            2,
+        );
+        let out = agent
+            .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(out.outcome, TurnOutcome::MaxSteps(2)), "{:?}", out.outcome);
     }
 
     /// `/pair off` must cost nothing: no checkpoint, and the tool is not even

@@ -280,7 +280,8 @@ async fn run(args: Args) -> Result<()> {
         resolved.settings.top_k,
     )
     .with_thinking(thinking)
-    .with_pairing(config.pair() && mode == OutputMode::Tui);
+    .with_pairing(config.pair() && mode == OutputMode::Tui)
+    .with_token_budget(config.agent.token_budget);
 
     // Validation command: --until overrides the configured default.
     let validate_cmd = args.until.clone().or_else(|| config.validate_command().map(String::from));

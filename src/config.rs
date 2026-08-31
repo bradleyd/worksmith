@@ -167,6 +167,11 @@ pub struct AgentConfig {
     pub max_retries: Option<usize>,
     /// Identical-call count that triggers stuck detection.
     pub stuck_threshold: Option<u32>,
+    /// Completion tokens one turn may spend before it stops and says so. A
+    /// worker has had `agents.token-budget` since M7; this is the same guard
+    /// for the session, which had only `max-steps` and so was the *less*
+    /// protected path. Unset means no cap, as before.
+    pub token_budget: Option<u32>,
     /// Default validation command (`--until` overrides per-run).
     pub validate: Option<String>,
     /// Approximate context window (tokens); compaction triggers at 75% of it.
@@ -431,6 +436,7 @@ impl Config {
         take(&mut self.agent.max_steps, other.agent.max_steps);
         take(&mut self.agent.max_retries, other.agent.max_retries);
         take(&mut self.agent.stuck_threshold, other.agent.stuck_threshold);
+        take(&mut self.agent.token_budget, other.agent.token_budget);
         take(&mut self.agent.validate, other.agent.validate);
         take(&mut self.agent.context_limit, other.agent.context_limit);
         take(&mut self.agent.keep_recent_turns, other.agent.keep_recent_turns);
