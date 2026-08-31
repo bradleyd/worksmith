@@ -1808,6 +1808,12 @@ async fn handle_key(
             let raw = app.take_input();
             let input = raw.trim().to_string();
             if input.is_empty() {
+                // Empty input with a pending checkpoint: answer with None (skip).
+                if let Some(req) = app.pending_ask.take() {
+                    req.answer(None);
+                    return Ok(Flow::Continue);
+                }
+                // Empty input with no pending checkpoint: just continue.
                 return Ok(Flow::Continue);
             }
 
@@ -3897,24 +3903,39 @@ fn footer_string(app: &App) -> String {
     // anything under a cent entirely — which is most of a short worker run, and
     // reproduced the exact complaint this field was added to answer: prices
     // configured, workers running, no cost on screen.
-    let agent_spend = match (agent_out, agent_cost) {
-        (0, _) => String::new(),
-        (o, c) if c >= 0.01 => format!("  ⧉{o} tok (${c:.2})"),
-        (o, c) if c > 0.0 => format!("  ⧉{o} tok (${c:.3})"),
-        (o, _) => format!("  ⧉{o} tok"),
+    let money = match agent_cost {
+        c if c >= 0.01 => format!(" (${c:.2})"),
+        c if c > 0.0 => format!(" (${c:.3})"),
+        _ => String::new(),
     };
     // Ahead of cost and think, because "work is happening in the background"
     // outranks a running total — and because this used to sit last in an
     // 89-character string that truncates at terminal width, so the one
     // time-critical field was the first to fall off the edge.
-    let agents = if app.agents_running > 0 || app.agents_queued > 0 {
-        let queued =
-            if app.agents_queued > 0 { format!(" · {} queued", app.agents_queued) } else { String::new() };
-        format!("  ⧉{} agents{}", app.agents_running, queued)
-    } else {
-        String::new()
-    };
-    let tail = format!("{agents}{reasoning}{cut}{cost}{agent_spend}{fast}");
+    // One field, spelled out. It carried a glyph — `⧉` — chosen because every
+    // other symbol was taken, which is collision-avoidance rather than design;
+    // and it butted straight against the digits, so `⧉1196 tok` read as one
+    // token. The word "agents" was already doing the work the symbol was
+    // supposed to do.
+    //
+    // Running count and spend are merged because they are one thought, and
+    // because the spend has to outlive the count: workers finish, their cost
+    // does not stop having been paid.
+    let mut bits: Vec<String> = Vec::new();
+    if app.agents_running > 0 {
+        bits.push(format!("{} running", app.agents_running));
+    }
+    if app.agents_queued > 0 {
+        bits.push(format!("{} queued", app.agents_queued));
+    }
+    if agent_out > 0 {
+        bits.push(format!("🪙 {agent_out}{money}"));
+    }
+    // A space after the glyph, which is the whole complaint the previous one
+    // earned: `⧉1196 tok` ran the symbol into the digits and read as one token.
+    let agents =
+        if bits.is_empty() { String::new() } else { format!("  🤖 {}", bits.join(" · ")) };
+    let tail = format!("{agents}{reasoning}{cut}{cost}{fast}");
     format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail
@@ -3957,8 +3978,7 @@ fn footer_legend() -> Vec<OverlayItem> {
         ("⚠cut", "the last answer was cut off at max-tokens (finish reason `length`) — truncated, not finished"),
         ("$N", "cost this session — only shown when the model has prices; a free/local model shows nothing"),
         ("think:<label>", "current thinking mode (off / on / a budget like 2k / an effort)"),
-        ("⧉N agents", "workers running (plus · M queued when any are waiting). Placed before the token and cost fields on purpose: it used to sit last and was the first thing an 80-column terminal truncated away."),
-        ("⧉N tok ($M)", "output tokens and cost spent by *workers*, kept separate from this session's ↓ and $. Priced per worker model, since --worker-model exists so a cheap fan-out can run under an expensive judge."),
+        ("🤖 … 🪙 N", "background workers: how many are running, how many are queued, and the output tokens and cost they have spent — kept separate from this session's own ↓ and $, and priced per worker model, since --worker-model exists so a cheap fan-out can run under an expensive judge. Placed before the token and cost fields because it used to sit last and was the first thing an 80-column terminal truncated away."),
     ]
     .into_iter()
     .map(|(label, description)| OverlayItem {
@@ -4235,7 +4255,7 @@ mod tests {
     #[test]
     fn footer_legend_rows_are_well_formed() {
         let rows = footer_legend();
-        assert_eq!(rows.len(), 9, "one row per footer glyph");
+        assert_eq!(rows.len(), 8, "one row per footer glyph");
         for r in &rows {
             assert!(!r.label.is_empty(), "a row with no glyph");
             assert!(!r.description.trim().is_empty(), "{} has no meaning", r.label);
@@ -5018,7 +5038,8 @@ mod tests {
         a.agents_running = 1;
 
         let f = footer_string(&a);
-        assert!(f.contains("⧉1000000 tok"), "worker output is shown: {f}");
+        assert!(f.contains("🤖 1 running"), "worker state is shown: {f}");
+        assert!(f.contains("🪙 1000000"), "worker output is shown: {f}");
         // 1.0M * 0.10 + 1.0M * 0.20 = $0.30 at the worker's price, not $3.00 at
         // the session's.
         assert!(f.contains("$0.30"), "priced at the worker's model, not the session's: {f}");
