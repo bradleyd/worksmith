@@ -15,6 +15,27 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
+- **A "stopped" worker can still write to your files.** Seen live during a MUD
+  scaffold: the manager reported `agent w1 [stopped] · changed 1 file(s) ...
+  stuck: the model returned an empty response`, and *after* that line an `edit`
+  landed on `rooms.py` (+5 -5).
+
+  Cancellation is checked once per step, at the top of the loop
+  (`agent.rs:737`), and tool execution is not interruptible. So a call already
+  dispatched runs to completion and its write lands after the worker has been
+  reported stopped. The same shape as an inference server that keeps generating
+  after the client disconnects, which we also hit today with oMLX.
+
+  "Stopped" therefore means "will take no further steps", not "has stopped
+  touching your files", and the difference matters most in exactly the case
+  stopping exists for: a worker doing something you want halted. It is also
+  worse for a fan-out, where several workers share one directory and a
+  post-stop write can land on a file another worker has since taken over.
+
+  Not yet confirmed whether the tail can also render events out of order, which
+  would make this cosmetic; the mechanism above says it is real. A trace with
+  timestamps would settle it.
+
 - **A small model drops out of structured tool calls and the turn is scored
   empty.** Seen live, hosted qwen3.5-9b, mid-session: the model emitted
   `<tool_call><function=bash><parameter=command>python -m pytest …` as ordinary
