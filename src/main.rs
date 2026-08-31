@@ -1006,10 +1006,9 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
             let msg = parts.collect::<Vec<_>>().join(" ");
             match id {
                 Some(id) if !msg.trim().is_empty() => {
-                    if workers.nudge(&id, &msg) {
-                        println!("nudged {id}");
-                    } else {
-                        println!("(no agent {id})");
+                    match workers.nudge(&id, &msg) {
+                        Ok(()) => println!("nudged {id}"),
+                        Err(why) => println!("not nudged: {why}"),
                     }
                 }
                 _ => println!("usage: /agents nudge <id> <message>"),

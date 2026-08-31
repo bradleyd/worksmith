@@ -379,8 +379,12 @@ async fn manual_nudge_reaches_a_running_worker() {
         .with_supervisor(SupervisorConfig { mode: Mode::Off, ..Default::default() });
 
     let id = started(&mut mgr, "busy work");
-    assert!(mgr.nudge(&id, "check the README instead"));
-    assert!(!mgr.nudge("nope", "hi"), "unknown worker id");
+    assert!(mgr.nudge(&id, "check the README instead").is_ok());
+    // The two refusals are distinguishable on purpose: a worker that has
+    // stopped used to be accepted and reported as nudged, and the message was
+    // never read.
+    let unknown = mgr.nudge("nope", "hi").unwrap_err();
+    assert!(unknown.contains("no agent"), "unknown worker id: {unknown}");
 
     // Wait for the steering message to land in a request.
     let mut landed = false;
@@ -400,4 +404,54 @@ async fn manual_nudge_reaches_a_running_worker() {
     mgr.kill(&id);
     assert!(landed, "manual nudge should reach the worker's input");
     assert_eq!(mgr.get(&id).unwrap().nudges, 1);
+}
+
+
+/// A nudge aimed at a worker that has already finished is refused, not
+/// swallowed.
+///
+/// Reported from use: `/agents nudge w2 continue` answered "nudged w2" for a
+/// worker that had already hit its step limit. The steering mailbox is drained
+/// by the running loop, so the message was pushed, never read, and left no
+/// trace — which is how it was spotted, since a nudge that *is* consumed
+/// appends an `Event::Nudge` and a user message to the session and there was
+/// none.
+#[tokio::test]
+async fn nudging_a_finished_worker_is_refused() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    // Two calls then nothing: the worker finishes quickly and stays finished.
+    let responses: VecDeque<Completion> = (0..2).map(|_| ls_call()).collect();
+    let client = Arc::new(MockClient {
+        responses: Mutex::new(responses),
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = Arc::new(template_agent(client.clone(), dir.path()));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_supervisor(SupervisorConfig { mode: Mode::Off, ..Default::default() });
+
+    let id = started(&mut mgr, "busy work");
+
+    // Let it run out of scripted replies and settle into a terminal state.
+    let mut done = false;
+    for _ in 0..400 {
+        if mgr.list().iter().any(|w| w.id == id && !w.status.is_running()) {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(done, "the worker never reached a terminal state");
+
+    let err = mgr.nudge(&id, "continue").unwrap_err();
+    assert!(
+        err.contains("already"),
+        "it must say the worker has stopped, not claim success: {err}"
+    );
+
+    // And the refusal is not counted as an intervention.
+    let w = mgr.list().into_iter().find(|w| w.id == id).unwrap();
+    assert_eq!(w.nudges, 0, "a refused nudge is not a nudge");
+    // The timing a reader needs to tell "just now" from "half an hour ago".
+    assert!(w.finished.is_some(), "a terminal worker records when it ended");
 }

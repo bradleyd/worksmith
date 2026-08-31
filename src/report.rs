@@ -315,6 +315,8 @@ mod tests {
             escalation: None,
             group: Some(1),
             model: None,
+            started: std::time::SystemTime::now(),
+            finished: None,
         }
     }
 

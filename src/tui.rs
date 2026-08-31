@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -47,7 +47,7 @@ use crate::report::{
 use crate::config::Config;
 use crate::llm::ModelOverride;
 use crate::supervisor::SupervisorConfig;
-use crate::worker::WorkerManager;
+use crate::worker::{WorkerManager, WorkerSummary};
 
 /// A planner call in flight: the task producing subtasks, plus everything the
 /// resulting spawn needs — system prompt, the original request, and the model
@@ -2878,6 +2878,42 @@ fn knowledge_command<'a>(
 }
 
 /// `/agents [list | kill <id> | show <id>]`
+/// When a worker started, and how long ago it ended.
+///
+/// A finished worker's line is otherwise identical whether it landed a second
+/// ago or half an hour ago — which is the difference between "act on this" and
+/// "this is history". Reported from use: a `[done]` worker sat in the list
+/// looking current long after it had finished, and a nudge aimed at a worker
+/// that had already stopped was accepted and did nothing.
+///
+/// Clock time for the start, because that is what you compare against your own
+/// memory of the session; elapsed for the rest, because "4m ago" needs no
+/// arithmetic.
+fn worker_timing(w: &WorkerSummary) -> String {
+    let clock = |t: SystemTime| {
+        let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        // Local wall clock without pulling in a date library: the session is
+        // today, so hh:mm:ss is all that is wanted.
+        let day = secs % 86_400;
+        format!("{:02}:{:02}:{:02}", day / 3600, (day % 3600) / 60, day % 60)
+    };
+    let ago = |t: SystemTime| match SystemTime::now().duration_since(t) {
+        Ok(d) if d.as_secs() < 60 => format!("{}s", d.as_secs()),
+        Ok(d) if d.as_secs() < 3600 => format!("{}m", d.as_secs() / 60),
+        Ok(d) => format!("{}h{}m", d.as_secs() / 3600, (d.as_secs() % 3600) / 60),
+        Err(_) => "?".to_string(),
+    };
+    match w.finished {
+        Some(end) => format!(
+            "{}→{} ({} ago)",
+            clock(w.started),
+            clock(end),
+            ago(end)
+        ),
+        None => format!("{} (running {})", clock(w.started), ago(w.started)),
+    }
+}
+
 fn agents_command<'a>(
     app: &mut App,
     workers: &mut WorkerManager,
@@ -2927,9 +2963,10 @@ fn agents_command<'a>(
                     app.push(
                         Kind::Notice,
                         format!(
-                            "{} [{}] {} tools · {} changed{}{} · {} — {}",
+                            "{} [{}] {} · {} tools · {} changed{}{} · {} — {}",
                             w.id,
                             w.status.label(),
+                            worker_timing(&w),
                             w.tool_calls,
                             w.changed.len(),
                             nudges,
@@ -2953,10 +2990,13 @@ fn agents_command<'a>(
             let message = parts.collect::<Vec<_>>().join(" ");
             match id {
                 Some(id) if !message.trim().is_empty() => {
-                    if workers.nudge(&id, &message) {
-                        app.push(Kind::Notice, format!("nudged {id}"));
-                    } else {
-                        app.push(Kind::Notice, format!("(no agent {id})"));
+                    match workers.nudge(&id, &message) {
+                        Ok(()) => app.push(Kind::Notice, format!("nudged {id}")),
+                        // Says which of the two it was. "(no agent w2)" for a
+                        // worker that plainly exists on the list above reads as
+                        // a bug in the lookup, when the real answer is that it
+                        // already stopped.
+                        Err(why) => app.push(Kind::Notice, format!("not nudged: {why}")),
                     }
                 }
                 _ => app.push(Kind::Notice, "usage: /agents nudge <id> <message>".to_string()),

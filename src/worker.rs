@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::time::SystemTime;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -64,6 +65,10 @@ struct Runtime {
     /// Set when the supervisor pulled this worker off the floor; it wins over
     /// the (necessarily "aborted") turn outcome when reporting.
     escalation: Option<String>,
+    /// When this worker reached a terminal state. Recorded where the status is
+    /// set rather than where a reader notices, so it is when the work ended and
+    /// not when someone last looked.
+    finished: Option<SystemTime>,
 }
 
 /// Below this, a worker's final message is an assertion rather than an answer.
@@ -91,6 +96,9 @@ pub struct WorkerSummary {
     pub group: Option<u64>,
     /// Set when this worker runs on a model other than the parent's.
     pub model: Option<String>,
+    /// When it was spawned, and when it reached a terminal state.
+    pub started: SystemTime,
+    pub finished: Option<SystemTime>,
 }
 
 struct Worker {
@@ -105,6 +113,10 @@ struct Worker {
     steering: Steering,
     /// Whether this worker's terminal status has been surfaced to the user.
     reported: bool,
+    /// When this worker was spawned. A finished worker's line looks identical
+    /// whether it landed a second ago or half an hour ago, which is the
+    /// difference between "act on this" and "this is history".
+    started: SystemTime,
     _handle: JoinHandle<()>,
 }
 
@@ -152,6 +164,8 @@ impl Worker {
             escalation: r.escalation.clone(),
             group: self.group,
             model: self.model.clone(),
+            started: self.started,
+            finished: r.finished,
         }
     }
 }
@@ -456,6 +470,7 @@ impl WorkerManager {
             log: Vec::new(),
             log_total: 0,
             escalation: None,
+            finished: None,
         }));
         let cancel = CancellationToken::new();
 
@@ -545,6 +560,9 @@ impl WorkerManager {
                                 g.result = format!("stopped by supervisor — {reason}");
                             }
                         }
+                        // Every terminal path above lands here, so one stamp
+                        // covers done, stopped, failed and escalated alike.
+                        g.finished = Some(SystemTime::now());
                         break;
                     }
                 }
@@ -562,22 +580,37 @@ impl WorkerManager {
             steering,
             reported: false,
             _handle: handle,
+            started: SystemTime::now(),
         });
         Ok(id)
     }
 
     /// Inject a steering message into a running worker (manual `/agents nudge`,
     /// same mechanism the supervisor uses). False if there's no such worker.
-    pub fn nudge(&self, id: &str, message: &str) -> bool {
-        match self.workers.iter().find(|w| w.id == id) {
-            Some(w) => {
-                w.steering.push(message);
-                let mut g = w.runtime.lock().unwrap();
-                g.nudges += 1;
-                true
-            }
-            None => false,
+    /// Inject a message into a *running* worker's turn.
+    ///
+    /// A stopped worker is refused rather than silently accepted. The steering
+    /// mailbox is drained by the running loop, so pushing to a finished worker
+    /// succeeds, changes nothing, and is never read — and it used to answer
+    /// "nudged w2" for a worker that had already hit its step limit. The
+    /// message left no trace in the session either, which is how it was found:
+    /// a consumed nudge appends `Event::Nudge` and a user message, and there
+    /// was none.
+    pub fn nudge(&self, id: &str, message: &str) -> Result<(), String> {
+        let Some(w) = self.workers.iter().find(|w| w.id == id) else {
+            return Err(format!("no agent `{id}`"));
+        };
+        let mut g = w.runtime.lock().unwrap();
+        if !g.status.is_running() {
+            return Err(format!(
+                "{id} has already {} — a nudge would not be read",
+                g.status.label()
+            ));
         }
+        g.nudges += 1;
+        drop(g);
+        w.steering.push(message);
+        Ok(())
     }
 
     /// Workers that reached a terminal state since the last call (each returned
@@ -784,6 +817,7 @@ mod log_tests {
             log: Vec::new(),
             log_total: 0,
             escalation: None,
+            finished: None,
         };
         for i in 0..(LOG_LINES + 50) {
             log_line(&mut rt, i.to_string());
