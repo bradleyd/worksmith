@@ -1449,10 +1449,25 @@ async fn run_loop(
                 }
             }
 
-            // Spinner animation while a turn runs. Gated on `running` so an
-            // idle UI doesn't force a full redraw 8×/sec (the ticker is always
-            // ready; without the guard every tick re-wraps and re-draws).
-            _ = ticker.tick(), if app.running => {
+            // Spinner animation while a turn runs, and the loop's only heartbeat
+            // while background work is alive. Gated so an idle UI doesn't force
+            // a full redraw 8×/sec (the ticker is always ready; without a guard
+            // every tick re-wraps and re-draws).
+            //
+            // `agents_running` is in the condition because the top of this loop
+            // is where `take_newly_finished` surfaces a finished worker and
+            // `pump` starts a queued one. Gated on `running` alone, neither
+            // happens while the session sits idle: a worker finishes, nothing
+            // wakes the loop, and the user sees nothing until they press a key.
+            // Observed exactly that — a worker stopped, the transcript said
+            // nothing, and `/agents` "fixed" it because typing woke the loop.
+            //
+            // `agents_queued` too, and not only for symmetry: the last running
+            // worker finishing takes the count to zero from inside its own
+            // task, so a loop gated on `running` alone would then sleep with a
+            // full queue and never start any of it.
+            _ = ticker.tick(),
+                if app.running || app.agents_running > 0 || app.agents_queued > 0 => {
                 app.spinner = app.spinner.wrapping_add(1);
             }
         }
