@@ -569,15 +569,7 @@ impl WorkerManager {
                                 g.result = msg;
                             }
                         }
-                        // An escalation is why the turn ended; report that, not
-                        // the bare "aborted" the cancellation produced.
-                        if let Some(reason) = g.escalation.clone() {
-                            g.status = WorkerStatus::Stopped;
-                            g.last = format!("supervisor: {reason}");
-                            if g.result.trim().is_empty() {
-                                g.result = format!("stopped by supervisor — {reason}");
-                            }
-                        }
+                        apply_escalation(&mut g);
                         // Every terminal path above lands here, so one stamp
                         // covers done, stopped, failed and escalated alike.
                         g.finished = Some(SystemTime::now());
@@ -794,6 +786,31 @@ fn update_last(g: &mut Runtime, e: Event) {
     }
 }
 
+/// Let a supervisor escalation explain the ending — unless the worker got
+/// there anyway.
+///
+/// An escalation is why the turn ended, and reporting it beats the bare
+/// "aborted" that cancellation produces. But it is a *guess* about a worker
+/// that looked stuck, while the check is a *fact* about whether the work is
+/// done, so a worker that finished keeps its result.
+///
+/// Seen live: a worker was nudged twice and escalated while its `cargo test`
+/// compiled, then passed that check, and was still reported as "supervisor
+/// stopped it (still off track after 2 nudges)" with the success nowhere on
+/// screen.
+fn apply_escalation(g: &mut Runtime) {
+    if matches!(g.status, WorkerStatus::Done) {
+        return;
+    }
+    if let Some(reason) = g.escalation.clone() {
+        g.status = WorkerStatus::Stopped;
+        g.last = format!("supervisor: {reason}");
+        if g.result.trim().is_empty() {
+            g.result = format!("stopped by supervisor — {reason}");
+        }
+    }
+}
+
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()
 }
@@ -944,5 +961,36 @@ mod tail_tests {
         });
         let line = g.log.last().unwrap();
         assert!(line.contains("101"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod escalation_tests {
+    use super::*;
+
+    /// A passing check outranks a supervisor escalation.
+    ///
+    /// Seen live: a worker was nudged twice and escalated while its `cargo test`
+    /// compiled, then passed that check, and was still reported as "supervisor
+    /// stopped it (still off track after 2 nudges)" — success nowhere on
+    /// screen. An escalation is a guess about a worker that *looked* stuck; the
+    /// check is a fact about whether the work is done.
+    #[test]
+    fn an_escalation_does_not_overwrite_a_worker_that_succeeded() {
+        let mut g = Runtime { status: WorkerStatus::Done, ..Default::default() };
+        g.escalation = Some("still off track after 2 nudges".into());
+        apply_escalation(&mut g);
+        assert_eq!(g.status, WorkerStatus::Done, "it finished the job");
+    }
+
+    /// And still reports one when the worker did not finish.
+    #[test]
+    fn an_escalation_still_wins_over_a_bare_abort() {
+        let mut g = Runtime { status: WorkerStatus::Stopped, ..Default::default() };
+        g.escalation = Some("still off track after 2 nudges".into());
+        apply_escalation(&mut g);
+        assert_eq!(g.status, WorkerStatus::Stopped);
+        assert!(g.last.contains("supervisor"), "{}", g.last);
+        assert!(g.result.contains("still off track"), "{}", g.result);
     }
 }

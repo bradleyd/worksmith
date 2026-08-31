@@ -90,7 +90,19 @@ impl Tool for BashTool {
             .env("WORKSMITH_SESSION_ID", &ctx.session_id)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Without this the timeout below abandons the process instead of
+            // ending it. `wait_with_output` consumes the child, so when the
+            // timeout future is dropped the child is simply orphaned and keeps
+            // running — measured live: a `cargo test` capped at 120s was still
+            // compiling four and a half minutes later.
+            //
+            // That is not merely untidy, it is what makes a worker appear
+            // stuck. The orphan holds the build lock, so every retry blocks on
+            // it, and a model with no way to see why reaches for `pkill` — one
+            // did, with a pattern broad enough to kill every cargo and rustc on
+            // the machine, and matched its own shell in the process.
+            .kill_on_drop(true);
 
         let child = match cmd.spawn() {
             Ok(c) => c,
@@ -132,5 +144,44 @@ impl Tool for BashTool {
         } else {
             ToolOutput::error(body)
         }
+    }
+}
+
+#[cfg(test)]
+mod kill_tests {
+    use super::*;
+
+    /// A timed-out command does not outlive its timeout.
+    ///
+    /// It used to. `wait_with_output` consumes the child, so dropping the
+    /// timeout future orphaned it — measured live at four and a half minutes
+    /// for a `cargo test` the model had capped at 120s. The orphan then held
+    /// the build lock, every retry blocked on it, and the worker looked stuck
+    /// for a reason nothing on screen could explain. The model's answer was
+    /// `pkill -9 -f "cargo|rustc"`.
+    #[tokio::test]
+    async fn a_timed_out_command_is_actually_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            bash_timeout: Duration::from_millis(300),
+            ..Default::default()
+        };
+        // Writes a marker a second in. If the process survives its own timeout,
+        // the marker appears.
+        let marker = dir.path().join("survived");
+        let out = BashTool
+            .run(
+                json!({ "command": format!("sleep 1; touch {}", marker.display()) }),
+                &ctx,
+            )
+            .await;
+        assert!(out.content.contains("timed out"), "{}", out.content);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(
+            !marker.exists(),
+            "the command outlived its timeout — orphaned, not killed"
+        );
     }
 }

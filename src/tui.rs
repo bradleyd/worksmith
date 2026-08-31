@@ -3893,9 +3893,14 @@ fn footer_string(app: &App) -> String {
             None => app.prices.cost(*i, *o),
         })
         .sum();
+    // Three tiers, mirroring the session's own cost above. Two tiers dropped
+    // anything under a cent entirely — which is most of a short worker run, and
+    // reproduced the exact complaint this field was added to answer: prices
+    // configured, workers running, no cost on screen.
     let agent_spend = match (agent_out, agent_cost) {
         (0, _) => String::new(),
         (o, c) if c >= 0.01 => format!("  ⧉{o} tok (${c:.2})"),
+        (o, c) if c > 0.0 => format!("  ⧉{o} tok (${c:.3})"),
         (o, _) => format!("  ⧉{o} tok"),
     };
     // Ahead of cost and think, because "work is happening in the background"
