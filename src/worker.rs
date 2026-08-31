@@ -21,6 +21,7 @@ use crate::llm::ModelOverride;
 use crate::session::Session;
 use crate::validation::CommandValidator;
 use crate::supervisor::{Action, Supervisor, SupervisorConfig};
+use crate::report::truncate;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WorkerStatus {
@@ -721,7 +722,7 @@ fn update_last(g: &mut Runtime, e: Event) {
     match e {
         Event::ToolCall { name, arguments, .. } => {
             g.tool_calls += 1;
-            g.last = format!("⚙ {name}");
+            g.last = format!("⚙ {name} {}", truncate(arguments.trim(), 50));
             // Deterministically record file mutations for the parent/supervisor.
             if matches!(name.as_str(), "write" | "edit")
                 && let Some(path) = serde_json::from_str::<serde_json::Value>(&arguments)
