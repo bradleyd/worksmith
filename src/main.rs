@@ -473,9 +473,14 @@ async fn run_spawn(
         }
     }
 
+    // `--until` overrides `[agents] validate`, exactly as it overrides
+    // `[agent] validate` on the REPL path above. It used to be read only
+    // there, so `worksmith spawn --until "..."` accepted the flag, advertised
+    // it in --help, and ran no check at all — a whole fan-out completing
+    // "done" with the differentiator switched off and nothing saying so.
     let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
         .with_default_validate(
-            config.agents_validate().map(str::to_string),
+            args.until.clone().or_else(|| config.agents_validate().map(str::to_string)),
             Duration::from_secs(config.bash_timeout_secs()),
         )
         .with_supervisor(config.supervisor());
