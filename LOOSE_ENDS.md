@@ -164,6 +164,54 @@ shows its evidence now, and it can take a question.
   lands every few lines. Keeping it in the session while showing it once per
   turn in the tail is probably the balance.
 
+- **The footer reports only the parent session, so during a fan-out every number
+  in it reads zero.** Reported from use, twice. First: prices set under
+  `[models]`, workers running, cost never moves. Then the whole line, with one
+  worker busy:
+
+  ```
+   qwen/qwen3.5-9b  ctx 0% (0/128000)  ↓0  think:2k  ↑1 agents
+  ```
+
+  `↑1 agents` is the only true field on it. Context, output tokens and cost are
+  all zero because they are all fed by `Event::Usage` on the parent's bus, and
+  during a fan-out the parent is idle — the work is happening somewhere the
+  footer cannot see. It is not that the cost is missing; it is that the footer
+  describes a session that is doing nothing, next to a counter saying one agent
+  is doing something.
+
+  (The `128000` there is its own small lie, and a separate one: no
+  `[models."openrouter/qwen/qwen3.5-9b"]` table exists, so the limit is the
+  inherited `unwrap_or(128_000)` default rather than anything true about the
+  model. OpenRouter reports 262k for it. Harmless in the direction that
+  matters — the default is conservative, not optimistic — but it is a number on
+  screen that nobody chose.)
+
+  Two layers, and the second is the one that makes it hard to patch:
+
+  1. **Worker usage never reaches the parent.** `total_in_tokens` /
+     `total_out_tokens` are accumulated from `Event::Usage` on the *parent's*
+     bus (`tui.rs:882`). A worker's events go to its own bus and never reach the
+     parent's — `worker.rs` says so in as many words, and it is why `/agents
+     tail` polls a recorded log instead of subscribing. So a fan-out's entire
+     spend is invisible to the only number that reports spend.
+  2. **A worker records only its output.**
+     `Event::Usage { completion_tokens, .. } => g.tokens += completion_tokens`
+     (`worker.rs:741`) throws the prompt tokens away. On a billed API the whole
+     prompt is charged on every step, so input is normally the *larger* half —
+     and for workers it exists nowhere, so even wiring layer 1 would report a
+     number that is wrong in a new way.
+
+  The fix is `Runtime` carrying prompt tokens alongside completion tokens,
+  `WorkerSummary` exposing both, and the TUI folding a finished worker's totals
+  into the session's on completion. Folding on *completion* rather than live
+  keeps it out of the hot path and matches how `take_newly_finished` already
+  surfaces things.
+
+  Worth doing for a reason beyond accounting: the whole "flat cost per solved
+  task" finding rests on knowing what a run cost, and a fan-out is exactly the
+  configuration where that number is currently a fiction.
+
 - **The footer's running-agent count is the first thing truncated away.** The
   indicator exists and its data is live — `app.agents_running` is recomputed
   every frame at `tui.rs:1138` and rendered as `↑{n} agents` at `tui.rs:3792`.
