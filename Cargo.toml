@@ -46,3 +46,12 @@ similar = "3"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Drop debuginfo for dependencies only; worksmith itself keeps full symbols.
+# This buys disk, not speed: measured at 7.2s either way on a warm rebuild,
+# because ~6.4s of that is rustc's frontend on our own 19.7k-line crate and no
+# profile knob touches it. What it does buy is target/debug 31G -> 21G on a
+# target-dir shared by every project on the machine, which is what made a
+# rebuild look like a hang once the incremental cache went I/O-bound.
+[profile.dev.package."*"]
+debug = 0

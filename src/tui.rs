@@ -7,6 +7,7 @@
 //! mutex) so the UI keeps rendering and stays responsive to Esc (abort) while
 //! the model streams.
 
+use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1448,11 +1449,11 @@ async fn run_loop(
                 }
             }
 
-            // Spinner animation while a turn runs.
-            _ = ticker.tick() => {
-                if app.running {
-                    app.spinner = app.spinner.wrapping_add(1);
-                }
+            // Spinner animation while a turn runs. Gated on `running` so an
+            // idle UI doesn't force a full redraw 8×/sec (the ticker is always
+            // ready; without the guard every tick re-wraps and re-draws).
+            _ = ticker.tick(), if app.running => {
+                app.spinner = app.spinner.wrapping_add(1);
             }
         }
 
@@ -3433,7 +3434,11 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
     };
     let start = end.saturating_sub(h);
 
-    let hits: Vec<usize> = if app.mode == Mode::Normal { app.search_hits() } else { Vec::new() };
+    let hits: HashSet<usize> = if app.mode == Mode::Normal {
+        app.search_hits().into_iter().collect()
+    } else {
+        HashSet::new()
+    };
     let view: Vec<Line> = rows[start..end]
         .iter()
         .enumerate()
