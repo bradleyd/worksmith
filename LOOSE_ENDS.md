@@ -15,6 +15,42 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
+- **A big source file can eat a small context, and the only defence is advice
+  the model already follows.** Reported from real use: `max-steps = 100` hit
+  repeatedly on qwen3.8 via OpenRouter while working on documents, because
+  reading large Rust files exhausts a 32,768-token window.
+
+  `cap()` (`tools/mod.rs:94`) trims a result at `MAX_TOOL_RESULT_BYTES` and
+  appends a notice telling the model to grep for what it needs rather than page
+  through. The comment above it records this failing anyway: *fifty steps, 46
+  reads, seventeen of them the same file, and not one edit* — while the model
+  used `offset`/`limit` for 41 of them. It obeyed and still lost the turn, so
+  the fix is not better wording.
+
+  **What the cap does for Markdown and not for code** is the shape of the fix.
+  On truncation it pulls headings from the whole file first, so the notice can
+  name what was cut. A `.md` file gets an outline; a 5,000-line `.rs` file gets
+  "about 24 further reads, do not". `rustopedia/` already has the missing half:
+  `File Skeletons` and `Current Code Facts` list every struct, enum, field and
+  fn in the touched files, which turns `src/tui.rs` from 5,070 lines of text
+  into roughly 100 lines of signatures with line numbers, followed by one
+  targeted read.
+
+  Not measured here. Every task in `evals/pool/` works on files of 20 to 80
+  lines, so nothing in the suite exercises this and the evidence is one report
+  plus one code comment. A fixture with a genuinely large file would settle both
+  the size of the problem and whether a skeleton fixes it.
+
+- **The two tool-output caps are fixed constants and share a name.**
+  `tools/mod.rs:88` is 8,000 bytes, `agent.rs:29` is 24,000, both called
+  `MAX_TOOL_RESULT_BYTES`, and neither is derived from the model's context
+  window. At 8,000 bytes a read costs roughly 2,000 tokens: 6% of a 32k window
+  each, so a dozen reads is most of it and compaction then discards the earliest
+  ones. The same constant on a 262k model is trivially small. `ResolvedModel`
+  already carries `settings.context`, which is what the footer and compaction
+  use, so scaling from it is small. Two constants with one name is worth fixing
+  regardless: it reads as one value until you grep.
+
 - **A task can fail nine checks in a row and nothing notices it is going
   nowhere.** `pa-reject` on Qwen3.5-4B, three isolated runs: 0/3, taking 327s,
   900s (timed out) and 436s, burning 9,033 / 24,939 / 13,650 generated tokens.
