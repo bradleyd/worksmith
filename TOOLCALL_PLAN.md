@@ -198,59 +198,138 @@ It is not the scaffold it was meant to be, and the reasons are the point.
 
 ## What is actually in there
 
-Four modules, **all fully implemented**, 165 to 278 lines each, and **zero**
-`NotImplementedError` anywhere. Only `rooms.py` was ever given to a worker, so
-the scaffold session wrote the other three itself, having been told "Do NOT
-implement any module body" and having reported back that "all stub methods raise
-NotImplementedError as required". Confidently wrong, in the one turn a human was
-watching.
+**Corrected 2026-08-31 by measuring it, and the earlier account was wrong in
+both directions.** What follows replaces it; the old version is in the git
+history, and it is worth knowing how it went wrong because the mistake is easy
+to make again.
 
-Plus 130 tests across four files: 17 rooms, 26 items, 35 combat, 52 parser.
+It said: *four modules, all fully implemented, zero `NotImplementedError`
+anywhere, the scaffold session over-produced after being told not to,
+confidently wrong in the one turn a human was watching.*
 
-## Three things to fix before running it
+The truth, from an AST walk over the four files at `701b479`:
 
-1. **There is no test runner.** `pytest` is not installed, so
-   `--until "python3 -m pytest ..."` could never pass, whatever the worker
+| module | stubbed | implemented |
+|---|---|---|
+| `rooms.py` | 1 | 14 |
+| `items.py` | 22 | 0 |
+| `combat.py` | 28 | 0 |
+| `parser.py` | 19 | 0 |
+
+**The scaffold session did what it was told.** It stubbed all three modules it
+wrote. `rooms.py` is the *only* implemented one, and it is implemented because
+it is the only one that was ever given to a worker — so the worker did its job
+too. The evening's account had both agents failing at the one thing each of
+them actually got right.
+
+**How the reading went wrong: line count was mistaken for implementation.** The
+files are 165 to 278 lines, which looks like working code and is almost entirely
+docstrings. `items.py` is 278 lines and 22 empty bodies.
+
+**What was really wrong was one word.** The session reported that "all stub
+methods raise NotImplementedError as required" and had written `pass` — 66 of
+them. That is a small error with a large consequence, and it is the actual
+finding: `pass` returns `None` silently, so a test gets an `AssertionError`
+about a value rather than being told the body was never written, and any check
+looking for `NotImplementedError` sees nothing. Fixed in `7e057e2`; the
+`Protocol` bodies in `combat.py` stay `...`, which is a declaration and not a
+stub.
+
+**So "brownfield" as described below is not available.** There is no
+substantial existing implementation to work on — the option was invented from
+the same misreading. The two real choices are greenfield, or greenfield with
+`rooms.py` already done as a worked example.
+
+Plus 131 tests across four files: 22 rooms, 30 items, 34 combat, 45 parser.
+Every one of them runs now, and every failure is a `NotImplementedError` except
+one, which is discussed below.
+
+## Three things to fix before running it — two are done
+
+1. **There is no test runner.** *Done, `b09c039`.* `pytest` is not installed,
+   so `--until "python3 -m pytest ..."` could never pass, whatever the worker
    wrote. Every check failed on an import error rather than a test result, and
    the worker spent its turn trying `pip install pytest` and hitting
-   `pip: command not found`. Either install pytest or convert the tests to
-   `unittest` from the standard library. Stdlib is safer: the goal is testing
-   the harness, not the runner.
+   `pip: command not found`.
 
-   **Checked 2026-08-31, and the checks below are well-formed.** The fixture is
-   clean at `701b479`, all four test files still use pytest idioms, `pytest` is
-   still absent (Homebrew python 3.14), and `tests/__init__.py` exists — without
-   it `python3 -m unittest tests.test_items` could not resolve the module at
-   all, which would have been the missing-runner mistake a second time. All four
-   `--until` commands exit 1 today and can therefore both fail and pass. That
-   makes the conversion the workers' *task* rather than pre-work: the spawn
-   prompts below already ask for it.
+   The conversion turned out to be trivial and was done here rather than handed
+   to a worker: `import pytest` was a **dead import**, with zero fixtures, zero
+   `pytest.raises`, zero `parametrize` and zero marks across all four files.
+   Bare `assert` works inside a `TestCase`, so it was the import, the base
+   class, and a `__main__` block. Handing that to a worker would have meant
+   every `--until "python3 -m unittest tests.test_X"` failing on a
+   `ModuleNotFoundError` before it could say anything about module X — a check
+   that fails for a reason other than the thing you care about, which is
+   exactly the defect in item 2.
+
+   `tests/__init__.py` exists, so `python3 -m unittest tests.test_items`
+   resolves. Without it the check would have been broken a third way.
 
 2. **The scaffold check could not fail for the reason it existed.**
    `python3 -c 'import rooms…' && pytest --collect-only` passes just as happily
-   on implemented code as on stubs, which is why the over-production went
-   unnoticed. A check that cannot fail for the thing you care about is not a
-   check. The stronger form asserts the tests error with `NotImplementedError`.
+   on implemented code as on stubs. A check that cannot fail for the thing you
+   care about is not a check.
 
-3. **Decide which experiment this is.** Two options, and the second is probably
-   better:
-   - **Greenfield:** re-stub the modules and fan out `-n 3` to implement them.
-     Tests the planner and parallel workers, which is what the fan-out has no
-     evidence for.
-   - **Brownfield:** leave it implemented and give it the real task, which is
-     "make the tests runnable and passing" on existing code with 130 tests and
-     no runner. Closer to how anyone actually uses this, and it exercises
-     reading a codebase the model did not write.
+   It is now expressible, because the stubs raise. The strong form is that the
+   tests **error with `NotImplementedError`**:
+
+   ```sh
+   python3 -m unittest discover tests 2>&1 | grep -q NotImplementedError
+   ```
+
+   Note what that would have caught and what it would not: it fails on
+   implemented code, which is what it is for, and it would *not* have caught
+   the real error that evening, since `pass` and `raise NotImplementedError`
+   are both unimplemented. Detecting the `pass` version needs the AST walk that
+   found this, not a test run.
+
+3. **Decide which experiment this is.** Only one option survives the correction
+   above, in two shapes:
+   - **Greenfield, three modules.** Leave `rooms.py` implemented and fan out
+     `items` / `combat` / `parser`. Three modules maps onto `-n 3`, and the
+     finished module is a worked example of the house style sitting in the same
+     directory.
+   - **Greenfield, four modules.** Re-stub `rooms.py` as well. Discards the one
+     piece of evidence the evening produced — that a worker given one module
+     implements it correctly — for no obvious gain.
+
+   The first is better on both counts.
+
+   **But note what greenfield collides with.** Its stated value is exercising
+   the planner and parallel workers, and that is precisely the path with the
+   known shared-check defect described at the end of this file: `-n 3` copies
+   one `--until` to all three, so no worker can pass until all three finish.
+   A greenfield fan-out today mostly re-measures that defect. Either run it
+   deliberately as a test *of* the shared check — cheap, and the fixture is
+   well shaped to expose it — or fix the per-task check first and have the run
+   mean something.
+
+4. **One test is wrong, and it is left wrong on purpose.**
+   `test_get_all_rooms_returns_all_rooms_in_order_added` asserts `rooms[3] is
+   room3` after adding three rooms, having already asserted `len(rooms) == 3`.
+   `rooms.py` is correct and the test has an off-by-one.
+
+   It is the ambiguous case the spawn prompts below have a rule for, arrived at
+   by accident, and it is the sharpest thing in the fixture: editing the test
+   until it passes is the cheapest way to satisfy any check, and a worker that
+   does it has told you the check is not measuring what you wanted. Do not fix
+   it.
 
 ## What the fixture already bought
 
-The evening produced four filed findings and two shipped fixes without the test
-ever completing, which is worth remembering when the next run also fails:
+The evening produced four filed findings without the test ever completing, and
+**all four are now fixed** — which is the argument for running it again even
+though it will probably fail again:
 
-- the stray tool call landing in `reasoning` (this plan)
-- the TUI loop sleeping through worker completions, fixed
-- the checkpoint asking for help without showing the evidence
-- the checkpoint accepting only a directive, never a question
+- the stray tool call landing in `reasoning` — fixed, `llm/rescue.rs`
+- the TUI loop sleeping through worker completions — fixed
+- the checkpoint asking for help without showing the evidence — fixed
+- the checkpoint accepting only a directive, never a question — fixed
+
+A fifth arrived from re-reading the fixture rather than running it: the account
+of what the scaffold session produced was wrong, and had been carried forward
+into a whole experimental option that could not exist. Measuring the thing took
+one AST walk.
 
 
 ## The commands to run
@@ -258,33 +337,44 @@ ever completing, which is worth remembering when the next run also fails:
 Three separate spawns, not `-n 3`. Reason below.
 
 ```
-/spawn --until "python3 -m unittest tests.test_items -q" Make tests/test_items.py
-pass. Convert it from pytest to unittest if it uses pytest idioms. Fix items.py
-where the tests show it is wrong; fix the test only if it contradicts the
-docstring in items.py. Edit items.py and tests/test_items.py only.
+/spawn --until "python3 -m unittest tests.test_items -q" Implement items.py so
+tests/test_items.py passes. Every method body currently raises
+NotImplementedError; the docstring above each one says what it should do. Do not
+edit the tests. Edit items.py only.
 
-/spawn --until "python3 -m unittest tests.test_combat -q" Make tests/test_combat.py
-pass. Convert it from pytest to unittest if it uses pytest idioms. Fix combat.py
-where the tests show it is wrong; fix the test only if it contradicts the
-docstring in combat.py. Edit combat.py and tests/test_combat.py only.
+/spawn --until "python3 -m unittest tests.test_combat -q" Implement combat.py so
+tests/test_combat.py passes. Every method body currently raises
+NotImplementedError; the docstring above each one says what it should do. Do not
+edit the tests. Edit combat.py only.
 
-/spawn --until "python3 -m unittest tests.test_parser -q" Make tests/test_parser.py
-pass. Convert it from pytest to unittest if it uses pytest idioms. Fix parser.py
-where the tests show it is wrong; fix the test only if it contradicts the
-docstring in parser.py. Edit parser.py and tests/test_parser.py only.
+/spawn --until "python3 -m unittest tests.test_parser -q" Implement parser.py so
+tests/test_parser.py passes. Every method body currently raises
+NotImplementedError; the docstring above each one says what it should do. Do not
+edit the tests. Edit parser.py only.
 ```
 
 Four things are deliberate. A check each worker can pass on its own. A file
 fence, since workers share one directory and there is no worktree isolation
-(PLAN.md M11). `unittest` rather than `pytest`, because there is no runner
-installed. And an explicit rule for the ambiguous case: when the test and the
-code disagree, the docstring decides. Without that a model edits the test until
-it passes, which is the cheapest way to satisfy any check and is not what the
-check was for.
+(PLAN.md M11). Nothing about pytest, because the runner question is settled and
+a worker asked to convert its tests spends its turn on that instead of the job.
+And **"do not edit the tests"**, which is stronger than the previous "fix the
+test only if it contradicts the docstring": the modules are empty, so a test
+that fails is telling the truth by construction, and the only reason to touch
+one is to make a check pass without doing the work. `rooms.py` is left as the
+worked example.
+
+If a worker edits its test anyway, that is the result — not a spoiled run.
 
 Reset between attempts with `git checkout .` in `~/Projects/mud-test`, and read
 what each worker did with `git diff` — which is also the only way to catch two
-workers writing the same file.
+workers writing the same file. The fixture is ready at `b09c039`.
+
+**What to watch, in order.** Whether `stuck: the model returned an empty
+response` still appears at all, which is the parser's first real exercise.
+Whether a checkpoint fires and whether its evidence block was enough to answer
+from. Whether any worker touches a test file. And whether three workers writing
+three different files in one directory interfere anyway, which nothing has
+measured yet.
 
 # Open problem: a fan-out shares one check
 
