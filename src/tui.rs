@@ -1805,6 +1805,13 @@ async fn handle_key(
             if input.starts_with('/')
                 && handle_command(&input, app, agent, session, mem, cwd, workers, config).await?
             {
+                // This return skips the `refresh_hint()` at the bottom of the
+                // handler — the one whose comment says no edit path can forget
+                // it. Running a command *is* an edit path: the composer is now
+                // empty, so the list of matching commands is stale, and it hung
+                // on screen until the next keystroke or an Esc. Reported as
+                // "/agents shows the list and the popup will not go away".
+                app.refresh_hint();
                 return Ok(Flow::Continue);
             }
 
@@ -4865,6 +4872,27 @@ mod tests {
         a.set_input("what does /memory do".into());
         a.refresh_hint();
         assert!(a.hint.is_none());
+    }
+
+    #[test]
+    fn submitting_a_command_leaves_no_stale_hint() {
+        // `/agents<Enter>` ran the command and left the command list sitting on
+        // screen until the next keystroke or an Esc, because the command branch
+        // returns before the handler's single `refresh_hint()` — the one whose
+        // comment says no edit path can forget it. Running a command is an edit
+        // path: it empties the composer.
+        //
+        // This pins the invariant the fix restores rather than the call site:
+        // whatever the composer holds, the hint must agree with it.
+        let mut a = app();
+        a.set_input("/agents".into());
+        a.refresh_hint();
+        assert!(a.hint.is_some(), "the list is up while the command is typed");
+
+        // What submitting does: the composer empties.
+        a.set_input(String::new());
+        a.refresh_hint();
+        assert!(a.hint.is_none(), "an empty composer must not still show a command list");
     }
 
     #[test]
