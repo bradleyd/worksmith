@@ -97,6 +97,12 @@ pub struct Supervisor {
     /// Is a model call in flight? While one is, silence means "waiting", not
     /// "stuck".
     in_flight: bool,
+    /// The tool call currently running, if any. A nudge cannot interrupt one
+    /// any more than it can interrupt a model call, and a worker waiting on a
+    /// six-minute `cargo test` emits nothing the whole time — which is
+    /// indistinguishable from being stuck unless this is tracked.
+    tool_in_flight: Option<String>,
+    tool_idles: usize,
     /// Consecutive idle deadlines that passed while a call was in flight.
     in_flight_idles: usize,
 }
@@ -111,6 +117,8 @@ impl Supervisor {
             completion_tokens: 0,
             blocked_flagged: false,
             in_flight: false,
+            tool_in_flight: None,
+            tool_idles: 0,
             in_flight_idles: 0,
         }
     }
@@ -155,7 +163,14 @@ impl Supervisor {
                     _ => None,
                 }
             }
+            Event::ToolResult { .. } => {
+                self.tool_in_flight = None;
+                self.tool_idles = 0;
+                None
+            }
             Event::ToolCall { name, arguments, .. } => {
+                self.tool_in_flight = Some(name.clone());
+                self.tool_idles = 0;
                 let sig = format!("{name}::{arguments}");
                 let count = self.calls.entry(sig.clone()).or_insert(0);
                 *count += 1;
@@ -211,6 +226,30 @@ impl Supervisor {
                 waited.as_secs()
             )));
         }
+        // Same argument as `in_flight` above, for the other thing a worker can
+        // legitimately disappear into. A tool call emits nothing until it
+        // returns, and a nudge aimed at one lands after it finishes — so all it
+        // does is spend the budget. Measured on this repo: `cargo test` after an
+        // edit takes 6m42s, while the supervisor's patience is
+        // `idle_timeout` x (`max_nudges` + 1) = 360s. It killed a worker forty
+        // seconds before its own check would have proved it had succeeded, and
+        // well inside the 600s `bash-timeout-secs` that was already bounding it.
+        //
+        // The tool layer owns this timeout, so the supervisor defers to it and
+        // only steps in if a tool outlives even a hung model call — which means
+        // a tool with no timeout of its own, not a slow one.
+        if let Some(name) = self.tool_in_flight.clone() {
+            self.tool_idles += 1;
+            let waited = self.cfg.idle_timeout * self.tool_idles as u32;
+            if waited < self.cfg.request_timeout {
+                return None;
+            }
+            return Some(Action::Escalate(format!(
+                "`{name}` has been running for {}s with no result",
+                waited.as_secs()
+            )));
+        }
+
         let secs = self.cfg.idle_timeout.as_secs();
         self.act(format!(
             "No progress for {secs}s. Briefly state where you are, then take a concrete next \
@@ -265,6 +304,73 @@ mod tests {
 
     fn sup(cfg: SupervisorConfig) -> Supervisor {
         Supervisor::new(cfg)
+    }
+
+    #[test]
+    fn a_long_running_tool_is_not_mistaken_for_a_stuck_worker() {
+        // Measured on this repo: `cargo test` after an edit takes 6m42s, while
+        // the supervisor's patience is idle_timeout x (max_nudges + 1) = 360s.
+        // It stopped a worker forty seconds before that worker's own check
+        // would have proved it succeeded — and well inside the 600s
+        // bash-timeout-secs that was already bounding the command.
+        //
+        // The same reasoning the model path already carries: a nudge lands at
+        // the top of the *next* step, so one aimed at a running tool arrives
+        // after the tool finishes. All it can do is spend the budget.
+        let mut s = sup(SupervisorConfig {
+            idle_timeout: Duration::from_secs(120),
+            request_timeout: Duration::from_secs(600),
+            max_nudges: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            s.observe(&Event::ToolCall {
+                id: "c".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"cargo test"}"#.into(),
+            }),
+            None
+        );
+
+        // Four idle ticks — past what used to be the whole budget — and it has
+        // neither nudged nor stopped, because a tool is running.
+        for tick in 1..=4 {
+            assert_eq!(s.on_idle(), None, "intervened on tick {tick} while a tool was running");
+        }
+        assert_eq!(s.nudges(), 0, "a running tool must not cost a nudge");
+
+        // The result arrives and ordinary supervision resumes.
+        s.observe(&Event::ToolResult {
+            id: "c".into(),
+            name: "bash".into(),
+            ok: true,
+            output: "test result: ok".into(),
+        });
+        assert!(matches!(s.on_idle(), Some(Action::Nudge(_))), "silence after a tool is still idle");
+    }
+
+    #[test]
+    fn a_tool_with_no_timeout_of_its_own_is_still_caught() {
+        // Deferring to the tool layer is right for a slow tool and wrong for a
+        // hung one, so the escape hatch stays — just far enough out that it
+        // cannot fire on anything legitimate.
+        let mut s = sup(SupervisorConfig {
+            idle_timeout: Duration::from_secs(120),
+            request_timeout: Duration::from_secs(600),
+            ..Default::default()
+        });
+        s.observe(&Event::ToolCall {
+            id: "c".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        });
+        for _ in 1..5 {
+            assert_eq!(s.on_idle(), None);
+        }
+        match s.on_idle() {
+            Some(Action::Escalate(why)) => assert!(why.contains("bash"), "{why}"),
+            other => panic!("a tool running past the request timeout must escalate: {other:?}"),
+        }
     }
 
     #[test]
