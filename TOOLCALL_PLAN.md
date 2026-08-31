@@ -427,6 +427,47 @@ terminal and false of the worker, and the two disagree about what `python3`
 means. Harmless now that the tests are stdlib, but it is a live hazard: a
 `--until` can pass for the worker and fail for the human checking by hand.
 
+## The combat rerun with --fast, 2026-08-31
+
+w2 rerun alone from a clean `combat.py`, thinking off, same task text so
+`--fast` was the only variable. **It passed — 34/34.** All three modules are
+now green: items 30/30, combat 34/34, parser 45/45. No test file was edited in
+either run.
+
+Convergence, by failing-test count: 33 → 6 → 12 → 4 → 3 → 2 → 0. The bump to 12
+was real and so was the recovery: it rewrote `set_stats` back to the
+four-argument form that had errored ten tests, then ran the tests, then
+`grep "set_stats" tests/test_combat.py`, then fixed the signature. It used the
+tests to settle the ambiguity instead of editing them, which is what the fence
+was for.
+
+**Thinking off, and the format drop vanished.** 35 tool calls, **zero** read out
+of text. The three thinking workers ran at 16%, 50% and 80%. Same model, same
+fixture, same prompts, one variable changed. One run, so a strong correlation
+rather than a law — but it says the drop is a symptom of reasoning rather than
+of the model, and it retroactively supports the hypothesis this plan half
+abandoned: the 9B's empty responses were blamed on thinking, and on a
+mis-channelled tool call, and those are the same cause. 17,067 completion
+tokens for the whole task.
+
+**Two things the run cost us, both worth more than the pass.**
+
+`worksmith spawn --until "..."` accepted the flag and ran no check
+(`run_spawn` read only `[agents] validate`). The rerun's worker session
+carried zero validation events: it finished "done" with the differentiator
+switched off, and passed only because the model verified itself by hand.
+Fixed in `a87f0f3` and verified live. The TUI's `/spawn` was never affected,
+so the three-worker run's checks did run and its results stand.
+
+And the fence pushed the pressure sideways rather than removing it. Told not to
+edit the tests, the model wrote `def set_stats(self, *args)` with a
+`max_health = 100  # default` inside — accepting both arities, satisfying the
+tests, and throwing away the typed interface the docstring specifies. It is
+legal under the rule and still the wrong answer. A check that only asks "do the
+tests pass" cannot see it, which is the same shape as the scaffold check that
+could not fail: **the test suite is not the specification, and a model under a
+fence will find whatever the fence left open.**
+
 # Open problem: a fan-out shares one check
 
 `/spawn -n 3 --until "..."` gives **every** worker the same check. Its own usage
