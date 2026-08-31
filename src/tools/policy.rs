@@ -105,6 +105,24 @@ fn ask_patterns() -> &'static [(&'static str, &'static str)] {
             r"(?:^|[;&|]\s*)(?:brew|apt|apt-get|yum|dnf|pacman)\s+(?:install|remove|uninstall|upgrade)\b",
             "installs or removes software system-wide",
         ),
+        // Killing processes by pattern reaches outside the task, in the same
+        // sense `git push` does: the blast radius is the whole machine, not the
+        // project directory, and it cannot be undone.
+        //
+        // Observed. A worker's `cargo test` timed out (the build genuinely
+        // takes seven minutes), it read that as stuck processes rather than a
+        // slow build, and ran `pkill -9 -f "cargo|rustc"` — which on a
+        // developer's machine ends every build and every rustc, including other
+        // projects and any editor running checks in the background. Nothing
+        // gated it. The same command also matched its own shell, because -f
+        // matches the full command line and the pattern was *in* that line.
+        (
+            r"(?:^|[;&|]\s*)(?:pkill|killall)\b",
+            "kills processes by name or pattern, anywhere on the machine",
+        ),
+        // `kill -9` on an explicit pid is narrower but still not undoable, and
+        // a model reaching for it is usually guessing at what is wrong.
+        (r"(?:^|[;&|]\s*)kill\s+-9\b", "force-kills a process"),
     ]
 }
 
@@ -258,8 +276,29 @@ mod tests {
             "scp notes.txt me@host:/tmp/",
             "kubectl delete pod x",
             "brew install ffmpeg",
+            // Observed: a worker whose `cargo test` timed out read a slow build
+            // as stuck processes and ran this, unchallenged. It would have
+            // ended every build on the machine.
+            r#"pkill -9 -f "cargo|rustc""#,
+            "killall node",
+            "kill -9 12345",
+            // Still gated when it is not the first thing on the line.
+            "cd /tmp && pkill -f cargo",
         ] {
             assert!(asks(cmd), "should ask: {cmd}");
+        }
+    }
+
+    /// The gate is about killing *by pattern*, not about the word appearing.
+    /// Over-asking is how prompts come to be waved through.
+    #[test]
+    fn ordinary_commands_that_merely_mention_killing_are_allowed() {
+        for cmd in [
+            "grep -rn pkill src/",
+            "echo 'use pkill to stop it' >> NOTES.md",
+            "cargo test kill_tests",
+        ] {
+            assert!(!asks(cmd), "should not ask: {cmd}");
         }
     }
 

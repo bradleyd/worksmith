@@ -478,10 +478,15 @@ impl WorkerManager {
         let bus = EventBus::new();
         let steering = Steering::new();
         let model_label = model.as_ref().map(|m| m.model.clone());
+        // Created before the fork so the worker's tools can be pointed at it.
+        // A fork otherwise inherits the *parent's* token, and the worker's own
+        // kill switch reaches nothing that is actually running.
+        let cancel = CancellationToken::new();
         let agent = self
             .template
             .fork_with(bus.clone(), session_id.clone(), model)
-            .with_steering(steering.clone());
+            .with_steering(steering.clone())
+            .with_cancel(cancel.clone());
         let mut rx = bus.subscribe();
         drop(bus); // the forked agent keeps a sender clone
 
@@ -500,7 +505,6 @@ impl WorkerManager {
             prompt_tokens: 0,
             check_passed: None,
         }));
-        let cancel = CancellationToken::new();
 
         let rt = runtime.clone();
         let cancel_task = cancel.clone();

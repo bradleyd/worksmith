@@ -32,6 +32,16 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub session_id: String,
     pub bash_timeout: Duration,
+    /// Cancelled when the turn is abandoned — `/agents kill`, the supervisor
+    /// pulling a worker, or Esc in the TUI.
+    ///
+    /// Without it a running command answers to nobody. `/agents kill w1`
+    /// printed "killing w1" and the worker stayed `[running]` for another
+    /// minute, because the bash tool watched only its own timeout: up to
+    /// `bash-timeout-secs` — 600 in a real config — during which neither the
+    /// user nor the supervisor could stop it. The supervisor's own escalation
+    /// was ignored for the same reason.
+    pub cancel: tokio_util::sync::CancellationToken,
     /// Spawned workers *propose* memories instead of writing them (§8).
     pub is_worker: bool,
     /// Who to ask before an outward-facing or irreversible action. Defaults to
@@ -66,6 +76,7 @@ impl Default for ToolContext {
             cwd: PathBuf::from("."),
             session_id: String::new(),
             bash_timeout: Duration::from_secs(120),
+            cancel: tokio_util::sync::CancellationToken::new(),
             is_worker: false,
             approver: std::sync::Arc::new(approval::AutoApprove),
             loaded_skills: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

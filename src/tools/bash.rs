@@ -109,15 +109,25 @@ impl Tool for BashTool {
             Err(e) => return ToolOutput::error(format!("failed to spawn command: {e}")),
         };
 
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => return ToolOutput::error(format!("command error: {e}")),
-            Err(_) => {
-                return ToolOutput::error(format!(
-                    "command timed out after {}s",
-                    timeout.as_secs()
-                ));
+        // Raced against cancellation as well as the timeout. `kill_on_drop`
+        // above means either arm ends the process rather than orphaning it —
+        // which is what `/agents kill` needs in order to mean anything, since
+        // otherwise a command answers to nobody until its own timeout expires.
+        let output = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                return ToolOutput::error("command cancelled".to_string());
             }
+            r = tokio::time::timeout(timeout, child.wait_with_output()) => match r {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => return ToolOutput::error(format!("command error: {e}")),
+                Err(_) => {
+                    return ToolOutput::error(format!(
+                        "command timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+            },
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -183,5 +193,43 @@ mod kill_tests {
             !marker.exists(),
             "the command outlived its timeout — orphaned, not killed"
         );
+    }
+
+    /// A cancelled command stops, rather than running to its own timeout.
+    ///
+    /// This is what `/agents kill` needs in order to mean anything. Without it
+    /// the tool watched only its timeout — up to `bash-timeout-secs`, 600 in a
+    /// real config — and neither the user nor the supervisor could interrupt
+    /// it. Observed: "killing w1" printed while the worker stayed `[running]`,
+    /// and the supervisor's own escalation was ignored the same way.
+    #[tokio::test]
+    async fn a_cancelled_command_stops_instead_of_running_to_its_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            // Far longer than the test: only cancellation can end this.
+            bash_timeout: Duration::from_secs(60),
+            cancel: cancel.clone(),
+            ..Default::default()
+        };
+
+        let marker = dir.path().join("survived");
+        let cmd = format!("sleep 1; touch {}", marker.display());
+        let running = tokio::spawn(async move {
+            BashTool.run(json!({ "command": cmd }), &ctx).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+
+        let out = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("it must return promptly, not wait out its 60s timeout")
+            .unwrap();
+        assert!(out.content.contains("cancelled"), "{}", out.content);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(!marker.exists(), "cancelling must end the process, not orphan it");
     }
 }

@@ -426,6 +426,18 @@ impl Agent {
         self.thinking.clone()
     }
 
+    /// Point this agent's tools at a cancellation token.
+    ///
+    /// A fork inherits the parent's, which is wrong for a worker: it has its
+    /// own lifetime and its own kill switch. Without this the `cancel` field is
+    /// inert and a running command answers to nobody — `/agents kill w1` said
+    /// "killing w1" while the worker carried on, because the bash tool watched
+    /// only its own timeout.
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.tool_ctx.cancel = cancel;
+        self
+    }
+
     /// This agent's steering mailbox — push to it to inject a message into the
     /// next step of a running turn (worker reports, supervisor nudges).
     pub fn steering(&self) -> Steering {
