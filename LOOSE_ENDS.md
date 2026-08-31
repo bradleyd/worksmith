@@ -13,7 +13,10 @@ that parsed, validated, and were then silently dropped); `worksmith config
 check` built, which found the fourth itself on its first run; `/model` steps 3
 and 4a; compaction no longer trades the whole context for a sentence; the
 forgiving tool-call parser (`llm/rescue.rs`); both checkpoint complaints — it
-shows its evidence now, and it can take a question.
+shows its evidence now, and it can take a question; the worker tail; the
+footer's worker spend and the truncated agent count; `/agents` timestamps; a
+nudge to a stopped worker; the stale command popup; and the supervisor killing
+workers that were merely running a slow check.
 
 ## Bugs
 
@@ -110,6 +113,7 @@ shows its evidence now, and it can take a question.
   act on it, which is the worse of the two mistakes.
 
 - **A worker's tail is unreadable, and the worst of it is one discarded field.**
+  *Fixed — `eccb4e1`, plus `5b8ced1` which a spawned worker wrote.*
   Reported from use while tailing a live worker:
 
   ```
@@ -165,7 +169,10 @@ shows its evidence now, and it can take a question.
   turn in the tail is probably the balance.
 
 - **The footer reports only the parent session, so during a fan-out every number
-  in it reads zero.** Reported from use, twice. First: prices set under
+  in it reads zero.** *Mostly fixed — `04eb5c5`. Worker tokens and cost are now
+  counted and shown, priced per worker model. `ctx` is deliberately still
+  parent-only: a context percentage belongs to one conversation, and mixing a
+  worker's window into it would be wrong rather than merely blank.* Reported from use, twice. First: prices set under
   `[models]`, workers running, cost never moves. Then the whole line, with one
   worker busy:
 
@@ -212,7 +219,9 @@ shows its evidence now, and it can take a question.
   task" finding rests on knowing what a run cost, and a fan-out is exactly the
   configuration where that number is currently a fiction.
 
-- **The footer's running-agent count is the first thing truncated away.** The
+- **The footer's running-agent count is the first thing truncated away.**
+  *Fixed — `04eb5c5` moves it ahead of cost and think, and gives it its own
+  glyph. A test pins it near the front of the string.* The
   indicator exists and its data is live — `app.agents_running` is recomputed
   every frame at `tui.rs:1138` and rendered as `↑{n} agents` at `tui.rs:3792`.
   But `footer_string` puts it **last**:
