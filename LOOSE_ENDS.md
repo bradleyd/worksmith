@@ -459,6 +459,24 @@ workers that were merely running a slow check.
   migration for the existing files, and a decision about what a worker's file is
   named relative to its parent's.
 
+- **The footer's glyphs are chosen by what was still free, not by what reads.**
+  Reported as "those glyphs are hard to understand". True, and the cause is
+  visible in the commit that added the last one: `↑` already meant output
+  tokens, `↻` reasoning, `⚙` tools, `◆` a checkpoint and `⚠` a truncated
+  answer — so `⧉` got picked because nothing else was left, which is
+  collision-avoidance rather than design.
+
+  The likely answer is fewer glyphs, not better ones. `⧉2 agents` already
+  carries the word "agents"; the symbol adds nothing a reader needs, and
+  `⧉48200 tok ($0.21)` would read better as `agents 48.2k tok ($0.21)`. A
+  footer that spells out the two or three fields people actually scan for, and
+  leaves symbols to the ones that repeat constantly, would need no legend for
+  half of what the legend currently covers.
+
+  Worth doing together with the legend, since `/help footer` exists precisely
+  because the current set is unreadable without it — a legend is a symptom, not
+  a fix.
+
 - **`/pair` bare toggles instead of reporting.** Every other state command
   (`/validate`, `/route`, `/mouse`) reports when given no argument. `/pair`
   flips it, so checking whether pairing is on turns it off. Bare should report;
