@@ -194,3 +194,59 @@ ever completing, which is worth remembering when the next run also fails:
 - the TUI loop sleeping through worker completions, fixed
 - the checkpoint asking for help without showing the evidence
 - the checkpoint accepting only a directive, never a question
+
+
+## The commands to run
+
+Three separate spawns, not `-n 3`. Reason below.
+
+```
+/spawn --until "python3 -m unittest tests.test_items -q" Make tests/test_items.py
+pass. Convert it from pytest to unittest if it uses pytest idioms. Fix items.py
+where the tests show it is wrong; fix the test only if it contradicts the
+docstring in items.py. Edit items.py and tests/test_items.py only.
+
+/spawn --until "python3 -m unittest tests.test_combat -q" Make tests/test_combat.py
+pass. Convert it from pytest to unittest if it uses pytest idioms. Fix combat.py
+where the tests show it is wrong; fix the test only if it contradicts the
+docstring in combat.py. Edit combat.py and tests/test_combat.py only.
+
+/spawn --until "python3 -m unittest tests.test_parser -q" Make tests/test_parser.py
+pass. Convert it from pytest to unittest if it uses pytest idioms. Fix parser.py
+where the tests show it is wrong; fix the test only if it contradicts the
+docstring in parser.py. Edit parser.py and tests/test_parser.py only.
+```
+
+Four things are deliberate. A check each worker can pass on its own. A file
+fence, since workers share one directory and there is no worktree isolation
+(PLAN.md M11). `unittest` rather than `pytest`, because there is no runner
+installed. And an explicit rule for the ambiguous case: when the test and the
+code disagree, the docstring decides. Without that a model edits the test until
+it passes, which is the cheapest way to satisfy any check and is not what the
+check was for.
+
+Reset between attempts with `git checkout .` in `~/Projects/mud-test`, and read
+what each worker did with `git diff` — which is also the only way to catch two
+workers writing the same file.
+
+# Open problem: a fan-out shares one check
+
+`/spawn -n 3 --until "..."` gives **every** worker the same check. Its own usage
+string says so: *"A fan-out's check runs in every worker at once, in one
+directory."* `PendingFanOut.validate` is a single value carried through the
+planner to all of them.
+
+So on this fixture, worker 1 cannot pass until workers 2 and 3 have also
+finished. Each spends its retries waiting on the others, and the thing worth
+enforcing — *this* worker's module passes *its* tests — cannot be expressed at
+all. The check is the entire differentiator, and the fan-out path is where it
+degrades to a shared pass/fail on the whole directory.
+
+Three separate spawns avoid it, at the cost of never exercising the planner,
+which is the one part of the fan-out with no evidence behind it.
+
+Not solved here. What it needs is a per-worker check, which means the planner
+emitting a check alongside each task rather than one check being copied to all,
+and that is the same shape as PLAN.md §8a's `out` key giving each worker its own
+output path. Worth designing with M11 (worktree per worker) rather than before
+it: both exist because workers share one directory and pretend not to.
