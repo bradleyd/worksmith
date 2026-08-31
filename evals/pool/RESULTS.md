@@ -4,6 +4,47 @@ Newest first. Each sweep says what held, what did not, and what it found wrong
 with its own design; a result whose caveats are not written next to it gets
 quoted later without them.
 
+# HumanEval — the independent test, 2026-08-30
+
+Every number below this line comes from a fixture where the same person wrote
+the tasks and the checks. This one does not. The problems and tests are
+OpenAI's, the tests are both the `--until` check and the grader, and nothing was
+authored to make a point. Model: hosted `qwen/qwen3.5-9b`, all 164 problems.
+
+| arm | passed | what it isolates |
+|---|---|---|
+| bare | 135/163 = 83% | the model alone, one shot, no tools |
+| bare+test | 134/163 = 82% | same, plus the tests shown as text |
+| **harness** | **162/164 = 99%** | **`--until python3 test.py`** |
+
+**The information confound is closed.** Showing the model the tests as text is
+worth nothing: 83% against 82%, slightly negative, inside noise. So the harness
+gain is not "we showed it the answer". That arm exists because on this benchmark
+the tests are genuinely extra information, unlike the expenses fixture whose
+goals already named their checks.
+
+**Enforcement is worth +17 points**, information held constant. Per problem: 28
+rescued that the model failed one-shot, 1 lost that it had passed
+(`HumanEval/96`), 1 that failed both ways (`HumanEval/145`).
+
+The harness is not strictly better, and the one regression is worth keeping in
+view rather than rounding away.
+
+**Cost:** 147,954 generated tokens across 164 problems, about 900 each, roughly
+two cents.
+
+**Why this matters more than anything above it.** A 9B scoring 99% on HumanEval
+is not a claim about the model; published 9B scores sit well below that. It is a
+claim about what a check-and-retry loop is worth, measured where nobody can
+argue the fixture was built to flatter it. It also matches the shape seen on the
+expenses fixture from the other end: the 4B started at 56% with 44 points of
+headroom and captured 41; the 9B started at 82% with 18 and captured 17.
+
+**What it does not show.** HumanEval is one-shot function writing. There is no
+existing codebase, no chain of dependent tasks, no editing. It tests the
+validation loop, which is the core claim, and says nothing about the worker
+pool, decomposition, or long-running sessions.
+
 # Sweep 6 — the comparison the branch was for, 2026-08-30
 
 Three attempts per task, every arm, same 22 tasks from the same snapshots.
