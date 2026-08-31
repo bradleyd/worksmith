@@ -23,8 +23,11 @@ use crate::validation::CommandValidator;
 use crate::supervisor::{Action, Supervisor, SupervisorConfig};
 use crate::report::truncate;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum WorkerStatus {
+    /// A worker is running from the moment it exists; every other state is
+    /// something that happened to it.
+    #[default]
     Running,
     Done,
     Failed,
@@ -45,6 +48,7 @@ impl WorkerStatus {
     }
 }
 
+#[derive(Default)]
 struct Runtime {
     status: WorkerStatus,
     last: String,
@@ -701,10 +705,15 @@ fn log_line(g: &mut Runtime, line: String) {
 fn update_last(g: &mut Runtime, e: Event) {
     // `last` is the one-line status; the log is the history behind it.
     match &e {
-        Event::ToolCall { name, .. } => log_line(g, format!("⚙ {name}")),
+        // Arguments included for the same reason as in the status line above:
+        // without them the tail is a column of "⚙ bash" and cannot say which
+        // command ran, which is the whole thing a reader is following it for.
+        Event::ToolCall { name, arguments, .. } => {
+            log_line(g, format!("⚙ {name} {}", truncate(arguments.trim(), 60)))
+        }
         Event::ToolResult { name, ok, output, .. } => {
             let mark = if *ok { "" } else { "✗ " };
-            log_line(g, format!("  {mark}{name}: {}", first_line(output)));
+            log_line(g, format!("  {mark}{name}: {}", result_line(output)));
         }
         Event::AssistantMessage { text } => {
             for l in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -750,6 +759,23 @@ fn update_last(g: &mut Runtime, e: Event) {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()
+}
+
+/// The first line of a tool result that actually says something.
+///
+/// `bash` puts `exit code: 0` on line one, so the plain first line reported the
+/// one line carrying no information and hid the output underneath it — a tail
+/// reading "bash: exit code: 0" over and over while the worker was doing real
+/// work. A non-zero exit is worth keeping, because then the code *is* the news.
+fn result_line(s: &str) -> String {
+    let mut lines = s.lines().filter(|l| !l.trim().is_empty());
+    match lines.next() {
+        Some(first) if first.trim() == "exit code: 0" => {
+            lines.next().unwrap_or("ok").trim().to_string()
+        }
+        Some(first) => first.trim().to_string(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -826,5 +852,59 @@ mod log_tests {
         assert_eq!(rt.log.len(), LOG_LINES, "bounded, so a long worker can't grow forever");
         assert_eq!(rt.log_total, LOG_LINES + 50, "but the count remembers what happened");
         assert_eq!(rt.log[0], "50", "the oldest lines are the ones dropped");
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    /// The tail has to say which command ran.
+    ///
+    /// It could not: `Event::ToolCall { name, .. }` discarded the arguments, so
+    /// a worker compiling for six minutes and a worker running `ls` both
+    /// rendered as "⚙ bash". Reported from use as four lines and two blanks
+    /// saying nothing.
+    #[test]
+    fn a_logged_tool_call_carries_its_arguments() {
+        let mut g = Runtime::default();
+        update_last(&mut g, Event::ToolCall {
+            id: "c".into(),
+            name: "bash".into(),
+            arguments: r#"{"command":"cargo test --lib"}"#.into(),
+        });
+        let line = g.log.last().unwrap();
+        assert!(line.contains("bash"), "{line}");
+        assert!(line.contains("cargo test --lib"), "the command is the point: {line}");
+    }
+
+    /// `exit code: 0` is the one line of a bash result that carries no
+    /// information, and it was the only line shown.
+    #[test]
+    fn a_bash_result_skips_the_exit_code_when_it_succeeded() {
+        let mut g = Runtime::default();
+        update_last(&mut g, Event::ToolResult {
+            id: "c".into(),
+            name: "bash".into(),
+            ok: true,
+            output: "exit code: 0\ntest result: ok. 190 passed\n".into(),
+        });
+        let line = g.log.last().unwrap();
+        assert!(line.contains("190 passed"), "the useful line is shown: {line}");
+        assert!(!line.contains("exit code: 0"), "not the one that says nothing: {line}");
+    }
+
+    /// A non-zero exit is different: then the code *is* the news.
+    #[test]
+    fn a_failing_exit_code_is_kept() {
+        let mut g = Runtime::default();
+        update_last(&mut g, Event::ToolResult {
+            id: "c".into(),
+            name: "bash".into(),
+            ok: false,
+            output: "exit code: 101\nerror: could not compile\n".into(),
+        });
+        let line = g.log.last().unwrap();
+        assert!(line.contains("101"), "{line}");
     }
 }

@@ -1125,7 +1125,14 @@ async fn run_loop(
                         );
                     }
                     for l in lines {
-                        app.push(Kind::Tool, format!("[{id}] {l}"));
+                        // `Kind::Tool` prepends its own "⚙ ", and the log
+                        // line already carries one — which is where the
+                        // "⚙ [w1] ⚙ bash" double glyph came from, and why the
+                        // nesting looked like it meant parent/child when it was
+                        // an accident. `Kind::Notice` adds no label, so the
+                        // worker's own glyph stands alone, and the bar makes
+                        // the nesting real.
+                        app.push(Kind::Notice, format!("{id} │ {l}"));
                     }
                     app.tail = Some((id, next));
                 }
@@ -2933,7 +2940,14 @@ fn agents_command<'a>(
                         app.push(Kind::Notice, format!("{id} hasn't done anything yet"));
                     }
                     for l in lines {
-                        app.push(Kind::Tool, format!("[{id}] {l}"));
+                        // `Kind::Tool` prepends its own "⚙ ", and the log
+                        // line already carries one — which is where the
+                        // "⚙ [w1] ⚙ bash" double glyph came from, and why the
+                        // nesting looked like it meant parent/child when it was
+                        // an accident. `Kind::Notice` adds no label, so the
+                        // worker's own glyph stands alone, and the bar makes
+                        // the nesting real.
+                        app.push(Kind::Notice, format!("{id} │ {l}"));
                     }
                     app.tail = Some((id.to_string(), next));
                     app.push(
