@@ -15,33 +15,30 @@ and 4a; compaction no longer trades the whole context for a sentence.
 
 ## Bugs
 
-- **An edit appeared after a worker was reported stopped, and it is not yet
-  clear which of two bugs that is.** Seen live during a MUD scaffold: the
-  manager printed `agent w1 [stopped] · changed 1 file(s) ... stuck: the model
-  returned an empty response`, and after that line an `edit` landed on
-  `rooms.py` (+5 -5).
+- **A worker's terminal status can print before its last events.** Seen live:
+  the manager printed `agent w1 [stopped] ... stuck: the model returned an empty
+  response`, and an `edit` on `rooms.py` appeared after it, which reads as a
+  stopped worker still writing to your files.
 
-  Two candidates, with different severity, and the display cannot distinguish
-  them:
+  **It is not.** The worker's session file settles it:
 
-  1. **A leaked write.** Cancellation is checked once per step at the top of the
-     loop (`agent.rs:737`) and tool execution is not interruptible, so a call
-     already dispatched completes and its write lands after the stop was
-     reported. That would mean "stopped" is "takes no further steps" rather than
-     "has stopped touching your files", which matters most in the case stopping
-     exists for, and more in a fan-out where a post-stop write can land on a
-     file another worker has taken over.
-  2. **Out-of-order rendering.** The tail reads the worker's bounded log while
-     the terminal status comes from the manager's runtime state. Two sources,
-     no ordering between them, so an edit from *before* the stop can print
-     after it. Cosmetic.
+  ```
+  1788150324  tool_call      edit
+  1788150333  nudge          Your last response was empty…
+  1788150349  tool_call      edit          <- the one shown after "stopped"
+  1788150356  turn_complete  stuck: the model returned an empty response
+  ```
 
-  Ruled out: a worker-level retry. Nothing in `worker.rs` retries or respawns;
-  each worker gets one `run_turn`.
+  Both edits precede `turn_complete` by seven seconds. The tail reads the
+  worker's bounded log while the status line comes from the manager's runtime
+  state, and nothing orders the two, so the terminal line can print before the
+  tail has drained. Cosmetic, but alarming in exactly the moment a user is
+  deciding whether a runaway worker actually stopped. The status line should
+  come last.
 
-  **Settled by timestamps.** The worker's session file records `ts` on every
-  event, so comparing the `edit` against `turn_complete` says which it is
-  without any new instrumentation.
+  Ruled out along the way: a worker-level retry (nothing in `worker.rs` retries
+  or respawns, one `run_turn` each), and a leaked write past cancellation, which
+  the timestamps above disprove.
 
 - **A small model drops out of structured tool calls and the turn is scored
   empty.** Seen live, hosted qwen3.5-9b, mid-session: the model emitted
