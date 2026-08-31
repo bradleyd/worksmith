@@ -109,6 +109,48 @@ shows its evidence now, and it can take a question.
   Anything smarter occasionally reads a directive as a question and refuses to
   act on it, which is the worse of the two mistakes.
 
+- **A worker's tail is unreadable, and the worst of it is one discarded field.**
+  Reported from use while tailing a live worker:
+
+  ```
+  ⚙ [w1] ⚙ bash
+  ⚙ [w1]   bash: exit code: 0
+  ⚙ [w1] ⚙ bash
+  ⚙ [w1]   bash: exit code: 0
+  ```
+
+  Four lines and two blank ones to say nothing at all. Four defects stack:
+
+  1. **The arguments are thrown away.** `worker.rs:670` is
+     `Event::ToolCall { name, .. } => log_line(g, format!("⚙ {name}"))` — the
+     `..` discards `arguments`, so a worker's tail can *never* say which command
+     ran. `describe()` in `tui.rs:2738` does exactly this correctly for the main
+     session (`⚙ {name} {truncate(arguments, 50)}`), so the fix is to stop
+     dropping the field. This is the whole difference between a tail you can
+     follow and one you cannot.
+  2. **`first_line(output)` is the wrong line for `bash`** (`worker.rs:673`).
+     A bash result starts with `exit code: 0`, so the tail reports the one line
+     that carries no information and hides the output underneath it.
+  3. **The `⚙` is applied twice.** The log line already begins with one, then
+     the tail wraps it as `[{id}] {l}` (`tui.rs:1128`, `tui.rs:2893`) and pushes
+     it as `Kind::Tool`, which prepends another (`tui.rs:3546`).
+  4. **A blank line between every entry**, which doubles the height of the least
+     informative output in the program.
+
+  What it should read as, one line per call, command visible, result on the same
+  line:
+
+  ```
+  [w1] bash  python3 -m unittest discover tests -q     ok
+  [w1] bash  python3 playcheck.py                      exit 1
+  ```
+
+  Related, and partly self-inflicted: the rescued-tool-call notice now prints
+  into this same stream (`⚠ read 3 more tool call(s) out of the model's text`).
+  It is correct and it is worth recording, but on a model running at 54% it
+  lands every few lines. Keeping it in the session while showing it once per
+  turn in the tail is probably the balance.
+
 - **A finished fan-out does not tell you what happened, and buries the one line
   that does.** Reported from the first real three-worker run, unprompted: *"I
   don't know what is done, not done, and what I should do next. If I didn't tail
