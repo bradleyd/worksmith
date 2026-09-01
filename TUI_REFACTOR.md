@@ -187,7 +187,11 @@ Extract `handle_worker_pump`, `handle_bus_event`, `handle_extract_done`,
 `handle_turn_done`. The `select!` then reads as a dispatch table, and each
 handler is unit-testable.
 
-### R3. Break `handle_key` (1492) into per-mode methods returning `Flow`
+### R3. Break `handle_key` (1492) into per-mode methods returning `Flow` — IN PROGRESS
+
+> **Follow-up.** Approval prompt input now lives in `handle_approval_key`, so
+> the top of `handle_key` delegates the modal owner instead of carrying the
+> whole answer/restore flow inline.
 
 `handle_approval_key`, `handle_overlay_key`, `handle_normal_key`,
 `handle_hint_key`, `handle_insert_key`. The current nesting (approval →

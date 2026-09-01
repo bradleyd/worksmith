@@ -1137,6 +1137,36 @@ enum Flow {
     ExternalEdit,
 }
 
+fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
+    let req = app.pending_approval.take()?;
+    use crate::tools::approval::Approval;
+    let (answer, note) = match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => (Approval::Once, "approved once"),
+        KeyCode::Char('a') | KeyCode::Char('A') => (
+            Approval::AlwaysThisSession,
+            "approved — and not asking again this session for this kind of command",
+        ),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => (Approval::Deny, "denied"),
+        KeyCode::Char('c') if ctrl => (Approval::Deny, "denied (quitting)"),
+        // Anything else is not an answer. Put the question back rather than
+        // guessing, because both guesses are bad.
+        _ => {
+            app.pending_approval = Some(req);
+            app.status = "y = once · a = always this session · n = no".into();
+            return Some(Flow::Continue);
+        }
+    };
+    req.answer(answer);
+    app.push(Kind::Notice, note.to_string());
+    app.status = "/help for keys and commands".into();
+    app.transcript.dirty = true;
+    if key.code == KeyCode::Char('c') && ctrl {
+        Some(Flow::Quit)
+    } else {
+        Some(Flow::Continue)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_key(
     key: KeyEvent,
@@ -1156,32 +1186,8 @@ async fn handle_key(
     // A pending approval owns the keyboard. The agent's task is blocked waiting
     // for the answer, so typing into the composer here would look like a hang;
     // and an approval answered by accident is the failure this exists to stop.
-    if let Some(req) = app.pending_approval.take() {
-        use crate::tools::approval::Approval;
-        let (answer, note) = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => (Approval::Once, "approved once"),
-            KeyCode::Char('a') | KeyCode::Char('A') => (
-                Approval::AlwaysThisSession,
-                "approved — and not asking again this session for this kind of command",
-            ),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => (Approval::Deny, "denied"),
-            KeyCode::Char('c') if ctrl => (Approval::Deny, "denied (quitting)"),
-            // Anything else is not an answer. Put the question back rather than
-            // guessing, because both guesses are bad.
-            _ => {
-                app.pending_approval = Some(req);
-                app.status = "y = once · a = always this session · n = no".into();
-                return Ok(Flow::Continue);
-            }
-        };
-        req.answer(answer);
-        app.push(Kind::Notice, note.to_string());
-        app.status = "/help for keys and commands".into();
-        app.transcript.dirty = true;
-        if key.code == KeyCode::Char('c') && ctrl {
-            return Ok(Flow::Quit);
-        }
-        return Ok(Flow::Continue);
+    if let Some(flow) = handle_approval_key(key, app, ctrl) {
+        return Ok(flow);
     }
 
     // A picker owns the keyboard while it is up. Esc always returns to the
