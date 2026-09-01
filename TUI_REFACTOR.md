@@ -201,7 +201,11 @@ remaining inline arms (`help`, `new`, `compact`, `spawn`, `history`, `fast`,
 function each. Consider a `Command` enum parsed once instead of repeated `&str`
 matching.
 
-### R5. Replace the `PlannedFanOut` 5-tuple (54) with a named struct
+### R5. ~~Replace the `PlannedFanOut` 5-tuple (54) with a named struct~~ ✅ DONE
+
+> **Follow-up.** `PlannedFanOut` is now a named struct with `planner`,
+> `system`, `request`, `model`, and `validate` fields. The fan-out completion
+> path no longer depends on tuple position.
 
 The per-element comments are a smell that the names are missing.
 
@@ -237,7 +241,7 @@ Ordered by (impact × safety), each independently shippable and testable:
 6. **R2 / R3 / R4** — break the three big functions. Pure extraction; the
    existing tests (footer, wrap, completion, approval/checkpoint rendering)
    keep the refactor honest.
-7. **R5 / R6 / R8** — small cleanups.
+7. **R5 / R6 / R8** — small cleanups. R5 ✅ DONE.
 8. **P6 / P7** — composer O(n) edits and transcript cap. Defer until a real
    long-session complaint appears.
 

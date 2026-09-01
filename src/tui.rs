@@ -65,18 +65,16 @@ use transcript::{Item, Kind, Mode, Search, Transcript};
 #[cfg(test)]
 use transcript::{build_rows, row_text};
 
-/// A planner call in flight: the task producing subtasks, plus everything the
-/// resulting spawn needs — system prompt, the original request, and the model
-/// the workers will run on.
-type PlannedFanOut = (
-    JoinHandle<crate::fanout::FanOutPlan>,
-    String,
-    String,
-    Option<ModelOverride>,
-    // The per-worker check, held across planning so a planned fan-out is
-    // validated the same as an explicit one.
-    Option<String>,
-);
+/// A planner call in flight, plus the inputs the resulting workers need.
+struct PlannedFanOut {
+    planner: JoinHandle<crate::fanout::FanOutPlan>,
+    system: String,
+    request: String,
+    model: Option<ModelOverride>,
+    /// The per-worker check, held across planning so a planned fan-out is
+    /// validated the same as an explicit one.
+    validate: Option<String>,
+}
 
 /// Put `text` on the system clipboard using OSC 52, the terminal's own
 /// clipboard escape. No pbcopy/xclip dependency, and it works over SSH — the
@@ -836,15 +834,15 @@ async fn run_loop(
                             let a = agent.clone();
                             let max = agents_max;
                             let request = pf.task.clone();
-                            fanout = Some((
-                                tokio::spawn(async move {
+                            fanout = Some(PlannedFanOut {
+                                planner: tokio::spawn(async move {
                                     plan_fanout(a, pf.task, pf.want, max).await
                                 }),
-                                pf.system,
+                                system: pf.system,
                                 request,
-                                pf.model,
-                                pf.validate,
-                            ));
+                                model: pf.model,
+                                validate: pf.validate,
+                            });
                         }
                     }
                     Some(Ok(CEvent::Mouse(m))) => match m.kind {
@@ -955,8 +953,8 @@ async fn run_loop(
             }
 
             // Fan-out planning finished.
-            res = async { (&mut fanout.as_mut().unwrap().0).await }, if fanout.is_some() => {
-                let (_, system, request, over, validate) = fanout.take().unwrap();
+            res = async { (&mut fanout.as_mut().unwrap().planner).await }, if fanout.is_some() => {
+                let PlannedFanOut { system, request, model, validate, .. } = fanout.take().unwrap();
                 app.status = "/help for keys and commands".into();
                 match res {
                     Ok(plan) if plan.tasks.is_empty() => {
@@ -1014,7 +1012,7 @@ async fn run_loop(
                             },
                         );
                         let report =
-                            workers.spawn_many_checked(plan.tasks, system, request, over, validate);
+                            workers.spawn_many_checked(plan.tasks, system, request, model, validate);
                         app.push(Kind::Notice, fanout_notice(&report));
                     }
                     Err(e) => app.push(Kind::Error, format!("fan-out planning failed: {e}")),
