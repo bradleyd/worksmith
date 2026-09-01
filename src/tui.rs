@@ -552,6 +552,190 @@ impl Default for Transcript {
     }
 }
 
+impl Transcript {
+    fn clear_for_new_session(&mut self) {
+        self.items.clear();
+        // A fresh transcript has nothing to be scrolled back into.
+        self.scroll_up = 0;
+        self.dirty = true;
+        self.search_hits_dirty = true;
+    }
+
+    fn push(&mut self, kind: Kind, text: impl Into<String>) {
+        let at = self.items.len();
+        self.items.push(Item { kind, text: text.into() });
+        self.touch(at);
+    }
+
+    /// Enter reading mode, putting the cursor on the last visible row.
+    fn enter_normal(&mut self) {
+        self.mode = Mode::Normal;
+        self.cursor_row = self.cached_rows.len().saturating_sub(1);
+        self.follow = false; // reading, not tailing
+    }
+
+    fn enter_insert(&mut self) {
+        self.mode = Mode::Insert;
+        self.set_search(None);
+        self.follow = true;
+    }
+
+    /// Move the cursor by `delta` rows, clamped, keeping it on screen.
+    fn cursor_by(&mut self, delta: isize) {
+        let last = self.cached_rows.len().saturating_sub(1);
+        let next =
+            (self.cursor_row as isize + delta).clamp(0, last as isize) as usize;
+        self.cursor_row = next;
+    }
+
+    /// Which item a row belongs to. `item_starts` already records where each
+    /// item begins, so this is the lookup that makes "yank what I'm looking at"
+    /// mean the whole message rather than one wrapped line.
+    fn item_at_row(&self, row: usize) -> Option<usize> {
+        if self.item_starts.is_empty() {
+            return None;
+        }
+        Some(match self.item_starts.binary_search(&row) {
+            Ok(i) => i,
+            Err(0) => 0,
+            Err(i) => i - 1,
+        })
+    }
+
+    fn set_search(&mut self, search: Option<Search>) {
+        self.search = search;
+        self.search_hits_dirty = true;
+        self.rebuild_search_hits();
+    }
+
+    fn mutate_search(&mut self, f: impl FnOnce(&mut Search)) {
+        if let Some(search) = &mut self.search {
+            f(search);
+        }
+        self.search_hits_dirty = true;
+        self.rebuild_search_hits();
+    }
+
+    /// Rows matching the active search pattern, in order.
+    fn rebuild_search_hits(&mut self) {
+        self.search_hit_rows.clear();
+        let Some(s) = &self.search else {
+            self.search_hits_dirty = false;
+            return;
+        };
+        if s.pattern.is_empty() {
+            self.search_hits_dirty = false;
+            return;
+        }
+        let needle = s.pattern.to_ascii_lowercase();
+        self.search_hit_rows = self
+            .cached_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| row_text(l).to_ascii_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect();
+        self.search_hits_dirty = false;
+    }
+
+    fn search_hits(&mut self) -> &[usize] {
+        if self.search_hits_dirty {
+            self.rebuild_search_hits();
+        }
+        &self.search_hit_rows
+    }
+
+    /// Jump to the next match after the cursor, wrapping. Returns false when
+    /// nothing matches, so the caller can say so instead of moving silently.
+    fn jump_match(&mut self, forward: bool) -> bool {
+        let cur = self.cursor_row;
+        let hits = self.search_hits();
+        if hits.is_empty() {
+            return false;
+        }
+        let next = if forward {
+            hits.iter().find(|&&r| r > cur).copied().unwrap_or(hits[0])
+        } else {
+            hits.iter()
+                .rev()
+                .find(|&&r| r < cur)
+                .copied()
+                .unwrap_or(*hits.last().unwrap())
+        };
+        self.cursor_row = next;
+        true
+    }
+
+    /// Mark item `index` (and everything after it) as needing re-wrapping.
+    fn touch(&mut self, index: usize) {
+        self.dirty = true;
+        self.dirty_from =
+            Some(self.dirty_from.map_or(index, |d| d.min(index)));
+        self.search_hits_dirty = true;
+    }
+
+    /// Everything needs re-wrapping — a width change, or a toggle that changes
+    /// how items render.
+    fn touch_all(&mut self) {
+        self.dirty = true;
+        self.dirty_from = Some(0);
+        self.search_hits_dirty = true;
+    }
+
+    /// Rebuild the wrapped-row cache, doing only the work that changed.
+    fn ensure_rows(&mut self, width: u16) {
+        let width_changed = self.cache_width != width;
+        if !self.dirty && !width_changed {
+            if self.search_hits_dirty {
+                self.rebuild_search_hits();
+            }
+            return;
+        }
+        let from = if width_changed { 0 } else { self.dirty_from.unwrap_or(0) };
+        // Never start past the last item with recorded rows: `item_starts` is
+        // what says where a rebuild may resume, and indexing past it would
+        // truncate the cache to nothing and silently lose the transcript.
+        let from = from.min(self.item_starts.len());
+
+        // Drop the stale tail, keep the prefix, and re-wrap only from `from`.
+        // A missing start means "nothing recorded yet for this item", i.e. keep
+        // every cached row and append.
+        let keep_rows =
+            self.item_starts.get(from).copied().unwrap_or(self.cached_rows.len());
+        self.cached_rows.truncate(keep_rows);
+        self.item_starts.truncate(from);
+        for item in &self.items[from..] {
+            self.item_starts.push(self.cached_rows.len());
+            item_rows(
+                &mut self.cached_rows,
+                item,
+                self.collapse_tools,
+                self.show_thinking,
+                width,
+            );
+        }
+        self.cache_width = width;
+        self.dirty = false;
+        self.dirty_from = None;
+        self.search_hits_dirty = true;
+        self.rebuild_search_hits();
+    }
+
+    /// Scroll toward older content.
+    fn scroll_up(&mut self, n: u16) {
+        self.follow = false;
+        self.scroll_up = self.scroll_up.saturating_add(n);
+    }
+
+    /// Scroll toward the newest content; re-enable follow at the bottom.
+    fn scroll_down(&mut self, n: u16) {
+        self.scroll_up = self.scroll_up.saturating_sub(n);
+        if self.scroll_up == 0 {
+            self.follow = true;
+        }
+    }
+}
+
 struct App {
     transcript: Transcript,
     composer: Composer,
@@ -693,7 +877,7 @@ impl App {
     /// that quietly describes two sessions at once.
     fn reset_for_new_session(&mut self, path: PathBuf) {
         self.session_path = path;
-        self.transcript.items.clear();
+        self.transcript.clear_for_new_session();
         self.cur_assistant = None;
         self.cur_thinking = None;
         // Counters the footer reads. Totals are per-session: they sit next to a
@@ -705,16 +889,10 @@ impl App {
         self.total_in_tokens = 0;
         self.total_out_tokens = 0;
         self.last_finish_reason = None;
-        // A fresh transcript has nothing to be scrolled back into.
-        self.transcript.scroll_up = 0;
-        self.transcript.dirty = true;
-        self.transcript.search_hits_dirty = true;
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
-        let at = self.transcript.items.len();
-        self.transcript.items.push(Item { kind, text: text.into() });
-        self.touch(at);
+        self.transcript.push(kind, text);
     }
 
     // ---- normal mode ----
@@ -747,169 +925,63 @@ impl App {
 
     /// Enter reading mode, putting the cursor on the last visible row.
     fn enter_normal(&mut self) {
-        self.transcript.mode = Mode::Normal;
-        self.transcript.cursor_row = self.transcript.cached_rows.len().saturating_sub(1);
-        self.transcript.follow = false; // reading, not tailing
+        self.transcript.enter_normal();
     }
 
     fn enter_insert(&mut self) {
-        self.transcript.mode = Mode::Insert;
-        self.set_search(None);
-        self.transcript.follow = true;
+        self.transcript.enter_insert();
     }
 
     /// Move the cursor by `delta` rows, clamped, keeping it on screen.
     fn cursor_by(&mut self, delta: isize) {
-        let last = self.transcript.cached_rows.len().saturating_sub(1);
-        let next = (self.transcript.cursor_row as isize + delta).clamp(0, last as isize) as usize;
-        self.transcript.cursor_row = next;
+        self.transcript.cursor_by(delta);
     }
 
     /// Which item a row belongs to. `item_starts` already records where each
     /// item begins, so this is the lookup that makes "yank what I'm looking at"
     /// mean the whole message rather than one wrapped line.
     fn item_at_row(&self, row: usize) -> Option<usize> {
-        if self.transcript.item_starts.is_empty() {
-            return None;
-        }
-        Some(match self.transcript.item_starts.binary_search(&row) {
-            Ok(i) => i,
-            Err(0) => 0,
-            Err(i) => i - 1,
-        })
+        self.transcript.item_at_row(row)
     }
 
     fn set_search(&mut self, search: Option<Search>) {
-        self.transcript.search = search;
-        self.transcript.search_hits_dirty = true;
-        self.rebuild_search_hits();
+        self.transcript.set_search(search);
     }
 
     fn mutate_search(&mut self, f: impl FnOnce(&mut Search)) {
-        if let Some(search) = &mut self.transcript.search {
-            f(search);
-        }
-        self.transcript.search_hits_dirty = true;
-        self.rebuild_search_hits();
-    }
-
-    /// Rows matching the active search pattern, in order.
-    fn rebuild_search_hits(&mut self) {
-        self.transcript.search_hit_rows.clear();
-        let Some(s) = &self.transcript.search else {
-            self.transcript.search_hits_dirty = false;
-            return;
-        };
-        if s.pattern.is_empty() {
-            self.transcript.search_hits_dirty = false;
-            return;
-        }
-        let needle = s.pattern.to_ascii_lowercase();
-        self.transcript.search_hit_rows = self
-            .transcript
-            .cached_rows
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| row_text(l).to_ascii_lowercase().contains(&needle))
-            .map(|(i, _)| i)
-            .collect();
-        self.transcript.search_hits_dirty = false;
-    }
-
-    fn search_hits(&mut self) -> &[usize] {
-        if self.transcript.search_hits_dirty {
-            self.rebuild_search_hits();
-        }
-        &self.transcript.search_hit_rows
+        self.transcript.mutate_search(f);
     }
 
     /// Jump to the next match after the cursor, wrapping. Returns false when
     /// nothing matches, so the caller can say so instead of moving silently.
     fn jump_match(&mut self, forward: bool) -> bool {
-        let cur = self.transcript.cursor_row;
-        let hits = self.search_hits();
-        if hits.is_empty() {
-            return false;
-        }
-        let next = if forward {
-            hits.iter().find(|&&r| r > cur).copied().unwrap_or(hits[0])
-        } else {
-            hits.iter().rev().find(|&&r| r < cur).copied().unwrap_or(*hits.last().unwrap())
-        };
-        self.transcript.cursor_row = next;
-        true
+        self.transcript.jump_match(forward)
     }
 
     /// Mark item `index` (and everything after it) as needing re-wrapping.
     fn touch(&mut self, index: usize) {
-        self.transcript.dirty = true;
-        self.transcript.dirty_from = Some(self.transcript.dirty_from.map_or(index, |d| d.min(index)));
-        self.transcript.search_hits_dirty = true;
+        self.transcript.touch(index);
     }
 
     /// Everything needs re-wrapping — a width change, or a toggle that changes
     /// how items render.
     fn touch_all(&mut self) {
-        self.transcript.dirty = true;
-        self.transcript.dirty_from = Some(0);
-        self.transcript.search_hits_dirty = true;
+        self.transcript.touch_all();
     }
 
     /// Rebuild the wrapped-row cache, doing only the work that changed.
     fn ensure_rows(&mut self, width: u16) {
-        let width_changed = self.transcript.cache_width != width;
-        if !self.transcript.dirty && !width_changed {
-            if self.transcript.search_hits_dirty {
-                self.rebuild_search_hits();
-            }
-            return;
-        }
-        let from = if width_changed { 0 } else { self.transcript.dirty_from.unwrap_or(0) };
-        // Never start past the last item with recorded rows: `item_starts` is
-        // what says where a rebuild may resume, and indexing past it would
-        // truncate the cache to nothing and silently lose the transcript.
-        let from = from.min(self.transcript.item_starts.len());
-
-        // Drop the stale tail, keep the prefix, and re-wrap only from `from`.
-        // A missing start means "nothing recorded yet for this item", i.e. keep
-        // every cached row and append.
-        let keep_rows = self
-            .transcript
-            .item_starts
-            .get(from)
-            .copied()
-            .unwrap_or(self.transcript.cached_rows.len());
-        self.transcript.cached_rows.truncate(keep_rows);
-        self.transcript.item_starts.truncate(from);
-        for item in &self.transcript.items[from..] {
-            self.transcript.item_starts.push(self.transcript.cached_rows.len());
-            item_rows(
-                &mut self.transcript.cached_rows,
-                item,
-                self.transcript.collapse_tools,
-                self.transcript.show_thinking,
-                width,
-            );
-        }
-        self.transcript.cache_width = width;
-        self.transcript.dirty = false;
-        self.transcript.dirty_from = None;
-        self.transcript.search_hits_dirty = true;
-        self.rebuild_search_hits();
+        self.transcript.ensure_rows(width);
     }
 
     /// Scroll toward older content.
     fn scroll_up(&mut self, n: u16) {
-        self.transcript.follow = false;
-        self.transcript.scroll_up = self.transcript.scroll_up.saturating_add(n);
+        self.transcript.scroll_up(n);
     }
 
     /// Scroll toward the newest content; re-enable follow at the bottom.
     fn scroll_down(&mut self, n: u16) {
-        self.transcript.scroll_up = self.transcript.scroll_up.saturating_sub(n);
-        if self.transcript.scroll_up == 0 {
-            self.transcript.follow = true;
-        }
+        self.transcript.scroll_down(n);
     }
 
     fn apply_event(&mut self, ev: Event) {
@@ -5044,7 +5116,7 @@ mod tests {
         a.enter_normal();
 
         a.set_search(Some(Search { pattern: "LISTING".into(), typing: false }));
-        let hits = a.search_hits().to_vec();
+        let hits = a.transcript.search_hits().to_vec();
         assert_eq!(hits.len(), 2, "case-insensitive: {hits:?}");
 
         // Jumping repeatedly cycles the matches and comes back round, rather
@@ -5075,13 +5147,13 @@ mod tests {
         a.ensure_rows(80);
         a.enter_normal();
         a.set_search(Some(Search { pattern: "needle".into(), typing: false }));
-        assert!(a.search_hits().is_empty());
+        assert!(a.transcript.search_hits().is_empty());
 
         a.push(Kind::Assistant, "needle arrived later");
         assert!(a.transcript.search_hits_dirty, "new rows invalidate the cached hits");
         a.ensure_rows(80);
 
-        let hits = a.search_hits().to_vec();
+        let hits = a.transcript.search_hits().to_vec();
         assert_eq!(hits.len(), 1, "the appended row should be the only match: {hits:?}");
         assert!(
             row_text(&a.transcript.cached_rows[hits[0]]).contains("needle arrived later"),
