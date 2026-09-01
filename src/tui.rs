@@ -30,6 +30,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod composer;
+mod overlay;
 mod transcript;
 
 use crate::agent::{ActiveModel, Agent, TurnResult};
@@ -55,6 +56,7 @@ use crate::worker::{WorkerManager, WorkerSummary};
 use composer::Composer;
 #[cfg(test)]
 use composer::{compute_completions, wrap_input};
+use overlay::{Overlay, OverlayItem};
 use transcript::{Item, Kind, Mode, Search, Transcript};
 #[cfg(test)]
 use transcript::{build_rows, row_text};
@@ -113,118 +115,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/history", "what the loop did, and when"),
     ("/quit", "exit"),
 ];
-
-/// A floating list: a filter line and a scrollable set of choices. One
-/// component, because everything awkward in this UI is picking an opaque thing
-/// — a command, a model, a session, a worker id.
-struct Overlay {
-    title: String,
-    items: Vec<OverlayItem>,
-    filter: String,
-    matched: Vec<usize>,
-    selected: usize,
-    /// A picker lets you select a row (Enter puts it in the composer). A
-    /// reference — like the footer legend — has nothing to pick: Enter just
-    /// closes, and the footer bar says so.
-    picking: bool,
-}
-
-#[derive(Clone)]
-struct OverlayItem {
-    label: String,
-    description: String,
-}
-
-impl Overlay {
-    fn new(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
-        let matched = (0..items.len()).collect();
-        Self {
-            title: title.into(),
-            items,
-            filter: String::new(),
-            matched,
-            selected: 0,
-            picking: true,
-        }
-    }
-
-    /// A read-only list: rows can be scrolled and filtered, but there is
-    /// nothing to select. Enter closes rather than putting a row in the
-    /// composer, which would be nonsense for a legend.
-    fn reference(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
-        let matched = (0..items.len()).collect();
-        Self {
-            title: title.into(),
-            items,
-            filter: String::new(),
-            matched,
-            selected: 0,
-            picking: false,
-        }
-    }
-
-    /// Items matching the filter, as `(original index, item)`.
-    fn matches(&self) -> Vec<(usize, &OverlayItem)> {
-        self.matched.iter().map(|&i| (i, &self.items[i])).collect()
-    }
-
-    #[cfg(test)]
-    fn set_filter(&mut self, filter: impl Into<String>) {
-        self.filter = filter.into();
-        self.rebuild_matches();
-    }
-
-    fn push_filter(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-        self.rebuild_matches();
-    }
-
-    fn pop_filter(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
-        self.rebuild_matches();
-    }
-
-    fn rebuild_matches(&mut self) {
-        let filter = self.filter.trim().to_ascii_lowercase();
-        self.matched = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| {
-                filter.is_empty()
-                    || i.label.to_ascii_lowercase().contains(&filter)
-                    || i.description.to_ascii_lowercase().contains(&filter)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    fn move_by(&mut self, delta: isize) {
-        let n = self.matches().len();
-        if n == 0 {
-            self.selected = 0;
-            return;
-        }
-        let cur = self.selected.min(n - 1) as isize;
-        self.selected = (cur + delta).rem_euclid(n as isize) as usize;
-    }
-
-    /// Which row is highlighted, clamped to the current matches. Typing narrows
-    /// the list under the cursor, so the stored index can point past the end;
-    /// clamping in one place keeps what is drawn and what Enter picks in
-    /// agreement, instead of highlighting a row that selects nothing.
-    fn sel_index(&self, matches: usize) -> usize {
-        self.selected.min(matches.saturating_sub(1))
-    }
-
-    /// The label of the highlighted row, if the filter matched anything.
-    fn chosen(&self) -> Option<String> {
-        let m = self.matches();
-        m.get(self.sel_index(m.len())).map(|(_, i)| i.label.clone())
-    }
-}
 
 struct App {
     transcript: Transcript,

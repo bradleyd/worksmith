@@ -1,8 +1,10 @@
 # `src/tui.rs` — Review & Refactor Plan
 
-Scope: a read-only review of `src/tui.rs` (5065 lines, the largest file in the
-crate) for **performance issues**, **bugs/correctness**, and a **refactor
-plan**. No code was changed. Line numbers refer to the current file.
+Scope: originally a read-only review of `src/tui.rs` (then 5065 lines, the
+largest file in the crate) for **performance issues**, **bugs/correctness**,
+and a **refactor plan**. This is now a living note tracking the incremental TUI
+split. Older line numbers refer to the original reviewed file unless a section
+has a follow-up note.
 
 The code is sound and unusually well-commented — the comments record real
 incidents (a 15 ms/token re-wrap, a 79-minute "working…" freeze, a transcript
@@ -41,7 +43,11 @@ makes P2/P3/P5 hurt. **Fix:** gate the ticker branch with `if app.running` so it
 only forces redraws while the spinner is actually animating. When nothing is
 running, redraw only on real input/events.
 
-### P2. `search_hits()` re-scans the whole transcript on every frame in normal mode
+### P2. ~~`search_hits()` re-scans the whole transcript on every frame in normal mode~~ ✅ DONE
+
+> **Follow-up.** Search hits now live on `Transcript` and are invalidated when
+> the pattern or wrapped rows change. `render_transcript` reads the cached row
+> indexes instead of re-scanning every row per frame.
 
 `render_transcript` calls `app.search_hits()` whenever `mode == Normal`
 (line 3436). `search_hits` (line 508) allocates a lowercased needle, then for
@@ -78,7 +84,12 @@ linearly scans the whole hits list. With many matches this is
 40 × len(hits) comparisons/frame. Make it a `HashSet<usize>` (or a small set
 built only for the visible `start..end` window).
 
-### P5. `Overlay::matches()` is recomputed 3–4× per frame and allocates per item
+### P5. ~~`Overlay::matches()` is recomputed 3–4× per frame and allocates per item~~ ✅ DONE
+
+> **Follow-up.** `Overlay` now stores `matched` indexes and rebuilds them when
+> the filter changes. `matches()` still materializes a small vector of
+> `(index, item)` references for callers, but it no longer lowercases and scans
+> every item on every render.
 
 `Overlay::matches` (line 184) is called from `render_hint` (3297),
 `render_overlay` (3355), and transitively from `move_by`/`chosen`/`sel_index`
@@ -148,20 +159,21 @@ not a crash.
 The file is one 50-field `App` god-object plus three ~300–500-line functions.
 The logic is sound; the problem is concentration.
 
-### R1. Split `App` into focused structs
+### R1. Split `App` into focused structs — IN PROGRESS
 
 Each independently testable:
 
-- **`Transcript`** — `items`, `cached_rows`, `item_starts`, `dirty`,
+- **`Transcript`** — ✅ moved to `src/tui/transcript.rs`: `items`, `cached_rows`, `item_starts`, `dirty`,
   `dirty_from`, `cache_width`, `scroll_up`, `follow`, `collapse_tools`,
   `show_thinking`, `cursor_row`, `mode`, `search`. Owns `ensure_rows` /
   `touch` / `search_hits`.
-- **`Composer`** — `input`, `cursor`, `history`, `history_idx`, `draft`,
+- **`Composer`** — ✅ moved to `src/tui/composer.rs`: `input`, `cursor`, `history`, `history_idx`, `draft`,
   `completion`, `hint`. Owns all the editing methods.
 - **`Footer` / `Status`** — model, context/token counters, `prices`, `spinner`,
   `turn_start`, `think_label`, `agents_*`, `status`, `route`,
   `last_finish_reason`.
-- **`Modals`** — `overlay`, `pending_approval`, `pending_ask`.
+- **`Overlay`** — ✅ moved to `src/tui/overlay.rs`.
+- **`Modals`** — still pending: `pending_approval`, `pending_ask`.
 
 This turns the 50-line `App::new` (349) into small constructors and lets
 `reset_for_new_session` (420) reset the right sub-structs by construction
@@ -217,8 +229,8 @@ Ordered by (impact × safety), each independently shippable and testable:
 1. **P1** — gate the ticker with `if app.running`. One-line change, removes the
    idle 8 Hz redraw. Biggest win, lowest risk. ✅ DONE
 2. **P4** — `HashSet` for search hits. Local, low risk. ✅ DONE
-3. **P2 + R7** — cache `search_hits`. Removes the worst hot path.
-4. **P5** — cache `Overlay::matches`.
+3. **P2 + R7** — cache `search_hits`. Removes the worst hot path. ✅ DONE
+4. **P5** — cache `Overlay::matches`. ✅ DONE
 5. **R1** — split `App`. Mechanical, large, but each sub-struct is covered by
    the existing `#[cfg(test)]` module.
 6. **R2 / R3 / R4** — break the three big functions. Pure extraction; the
