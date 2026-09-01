@@ -209,7 +209,11 @@ matching.
 
 The per-element comments are a smell that the names are missing.
 
-### R6. Precompute `Kind` styling
+### R6. ~~Precompute `Kind` styling~~ ✅ DONE
+
+> **Follow-up.** `src/tui/transcript.rs` now has a single `kind_style` helper.
+> The row builder asks it for the style/label instead of carrying the match
+> inline.
 
 The `match item.kind` in `item_rows` (3520) rebuilds `Style`/`label` per item
 per wrap. Hoist to a `fn kind_style(kind) -> (Style, &'static str)` (or a
@@ -241,7 +245,7 @@ Ordered by (impact × safety), each independently shippable and testable:
 6. **R2 / R3 / R4** — break the three big functions. Pure extraction; the
    existing tests (footer, wrap, completion, approval/checkpoint rendering)
    keep the refactor honest.
-7. **R5 / R6 / R8** — small cleanups. R5 ✅ DONE.
+7. **R5 / R6 / R8** — small cleanups. R5/R6 ✅ DONE.
 8. **P6 / P7** — composer O(n) edits and transcript cap. Defer until a real
    long-session complaint appears.
 

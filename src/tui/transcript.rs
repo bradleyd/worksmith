@@ -323,25 +323,7 @@ fn item_rows(
             rows.push(Line::from(""));
             return;
         }
-        // Colours 1-6 are hues: every theme keeps its red red, so naming one is
-        // portable. White is ANSI 7 — a contrast extreme, and the *background*
-        // on a light theme. Assistant text is the app's default text, so it
-        // names no colour at all and inherits the terminal's foreground.
-        let (style, label): (Style, &str) = match item.kind {
-            Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
-            Kind::Assistant => (Style::default(), ""),
-            Kind::Thinking => {
-                (Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), "thinking ")
-            }
-            Kind::Tool => (Style::default().fg(Color::Yellow), "⚙ "),
-            Kind::ToolResult => (Style::default().fg(Color::DarkGray), "→ "),
-            Kind::Notice => (Style::default().fg(Color::Blue), ""),
-            Kind::Pair => {
-                (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
-            }
-            Kind::Error => (Style::default().fg(Color::Red), "! "),
-            Kind::Diff => unreachable!("diffs are rendered above"),
-        };
+        let (style, label) = kind_style(item.kind);
 
         // Show short tool results in full; cap long ones (Ctrl+O expands).
         let expanded = item.text.replace('\t', "    ");
@@ -382,6 +364,28 @@ fn item_rows(
             }
         }
         rows.push(Line::from("")); // blank line between items
+    }
+}
+
+/// Colours 1-6 are hues: every theme keeps its red red, so naming one is
+/// portable. White is ANSI 7 — a contrast extreme, and the *background* on a
+/// light theme. Assistant text is the app's default text, so it names no colour
+/// at all and inherits the terminal's foreground.
+fn kind_style(kind: Kind) -> (Style, &'static str) {
+    match kind {
+        Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
+        Kind::Assistant => (Style::default(), ""),
+        Kind::Thinking => {
+            (Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), "thinking ")
+        }
+        Kind::Tool => (Style::default().fg(Color::Yellow), "⚙ "),
+        Kind::ToolResult => (Style::default().fg(Color::DarkGray), "→ "),
+        Kind::Notice => (Style::default().fg(Color::Blue), ""),
+        Kind::Pair => {
+            (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
+        }
+        Kind::Error => (Style::default().fg(Color::Red), "! "),
+        Kind::Diff => unreachable!("diffs are rendered before kind styling"),
     }
 }
 
