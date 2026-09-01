@@ -545,6 +545,10 @@ struct App {
     cursor_row: usize,
     /// The active `/` search: the pattern, and whether it is still being typed.
     search: Option<Search>,
+    /// Cached row indexes matching `search`, invalidated with the row cache or
+    /// when the search pattern changes.
+    search_hit_rows: Vec<usize>,
+    search_hits_dirty: bool,
     /// A floating picker, when one is open. It owns the keyboard while up.
     overlay: Option<Overlay>,
     /// Which worker we're following, and how far we've printed. A worker's
@@ -610,6 +614,8 @@ impl App {
             mode: Mode::Insert,
             cursor_row: 0,
             search: None,
+            search_hit_rows: Vec::new(),
+            search_hits_dirty: false,
             overlay: None,
             tail: None,
             pending_approval: None,
@@ -649,6 +655,7 @@ impl App {
         // A fresh transcript has nothing to be scrolled back into.
         self.scroll_up = 0;
         self.dirty = true;
+        self.search_hits_dirty = true;
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
@@ -694,7 +701,7 @@ impl App {
 
     fn enter_insert(&mut self) {
         self.mode = Mode::Insert;
-        self.search = None;
+        self.set_search(None);
         self.follow = true;
     }
 
@@ -719,29 +726,57 @@ impl App {
         })
     }
 
-    /// Rows matching the committed search pattern, in order.
-    fn search_hits(&self) -> Vec<usize> {
-        let Some(s) = &self.search else { return Vec::new() };
+    fn set_search(&mut self, search: Option<Search>) {
+        self.search = search;
+        self.search_hits_dirty = true;
+        self.rebuild_search_hits();
+    }
+
+    fn mutate_search(&mut self, f: impl FnOnce(&mut Search)) {
+        if let Some(search) = &mut self.search {
+            f(search);
+        }
+        self.search_hits_dirty = true;
+        self.rebuild_search_hits();
+    }
+
+    /// Rows matching the active search pattern, in order.
+    fn rebuild_search_hits(&mut self) {
+        self.search_hit_rows.clear();
+        let Some(s) = &self.search else {
+            self.search_hits_dirty = false;
+            return;
+        };
         if s.pattern.is_empty() {
-            return Vec::new();
+            self.search_hits_dirty = false;
+            return;
         }
         let needle = s.pattern.to_ascii_lowercase();
-        self.cached_rows
+        self.search_hit_rows = self
+            .cached_rows
             .iter()
             .enumerate()
             .filter(|(_, l)| row_text(l).to_ascii_lowercase().contains(&needle))
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        self.search_hits_dirty = false;
+    }
+
+    fn search_hits(&mut self) -> &[usize] {
+        if self.search_hits_dirty {
+            self.rebuild_search_hits();
+        }
+        &self.search_hit_rows
     }
 
     /// Jump to the next match after the cursor, wrapping. Returns false when
     /// nothing matches, so the caller can say so instead of moving silently.
     fn jump_match(&mut self, forward: bool) -> bool {
+        let cur = self.cursor_row;
         let hits = self.search_hits();
         if hits.is_empty() {
             return false;
         }
-        let cur = self.cursor_row;
         let next = if forward {
             hits.iter().find(|&&r| r > cur).copied().unwrap_or(hits[0])
         } else {
@@ -755,6 +790,7 @@ impl App {
     fn touch(&mut self, index: usize) {
         self.dirty = true;
         self.dirty_from = Some(self.dirty_from.map_or(index, |d| d.min(index)));
+        self.search_hits_dirty = true;
     }
 
     /// Everything needs re-wrapping — a width change, or a toggle that changes
@@ -762,12 +798,16 @@ impl App {
     fn touch_all(&mut self) {
         self.dirty = true;
         self.dirty_from = Some(0);
+        self.search_hits_dirty = true;
     }
 
     /// Rebuild the wrapped-row cache, doing only the work that changed.
     fn ensure_rows(&mut self, width: u16) {
         let width_changed = self.cache_width != width;
         if !self.dirty && !width_changed {
+            if self.search_hits_dirty {
+                self.rebuild_search_hits();
+            }
             return;
         }
         let from = if width_changed { 0 } else { self.dirty_from.unwrap_or(0) };
@@ -795,6 +835,8 @@ impl App {
         self.cache_width = width;
         self.dirty = false;
         self.dirty_from = None;
+        self.search_hits_dirty = true;
+        self.rebuild_search_hits();
     }
 
     /// Scroll toward older content.
@@ -1640,23 +1682,23 @@ async fn handle_key(
     // deliberately entered it, and every route out is one key.
     if app.mode == Mode::Normal {
         // A search being typed takes precedence: it is a prompt, not a mode.
-        if let Some(s) = &mut app.search
-            && s.typing
-        {
+        if app.search.as_ref().is_some_and(|s| s.typing) {
             match key.code {
-                KeyCode::Esc => app.search = None,
+                KeyCode::Esc => app.set_search(None),
                 KeyCode::Enter => {
-                    s.typing = false;
+                    app.mutate_search(|s| s.typing = false);
                     if !app.jump_match(true) {
                         let p = app.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
                         app.status = format!("no match for `{p}`");
-                        app.search = None;
+                        app.set_search(None);
                     }
                 }
                 KeyCode::Backspace => {
-                    s.pattern.pop();
+                    app.mutate_search(|s| {
+                        s.pattern.pop();
+                    });
                 }
-                KeyCode::Char(c) if !ctrl => s.pattern.push(c),
+                KeyCode::Char(c) if !ctrl => app.mutate_search(|s| s.pattern.push(c)),
                 _ => {}
             }
             return Ok(Flow::Continue);
@@ -1682,7 +1724,9 @@ async fn handle_key(
                 // to disambiguate from and a hidden two-key chord is worse.
                 app.cursor_row = 0;
             }
-            KeyCode::Char('/') => app.search = Some(Search { pattern: String::new(), typing: true }),
+            KeyCode::Char('/') => {
+                app.set_search(Some(Search { pattern: String::new(), typing: true }))
+            }
             KeyCode::Char('n') => {
                 if !app.jump_match(true) {
                     app.status = "no matches".into();
@@ -3568,7 +3612,7 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
     let start = end.saturating_sub(h);
 
     let hits: HashSet<usize> = if app.mode == Mode::Normal {
-        app.search_hits().into_iter().collect()
+        app.search_hit_rows.iter().copied().collect()
     } else {
         HashSet::new()
     };
@@ -4074,7 +4118,7 @@ pub fn print_normal_preview() {
     app.ensure_rows(78);
     app.enter_normal();
     app.cursor_by(-4);
-    app.search = Some(Search { pattern: "listing".into(), typing: false });
+    app.set_search(Some(Search { pattern: "listing".into(), typing: false }));
 
     let mut term = Terminal::new(TestBackend::new(78, 14)).unwrap();
     term.draw(|f| ui(f, &app)).unwrap();
@@ -4924,8 +4968,8 @@ mod tests {
         a.ensure_rows(80);
         a.enter_normal();
 
-        a.search = Some(Search { pattern: "LISTING".into(), typing: false });
-        let hits = a.search_hits();
+        a.set_search(Some(Search { pattern: "LISTING".into(), typing: false }));
+        let hits = a.search_hits().to_vec();
         assert_eq!(hits.len(), 2, "case-insensitive: {hits:?}");
 
         // Jumping repeatedly cycles the matches and comes back round, rather
@@ -4943,10 +4987,31 @@ mod tests {
         assert_eq!(a.cursor_row, hits[0]);
 
         // A pattern that matches nothing must say so, not move the cursor.
-        a.search = Some(Search { pattern: "zzz".into(), typing: false });
+        a.set_search(Some(Search { pattern: "zzz".into(), typing: false }));
         let before = a.cursor_row;
         assert!(!a.jump_match(true));
         assert_eq!(a.cursor_row, before);
+    }
+
+    #[test]
+    fn search_hits_refresh_when_rows_change() {
+        let mut a = app();
+        a.push(Kind::Assistant, "nothing yet");
+        a.ensure_rows(80);
+        a.enter_normal();
+        a.set_search(Some(Search { pattern: "needle".into(), typing: false }));
+        assert!(a.search_hits().is_empty());
+
+        a.push(Kind::Assistant, "needle arrived later");
+        assert!(a.search_hits_dirty, "new rows invalidate the cached hits");
+        a.ensure_rows(80);
+
+        let hits = a.search_hits().to_vec();
+        assert_eq!(hits.len(), 1, "the appended row should be the only match: {hits:?}");
+        assert!(
+            row_text(&a.cached_rows[hits[0]]).contains("needle arrived later"),
+            "the cached search result must include rows appended after the search started"
+        );
     }
 
     #[test]
@@ -4959,7 +5024,7 @@ mod tests {
         assert_eq!(a.mode, Mode::Normal);
         assert!(!a.follow, "reading should not jump to the bottom on new output");
 
-        a.search = Some(Search { pattern: "x".into(), typing: true });
+        a.set_search(Some(Search { pattern: "x".into(), typing: true }));
         a.enter_insert();
         assert_eq!(a.mode, Mode::Insert);
         assert!(a.follow, "typing means you want to see what arrives");
@@ -4977,7 +5042,7 @@ mod tests {
         a.ensure_rows(78);
         a.enter_normal();
         a.cursor_row = 0;
-        a.search = Some(Search { pattern: "listing".into(), typing: false });
+        a.set_search(Some(Search { pattern: "listing".into(), typing: false }));
 
         let mut term = Terminal::new(TestBackend::new(78, 10)).unwrap();
         term.draw(|f| ui(f, &a)).unwrap();
