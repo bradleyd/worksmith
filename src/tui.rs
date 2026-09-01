@@ -3577,7 +3577,8 @@ fn ui(f: &mut Frame, app: &App) {
         .split(f.area());
 
     render_transcript(f, chunks[0], &app.transcript);
-    render_input(f, chunks[1], app);
+    let input_title = input_title(app);
+    render_input(f, chunks[1], &app.composer, input_title.as_str());
     render_footer(f, chunks[2], app);
 
     // The as-you-type hint sits directly above the composer, where you are
@@ -3892,12 +3893,12 @@ fn item_rows(
     }
 }
 
-fn render_input(f: &mut Frame, area: Rect, app: &App) {
+fn input_title(app: &App) -> String {
     // A pending approval owns the keyboard and blocks the turn, so the composer
     // has to say that. It used to keep saying "working…" with the elapsed timer
     // climbing, which reads as "the model is busy" — observed costing 79 minutes
     // of waiting for a keypress nobody knew was wanted.
-    let title = if app.pending_approval.is_some() {
+    if app.pending_approval.is_some() {
         " APPROVE?  y = once · a = always this session · n = no ".to_string()
     } else if app.pending_ask.is_some() {
         " CHECKPOINT  Enter answers · Esc skips ".to_string()
@@ -3913,10 +3914,12 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         " working… · Enter steers the running turn · Esc aborts ".to_string()
     } else {
         " message · Enter send · Ctrl+N newline ".to_string()
-    };
+    }
+}
 
+fn render_input(f: &mut Frame, area: Rect, composer: &Composer, title: &str) {
     let inner_w = area.width.saturating_sub(2) as usize;
-    let (rows, crow, ccol) = app.composer.wrapped_rows(inner_w);
+    let (rows, crow, ccol) = composer.wrapped_rows(inner_w);
     let inner_h = area.height.saturating_sub(2) as usize;
     // Vertical scroll so the cursor's row stays visible.
     let scroll = (crow + 1).saturating_sub(inner_h.max(1)) as u16;
