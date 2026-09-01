@@ -643,6 +643,45 @@ workers that were merely running a slow check.
   nothing dangerous changed" cannot both be expressed today. A post-run tier is
   where the second one lives.
 
+- **Pairing only ever fires on failure. It should also fire on risk and on
+  scale.** All three triggers today are failure triggers: going in circles, out
+  of steps, budget spent. Each one arrives when the turn is already lost. Nothing
+  stops *before* something consequential, which is the half the README actually
+  promises ("it is about to change forty files, do you want to drive?").
+
+  Four shapes, roughly in order of how much evidence there is for them.
+
+  **Stop before a large or destructive edit.** Keyed on the size of the change
+  rather than on anything going wrong: a whole-file rewrite, N files at once, or
+  a diff over some threshold. On 2026-08-31 a worker turned a four-line fix into
+  30 insertions and 16 deletions by triplicating two string literals, and another
+  wrote `def set_stats(self, *args)` to satisfy a test rather than an interface.
+  Both passed their checks. Both would have been obvious in a diff shown before
+  it landed.
+
+  **Stop when the change touches something load-bearing.** A checkpoint keyed on
+  *what* is being edited, not when. `tools/policy.rs`, `tools/approval.rs`,
+  `trust.rs` and the write gate are the files where a worker can quietly weaken
+  the protections around the person running it. Workers have already edited
+  `worker.rs` and `tui.rs` in this repo; nothing would have stopped one editing
+  the approval policy, and the only thing standing in the way is whether someone
+  wrote a test for the pattern it removed.
+
+  **A key that pauses without aborting.** Esc ends the turn. There is no way to
+  say "hold on, let me read that" and then carry on, which is the most
+  pairing-shaped thing missing from the TUI. Watching a worker and having to
+  choose between letting it run and killing it is not pairing.
+
+  **Say how many interventions are left.** `offered_a_way_in` allows exactly one
+  per turn and never says so. Answering a checkpoint spends it silently. Since
+  a question no longer spends it, the rule is now subtler and still invisible.
+
+  Related and already written up separately: the `yours` checkpoint kind, one
+  worker holding the composer during a fan-out, and triaging the prompt before
+  the work starts. Those three plus these four are one theme, which is that
+  pairing currently means "interrupt me when it breaks" and should mean "keep me
+  in it".
+
 - **A checkpoint *before* the work, not after: triage the prompt.** Suggested
   from use, after noticing that every prompt in a day of testing carried line
   numbers, exact code snippets and explicit "do not page through this file"
