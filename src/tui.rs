@@ -3579,7 +3579,9 @@ fn ui(f: &mut Frame, app: &App) {
     render_transcript(f, chunks[0], &app.transcript);
     let input_title = input_title(app);
     render_input(f, chunks[1], &app.composer, input_title.as_str());
-    render_footer(f, chunks[2], app);
+    let footer_left = footer_string(app);
+    let footer_status = footer_status(app);
+    render_footer(f, chunks[2], footer_left.as_str(), footer_status.as_str());
 
     // The as-you-type hint sits directly above the composer, where you are
     // already looking, rather than in the middle of the screen.
@@ -4159,10 +4161,9 @@ fn alert(reason: &str) {
     let _ = out.flush();
 }
 
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let left = footer_string(app);
+fn footer_status(app: &App) -> String {
     // While a turn runs, show an animated spinner + elapsed seconds.
-    let status = if app.pending_approval.is_some() || app.pending_ask.is_some() {
+    if app.pending_approval.is_some() || app.pending_ask.is_some() {
         // No spinner: nothing is happening, and an animation would say it is.
         format!("⏸ waiting for you  {}", app.status)
     } else if app.running {
@@ -4171,7 +4172,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
     } else {
         app.status.clone()
-    };
+    }
+}
+
+fn render_footer(f: &mut Frame, area: Rect, left: &str, status: &str) {
     let line = Line::from(vec![
         Span::styled(left, Style::default().fg(Color::Black).bg(Color::Cyan)),
         Span::raw("  "),
