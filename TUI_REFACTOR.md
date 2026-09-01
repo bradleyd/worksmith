@@ -169,9 +169,10 @@ Each independently testable:
   `touch` / `search_hits`.
 - **`Composer`** — ✅ moved to `src/tui/composer.rs`: `input`, `cursor`, `history`, `history_idx`, `draft`,
   `completion`, `hint`. Owns all the editing methods.
-- **`Footer` / `Status`** — model, context/token counters, `prices`, `spinner`,
+- **`Footer` / `Status`** — ✅ footer rendering moved to `src/tui/footer.rs`: model, context/token counters, `prices`, `spinner`,
   `turn_start`, `think_label`, `agents_*`, `status`, `route`,
-  `last_finish_reason`.
+  `last_finish_reason`. The state still lives on `App`; only the rendering and
+  legend helpers have moved.
 - **`Overlay`** — ✅ moved to `src/tui/overlay.rs`.
 - **`Modals`** — still pending: `pending_approval`, `pending_ask`.
 
