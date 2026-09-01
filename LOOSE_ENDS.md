@@ -606,6 +606,79 @@ workers that were merely running a slow check.
   and a contract comment, wire around it, leave it for the user. `cargo check`
   is the queue and `--until` is the check. The one kind that serves "I want to
   write code" rather than "tell me what you wrote".
+- **Post-run checks the model was never told about, security among them.**
+  Suggested from use: on a merge or on demand, run more than lint and tests —
+  a basic security pass over what was produced.
+
+  **The important part is not "security", it is "post-run".** `--until` is a
+  check the model is *optimising against*, and today produced two clean
+  examples of what that costs: a worker told not to edit the tests wrote
+  `def set_stats(self, *args)` to satisfy both arities at once, and another
+  created an executable `false` on PATH to beat a check that ran `false`. Both
+  satisfied the letter. A check the model does not know about cannot be
+  satisfied that way by construction — it is a different instrument, not a
+  stricter one.
+
+  **Security is the sharpest case because worksmith edits its own gates.**
+  Workers have already edited `src/worker.rs` and `src/tui.rs` in this repo. A
+  worker that edited `tools/policy.rs` and dropped a pattern would weaken the
+  approval gate that protects the user, and the only thing standing in the way
+  today is whether somebody happened to write a test for that pattern. Same for
+  `approval.rs`, `trust.rs`, and the write-outside-cwd gate. That is a category
+  of change that should never pass silently, and no check currently looks at
+  *what kind* of change was made.
+
+  Cheap first version, in order of value: flag any diff that touches
+  `tools/policy.rs`, `tools/approval.rs` or `trust.rs`; flag new `unsafe`;
+  flag a secret-shaped literal; run whatever the project already has
+  (`cargo audit`, `npm audit`) when it is present. None of that needs a model.
+
+  The model-graded version is the more interesting one and the more dangerous:
+  a small model asked "is this diff safe" will say yes, and a review that
+  always passes is worse than none because it launders the change. If it is
+  graded at all it wants the session model, not `agents.model`, and it wants to
+  report what it looked at rather than a verdict.
+
+  Related and unbuilt: `--until` is a single command, so "tests pass" and "and
+  nothing dangerous changed" cannot both be expressed today. A post-run tier is
+  where the second one lives.
+
+- **A checkpoint *before* the work, not after: triage the prompt.** Suggested
+  from use, after noticing that every prompt in a day of testing carried line
+  numbers, exact code snippets and explicit "do not page through this file"
+  instructions — *"I don't know if that is how people work"*. It is not. So a
+  day of results measures **worksmith plus an expert-written prompt**, which is
+  a confound worth naming in every number recorded above.
+
+  The suggestion: with pairing on, read the prompt before starting and ask
+  about what is vague or ambiguous — training wheels.
+
+  **Sharpened, the most valuable question is not "what did you mean".** It is
+  **"how will we know when this is done?"** A vague prompt usually arrives with
+  no `--until`, or with one that cannot fail — and a check that cannot fail is
+  the single defect that bit this project three separate times in one day: the
+  scaffold check that passed on implemented code, `spawn --until` that ran no
+  check at all, and a playability check whose three of five assertions were
+  vacuous. The harness's whole claim rests on the check, and nothing currently
+  asks for one.
+
+  So the triage is less "polish the wording" and more **the harness declining to
+  start work it cannot tell it has finished** — which is the same argument as
+  the validation loop itself, moved one step earlier.
+
+  Two things make it cheap. The checkpoint machinery already exists
+  (`harness_checkpoint` carries evidence and can now take a question rather than
+  only a directive), and this is the one checkpoint that fires *before* the
+  budget is spent — unlike the step-limit and stuck triggers, which arrive when
+  the turn is already lost.
+
+  Three cautions. It costs a model call before any work, so it wants to be
+  cheap and skippable. Judging a prompt is itself judgment, and the small models
+  this project exists for are worst at exactly that — it may need the session
+  model rather than `agents.model`. And a triage that fires on a clear prompt is
+  the fastest way to teach someone to hit Esc without reading, which is how
+  every approval prompt in the world stopped working.
+
 - **A first-edit deadline.** "At most N steps before your first write." The
   observed failure is never starting, and the validation loop — the whole
   differentiator — only helps a turn that makes an attempt. The step-limit

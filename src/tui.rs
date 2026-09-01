@@ -5055,7 +5055,7 @@ mod tests {
         let mut a = app();
         a.agents_running = 2;
         let f = footer_string(&a);
-        let agents = f.find("2 agents").expect("shown at all");
+        let agents = f.find("2 running").expect("shown at all");
         assert!(agents < 60, "near the front, not off the edge: {agents} in {f:?}");
     }
 
