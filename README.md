@@ -1,12 +1,6 @@
 # Worksmith
 
-A terminal coding agent for people running small, cheap, or local models.
-
-Codex, Gemini CLI, and pi are thin wrappers around a frontier model that mostly
-stays on task. Worksmith bets the other way. The harness does the work of
-keeping a weaker model honest. It will not call a task done until a check you
-named actually passes. When the model spins, it notices, and sends it back with
-the failure output instead of accepting "I'm finished."
+A terminal harness for working *with* a model instead of dispatching to one.
 
 ```sh
 worksmith --until "cargo test" "make the failing test pass"
@@ -17,17 +11,69 @@ The model stops when the test passes, not when it says so.
 The [docs](https://worksmith.sh/) cover the same ground in depth — the loop,
 the evals, and the configuration reference.
 
+## Why
+
+There is a lot of room between one-shotting a prompt and turning an agent loose
+for six hours. Worksmith lives there.
+
+I have written code and prose in a terminal for twenty years. That is where I
+think. What I want out of a model is not a contractor I hand a spec to and check
+on later — it is a peer who builds alongside me, and occasionally teaches me
+something. Something that stops and says *I am stuck*, or *I am about to change
+forty files, do you want to drive?* The cost of the alternative is not wasted
+tokens. It is opening a file six months later and not recognising your own
+codebase.
+
+So the loop is built to keep you in it:
+
+- **A check, not a claim.** A turn is not finished when the model says so. It is
+  finished when a command you named exits zero. Everything else in the harness
+  exists to serve that.
+- **It says when it is stuck.** Going in circles, out of steps, budget spent —
+  each one stops and shows you what it was actually doing, rather than ending
+  the turn quietly.
+- **You can answer with a question.** A checkpoint takes "why is it failing?"
+  as readily as "use a regex" — it answers, then asks again. Pairing is a
+  conversation or it is a form.
+- **Off is one switch.** `/pair off` and it runs unattended. The point is that
+  attended is the *default*, not that it is compulsory.
+
+None of this is only for code. The loop cares that a command exits zero, not
+what it checked — a writer using it as a rubber duck gets the same machinery,
+and `--until "vale docs/"` is as valid a check as `cargo test`.
+
+**The other half is making cheap models good enough.** A supervised 9B on your
+laptop will not match a frontier model over a long context, and for a lot of
+daily work it does not have to. Most of the gap is not intelligence, it is the
+harness giving up too early or believing the model's own account of itself.
+Concretely, worksmith:
+
+- **runs the check and feeds failures back**, worth +34 points on a 9B (52% →
+  86%) at flat cost per solved task — measured below;
+- **reads a tool call the model wrote as prose.** Small models drop out of
+  structured tool calling under load. Measured on qwen3.5-9b at default
+  reasoning: **54% of its tool calls** arrived as text and were recovered rather
+  than thrown away;
+- **watches for a model going nowhere** and sends it back with the failure
+  output instead of a nudge;
+- **gates what reaches outside the task** — pushing, publishing, killing
+  processes, reverting your working tree — so unattended work stays inside the
+  job.
+
 ## Is this for you?
 
-Probably yes if you run models locally (vLLM, llama.cpp, Ollama) or on cheap
-hosted endpoints. Or if you want work gated on a real check instead of a model's
-self-assessment, you live in a terminal, or you want to hand background work to
-several agents at once without babysitting each.
+Probably yes if you want work gated on a real check rather than a model's
+self-assessment, you run models locally (vLLM, llama.cpp, Ollama) or on cheap
+hosted endpoints, you live in a terminal, or you want to stay close enough to
+the work to know what changed.
 
-Probably not if you drive a frontier model that already checks its own work. The
-eval below found the loop is dead weight there, spending tokens for no gain. Also
-not if you want IDE integration, a GUI, or a hosted service. Worksmith is one
-Rust binary that talks to any OpenAI-compatible endpoint, and nothing else.
+Probably not if you drive a frontier model that already checks its own work —
+the eval below found the loop is dead weight there, spending tokens for no gain.
+Or if what you want is to write a prompt and come back to a finished branch:
+that is a real way to work and there are good tools for it, but the whole design
+here points the other way. Also not if you want IDE integration, a GUI, or a
+hosted service. Worksmith is one Rust binary that talks to any
+OpenAI-compatible endpoint, and nothing else.
 
 ## The bet, measured
 
