@@ -751,9 +751,22 @@ fn apply(
     match action {
         Some(Action::Nudge(directive)) => {
             g.nudges += 1;
+            // Logged here, not where it is consumed. A nudge is pushed to
+            // steering and only becomes an `Event::Nudge` when the agent drains
+            // it at the top of the next step — so one aimed at a worker inside a
+            // long tool call is never consumed, never recorded, and leaves no
+            // trace that a rule fired at all. Twice tonight a worker was
+            // escalated "after 2 nudges" with no way to see which rule produced
+            // them or when.
+            //
+            // The directive itself names the rule: idle opens "No progress
+            // for", the repeat detector "You have called", the blocked detector
+            // "You said you are blocked".
+            log_line(g, format!("↻ supervisor nudge: {}", first_line(&directive)));
             steering.push(directive);
         }
         Some(Action::Escalate(reason)) => {
+            log_line(g, format!("◼ supervisor stopped it: {reason}"));
             g.last = format!("supervisor: {reason}");
             g.escalation = Some(reason);
             cancel.cancel();
@@ -1071,5 +1084,59 @@ mod escalation_tests {
         assert_eq!(g.status, WorkerStatus::Stopped);
         assert!(g.last.contains("supervisor"), "{}", g.last);
         assert!(g.result.contains("still off track"), "{}", g.result);
+    }
+}
+
+#[cfg(test)]
+mod supervisor_visibility_tests {
+    use super::*;
+
+    /// A supervisor nudge is recorded when it is *decided*, not when it is
+    /// consumed.
+    ///
+    /// It used to be neither. A nudge goes to the steering mailbox and only
+    /// becomes an `Event::Nudge` once the agent drains it at the top of the next
+    /// step, so one aimed at a worker already inside a long tool call is never
+    /// drained and never recorded. Two separate investigations tonight ended at
+    /// "escalated after 2 nudges" with no way to tell which rule fired, and the
+    /// second guess at why was wrong.
+    #[test]
+    fn a_nudge_is_visible_even_when_it_is_never_consumed() {
+        let mut g = Runtime::default();
+        let steering = Steering::new();
+        let cancel = CancellationToken::new();
+
+        apply(
+            &mut g,
+            Some(Action::Nudge("No progress for 20s. Briefly state where you are".into())),
+            &steering,
+            &cancel,
+        );
+
+        assert_eq!(g.nudges, 1);
+        let line = g.log.last().expect("the decision is logged");
+        assert!(line.contains("supervisor nudge"), "{line}");
+        // The directive names the rule, which is the whole point of logging it.
+        assert!(line.contains("No progress for"), "{line}");
+        assert!(!cancel.is_cancelled(), "a nudge does not stop the worker");
+    }
+
+    #[test]
+    fn an_escalation_says_which_rule_stopped_the_worker() {
+        let mut g = Runtime::default();
+        let steering = Steering::new();
+        let cancel = CancellationToken::new();
+
+        apply(
+            &mut g,
+            Some(Action::Escalate("`bash` has been running for 1200s with no result".into())),
+            &steering,
+            &cancel,
+        );
+
+        assert!(cancel.is_cancelled(), "an escalation stops it");
+        let line = g.log.last().expect("the decision is logged");
+        assert!(line.contains("supervisor stopped it"), "{line}");
+        assert!(line.contains("bash"), "and which rule: {line}");
     }
 }
