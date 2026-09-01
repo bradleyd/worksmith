@@ -1814,8 +1814,7 @@ async fn handle_key(
                     req.answer(None);
                     return Ok(Flow::Continue);
                 }
-                // Empty input with no pending checkpoint: just continue.
-                return Ok(Flow::Continue);
+                // Empty input with no pending checkpoint: continue to command dispatch.
             }
 
             // Answering a checkpoint, not starting a turn. Checked before the
