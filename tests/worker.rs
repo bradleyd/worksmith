@@ -151,6 +151,34 @@ async fn worker_records_changed_files() {
 }
 
 #[tokio::test]
+async fn worker_records_absolute_changed_files_relative_to_the_project() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let args = serde_json::json!({
+        "path": out.to_string_lossy(),
+        "content": "hi",
+    })
+    .to_string();
+    let agent = Arc::new(template_agent(
+        vec![tool_call("write", &args), done("wrote the file")],
+        dir.path(),
+    ));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+
+    let id = started(&mut mgr, "make out.txt");
+    let _ = wait_terminal(&mgr, &id).await;
+
+    let summary = mgr.get(&id).unwrap();
+    assert_eq!(
+        summary.changed,
+        vec!["out.txt".to_string()],
+        "absolute tool paths inside cwd should be reported relative to the project"
+    );
+    assert!(out.exists(), "worker should have written the file");
+}
+
+#[tokio::test]
 async fn worker_respects_concurrency_cap() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
@@ -272,4 +300,3 @@ async fn a_workers_activity_can_be_followed_while_it_runs() {
 
     assert!(mgr.log_since("nope", 0).is_none(), "an unknown id is not a panic");
 }
-

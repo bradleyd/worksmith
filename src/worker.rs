@@ -5,7 +5,7 @@
 //! steering, and cancelling the worker when it escalates.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -543,6 +543,7 @@ impl WorkerManager {
             .map(|c| CommandValidator::new(c.clone(), self.cwd.clone(), self.bash_timeout));
         let mut supervisor = Supervisor::new(self.supervisor.clone());
         let steer_sup = steering.clone();
+        let cwd = self.cwd.clone();
         let handle = tokio::spawn(async move {
             let mut session = session;
             let agent = agent;
@@ -565,7 +566,7 @@ impl WorkerManager {
                             deadline = Instant::now() + idle;
                             let action = supervisor.observe(&e);
                             let mut g = rt.lock().unwrap();
-                            update_last(&mut g, e);
+                            update_last(&mut g, e, &cwd);
                             apply(&mut g, action, &steer_sup, &cancel_sup);
                         }
                     }
@@ -595,7 +596,7 @@ impl WorkerManager {
                         }
                         let mut g = rt.lock().unwrap();
                         for e in pending {
-                            update_last(&mut g, e);
+                            update_last(&mut g, e, &cwd);
                         }
                         match res {
                             Ok(r) => {
@@ -800,7 +801,7 @@ fn log_line(g: &mut Runtime, line: String) {
     g.log_total += 1;
 }
 
-fn update_last(g: &mut Runtime, e: Event) {
+fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
     // `last` is the one-line status; the log is the history behind it.
     match &e {
         // Arguments included for the same reason as in the status line above:
@@ -835,6 +836,7 @@ fn update_last(g: &mut Runtime, e: Event) {
                 && let Some(path) = serde_json::from_str::<serde_json::Value>(&arguments)
                     .ok()
                     .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                .map(|path| display_changed_path(&path, cwd))
                 && !g.changed.contains(&path)
             {
                 g.changed.push(path);
@@ -857,6 +859,11 @@ fn update_last(g: &mut Runtime, e: Event) {
         Event::Error { message } => g.last = first_line(&message),
         _ => {}
     }
+}
+
+fn display_changed_path(path: &str, cwd: &Path) -> String {
+    let path = Path::new(path);
+    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }
 
 /// Let a supervisor escalation explain the ending — unless the worker got
@@ -1002,11 +1009,15 @@ mod tail_tests {
     #[test]
     fn a_logged_tool_call_carries_its_arguments() {
         let mut g = Runtime::default();
-        update_last(&mut g, Event::ToolCall {
-            id: "c".into(),
-            name: "bash".into(),
-            arguments: r#"{"command":"cargo test --lib"}"#.into(),
-        });
+        update_last(
+            &mut g,
+            Event::ToolCall {
+                id: "c".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"cargo test --lib"}"#.into(),
+            },
+            Path::new("."),
+        );
         let line = g.log.last().unwrap();
         assert!(line.contains("bash"), "{line}");
         assert!(line.contains("cargo test --lib"), "the command is the point: {line}");
@@ -1017,12 +1028,16 @@ mod tail_tests {
     #[test]
     fn a_bash_result_skips_the_exit_code_when_it_succeeded() {
         let mut g = Runtime::default();
-        update_last(&mut g, Event::ToolResult {
-            id: "c".into(),
-            name: "bash".into(),
-            ok: true,
-            output: "exit code: 0\ntest result: ok. 190 passed\n".into(),
-        });
+        update_last(
+            &mut g,
+            Event::ToolResult {
+                id: "c".into(),
+                name: "bash".into(),
+                ok: true,
+                output: "exit code: 0\ntest result: ok. 190 passed\n".into(),
+            },
+            Path::new("."),
+        );
         let line = g.log.last().unwrap();
         assert!(line.contains("190 passed"), "the useful line is shown: {line}");
         assert!(!line.contains("exit code: 0"), "not the one that says nothing: {line}");
@@ -1032,12 +1047,16 @@ mod tail_tests {
     #[test]
     fn a_failing_exit_code_is_kept() {
         let mut g = Runtime::default();
-        update_last(&mut g, Event::ToolResult {
-            id: "c".into(),
-            name: "bash".into(),
-            ok: false,
-            output: "exit code: 101\nerror: could not compile\n".into(),
-        });
+        update_last(
+            &mut g,
+            Event::ToolResult {
+                id: "c".into(),
+                name: "bash".into(),
+                ok: false,
+                output: "exit code: 101\nerror: could not compile\n".into(),
+            },
+            Path::new("."),
+        );
         let line = g.log.last().unwrap();
         assert!(line.contains("101"), "{line}");
     }
