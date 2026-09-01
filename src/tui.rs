@@ -1814,7 +1814,11 @@ async fn handle_key(
                     req.answer(None);
                     return Ok(Flow::Continue);
                 }
-                // Empty input with no pending checkpoint: continue to command dispatch.
+                // Empty input with nothing pending: Enter does nothing. Without
+                // this return it falls through to `start_turn` and spends a
+                // model call on an empty prompt, which is what every stray
+                // Enter in a terminal would then cost.
+                return Ok(Flow::Continue);
             }
 
             // Answering a checkpoint, not starting a turn. Checked before the
@@ -5061,6 +5065,58 @@ mod tests {
         let f = footer_string(&a);
         let agents = f.find("2 running").expect("shown at all");
         assert!(agents < 60, "near the front, not off the edge: {agents} in {f:?}");
+    }
+
+    #[test]
+    fn empty_enter_with_nothing_pending_must_not_start_a_turn() {
+        // Two halves, and only the first was ever specified. A worker asked to
+        // make bare Enter skip a pending checkpoint delivered that correctly and
+        // removed the guard behind it, so an empty composer with nothing pending
+        // began falling through to `start_turn` — a model call on an empty
+        // prompt for every stray Enter. `cargo test` passed, because nothing
+        // covered the half nobody asked about.
+        //
+        // The first version of *this* test was no better: it looked for a
+        // `return` anywhere in the block and found the one inside the skip
+        // branch, so it passed with the guard deleted. It is checked against
+        // that now — the empty-input block needs **two** returns, the skip and
+        // the fallback.
+        //
+        // It reads the source because driving the key handler needs a live
+        // agent, session and worker manager. Crude, and it fails when the guard
+        // goes, which is the requirement.
+        let src = include_str!("tui.rs");
+        let block_start = src
+            .find("            if input.is_empty() {")
+            .expect("the composer's empty-input guard");
+        let rest = &src[block_start..];
+
+        // Walk to the matching close brace so the count cannot wander into the
+        // command dispatch below.
+        let open = rest.find('{').unwrap();
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let block = &rest[open..=end];
+        let returns = block.matches("return Ok(Flow::Continue);").count();
+        assert_eq!(
+            returns, 2,
+            "the empty-input block needs both returns — one to answer a pending \
+             checkpoint with None, one so an empty composer with nothing pending \
+             does not start a turn:\n{block}"
+        );
     }
 
     #[test]
