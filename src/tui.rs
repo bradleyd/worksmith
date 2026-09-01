@@ -262,13 +262,12 @@ struct App {
     /// Prices for the session's model, when the config gives them. A local
     /// model has none, and showing $0.00 would be a claim rather than a fact.
     prices: crate::config::ModelSettings,
-    /// The whole `[models]` table, so a worker running on a different model is
-    /// costed at *its* price. `--worker-model` and `[agents] model` exist so a
-    /// cheap fan-out can run under an expensive judge, and billing a 9B
-    /// fan-out at 27B rates would replace a missing number with a wrong one.
-    model_prices: std::collections::HashMap<String, crate::config::ModelSettings>,
-    /// Worker spend, per model, refreshed from the manager each frame.
-    agent_tokens: std::collections::HashMap<Option<String>, (u64, u64)>,
+    /// Worker spend, already priced by each worker's own model, refreshed from
+    /// the manager each frame. Costed there rather than here because that is
+    /// where the resolved `ModelSettings` lives — matching model names across
+    /// this boundary silently reported nothing, since the name is stored
+    /// without its provider prefix.
+    agent_spend: crate::worker::WorkerSpend,
     /// Reasoning streamed so far in the current step, so the count climbs live
     /// instead of only appearing once the step is over.
     step_reasoning_chars: usize,
@@ -373,8 +372,7 @@ impl App {
             last_reasoning_tokens: 0,
             total_in_tokens: 0,
             prices: crate::config::ModelSettings::default(),
-            model_prices: std::collections::HashMap::new(),
-            agent_tokens: std::collections::HashMap::new(),
+            agent_spend: crate::worker::WorkerSpend::default(),
             step_reasoning_chars: 0,
             last_finish_reason: None,
             total_out_tokens: 0,
@@ -1036,7 +1034,6 @@ async fn run_loop(
     app.session_path = session.lock().await.path().to_path_buf();
     app.insert_escape = config.insert_escape();
     app.prices = model_settings.clone();
-    app.model_prices = config.models.clone();
     app.fanout_auto = fanout_auto;
     app.think_label = agent.thinking_mode().label();
     app.synthesize = synthesize;
@@ -1159,7 +1156,7 @@ async fn run_loop(
         // between this session's window and whichever worker reported last —
         // a number that is actively wrong rather than merely absent. Context
         // belongs to one conversation; spend belongs to the run.
-        app.agent_tokens = workers.token_totals();
+        app.agent_spend = workers.token_totals(&app.prices);
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
         app.ensure_rows(width);
         terminal.draw(|f| ui(f, &app))?;
@@ -1810,6 +1807,8 @@ async fn handle_key(
             if input.is_empty() {
                 // Empty input with a pending checkpoint: answer with None (skip).
                 if let Some(req) = app.pending_ask.take() {
+                    app.push(Kind::Pair, "skipped".to_string());
+                    app.status = "/help for keys and commands".into();
                     req.answer(None);
                     return Ok(Flow::Continue);
                 }
@@ -3890,15 +3889,8 @@ fn footer_string(app: &App) -> String {
     // Output tokens are what the footer shows; input is folded into the cost
     // below, where it belongs — on a billed API it is normally the larger half,
     // but as a bare number it says less than the money does.
-    let agent_out: u64 = app.agent_tokens.values().map(|(_, o)| o).sum();
-    let agent_cost: f64 = app
-        .agent_tokens
-        .iter()
-        .filter_map(|(model, (i, o))| match model {
-            Some(m) => app.model_prices.get(m).and_then(|p| p.cost(*i, *o)),
-            None => app.prices.cost(*i, *o),
-        })
-        .sum();
+    let agent_out = app.agent_spend.completion;
+    let agent_cost = app.agent_spend.cost;
     // Three tiers, mirroring the session's own cost above. Two tiers dropped
     // anything under a cent entirely — which is most of a short worker run, and
     // reproduced the exact complaint this field was added to answer: prices
@@ -5010,40 +5002,30 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_costs_a_worker_at_its_own_model_price() {
+    fn the_footer_shows_what_the_workers_spent() {
         // Reported with prices set and workers running: the cost never moved.
         // Worker events go to the worker's own bus and never reach the
         // parent's, so the footer — fed entirely from the parent — described a
         // session doing nothing next to a counter saying an agent was busy.
         //
-        // Per model, because `--worker-model` exists so a cheap fan-out can run
-        // under an expensive judge. Blending would swap a missing number for a
-        // wrong one.
+        // Then, once it was counted, it still showed nothing: the cost was
+        // looked up by model *name*, and the name is stored without its
+        // provider prefix, so `qwen/qwen3.5-9b` never matched the config's
+        // `openrouter/qwen/qwen3.5-9b`. It is now priced by the manager, using
+        // each worker's own resolved settings — which is what ModelOverride
+        // carries them for.
         let mut a = app();
-        a.prices = crate::config::ModelSettings {
-            input: Some(1.0),
-            output: Some(2.0),
-            ..Default::default()
+        a.agent_spend = crate::worker::WorkerSpend {
+            prompt: 1_000_000,
+            completion: 1_000_000,
+            cost: 0.30,
         };
-        a.model_prices.insert(
-            "cheap/9b".to_string(),
-            crate::config::ModelSettings {
-                input: Some(0.10),
-                output: Some(0.20),
-                ..Default::default()
-            },
-        );
-        // One million in, one million out, on the cheap worker model.
-        a.agent_tokens.insert(Some("cheap/9b".to_string()), (1_000_000, 1_000_000));
         a.agents_running = 1;
 
         let f = footer_string(&a);
         assert!(f.contains("🤖 1 running"), "worker state is shown: {f}");
         assert!(f.contains("🪙 1000000"), "worker output is shown: {f}");
-        // 1.0M * 0.10 + 1.0M * 0.20 = $0.30 at the worker's price, not $3.00 at
-        // the session's.
-        assert!(f.contains("$0.30"), "priced at the worker's model, not the session's: {f}");
-        assert!(!f.contains("$3.00"), "must not bill a 9B at the judge's rate: {f}");
+        assert!(f.contains("$0.30"), "and what it cost: {f}");
     }
 
     #[test]

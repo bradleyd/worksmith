@@ -133,6 +133,9 @@ struct Worker {
     steering: Steering,
     /// Whether this worker's terminal status has been surfaced to the user.
     reported: bool,
+    /// Prices for the model this worker runs on, resolved at spawn. `None`
+    /// means it inherited the session's model and the session's prices apply.
+    model_prices: Option<crate::config::ModelSettings>,
     /// When this worker was spawned. A finished worker's line looks identical
     /// whether it landed a second ago or half an hour ago, which is the
     /// difference between "act on this" and "this is history".
@@ -190,6 +193,19 @@ impl Worker {
             finished: r.finished,
         }
     }
+}
+
+/// What the workers have spent, already priced.
+///
+/// Costed here rather than in the UI because this is where each worker's
+/// resolved `ModelSettings` lives; the alternative was matching model names
+/// across a boundary that strips the provider prefix, which silently reported
+/// nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkerSpend {
+    pub prompt: u64,
+    pub completion: u64,
+    pub cost: f64,
 }
 
 /// A task waiting for a free worker slot.
@@ -478,6 +494,13 @@ impl WorkerManager {
         let bus = EventBus::new();
         let steering = Steering::new();
         let model_label = model.as_ref().map(|m| m.model.clone());
+        // The override already carries prices resolved against the config —
+        // that is what ModelOverride is for. Keying a later lookup on the model
+        // *name* was fragile and wrong: the name is stored without its provider
+        // prefix, so `qwen/qwen3.5-9b` never matched the config's
+        // `openrouter/qwen/qwen3.5-9b` and a fan-out's cost silently stayed
+        // blank with prices correctly configured.
+        let model_prices = model.as_ref().map(|m| m.settings.clone());
         // Created before the fork so the worker's tools can be pointed at it.
         // A fork otherwise inherits the *parent's* token, and the worker's own
         // kill switch reaches nothing that is actually running.
@@ -614,6 +637,7 @@ impl WorkerManager {
             reported: false,
             _handle: handle,
             started: SystemTime::now(),
+            model_prices,
         });
         Ok(id)
     }
@@ -656,13 +680,25 @@ impl WorkerManager {
     ///
     /// Includes retired workers, so the figure does not fall when `/new` drops
     /// them: spend already happened and a total that goes down is a lie.
-    pub fn token_totals(&self) -> HashMap<Option<String>, (u64, u64)> {
-        let mut out = self.retired_tokens.clone();
+    pub fn token_totals(&self, session: &crate::config::ModelSettings) -> WorkerSpend {
+        let mut out = WorkerSpend::default();
+        for (prompt, completion) in self.retired_tokens.values() {
+            out.prompt += prompt;
+            out.completion += completion;
+        }
         for w in &self.workers {
             let r = w.runtime.lock().unwrap();
-            let e = out.entry(w.model.clone()).or_insert((0, 0));
-            e.0 += r.prompt_tokens;
-            e.1 += r.tokens as u64;
+            let (p, c) = (r.prompt_tokens, r.tokens as u64);
+            out.prompt += p;
+            out.completion += c;
+            // Each worker priced by its own model. `--worker-model` exists so a
+            // cheap fan-out can run under an expensive judge, and billing a 9B
+            // at the judge's rate would be a new wrong number for an old
+            // missing one.
+            let prices = w.model_prices.as_ref().unwrap_or(session);
+            if let Some(cost) = prices.cost(p, c) {
+                out.cost += cost;
+            }
         }
         out
     }
