@@ -1321,6 +1321,7 @@ async fn run_loop(
                     format!("⚠ approve? {}\n  {}", req.reason, req.command),
                 );
                 app.status = "y = once · a = always this session · n = no".into();
+                alert("approval needed");
                 app.pending_approval = Some(req);
                 if app.follow { app.scroll_up = 0; }
                 app.dirty = true;
@@ -1335,6 +1336,7 @@ async fn run_loop(
                     format!("{}\n  {}", req.subject, req.question),
                 );
                 app.status = "type your answer · Enter to send · Esc to skip".into();
+                alert("waiting on you");
                 app.pending_ask = Some(req);
                 if app.follow { app.scroll_up = 0; }
                 app.dirty = true;
@@ -3932,6 +3934,27 @@ fn footer_string(app: &App) -> String {
         " {}  ctx {}% ({}/{})  ↓{}{}",
         app.model, pct, app.last_prompt_tokens, app.context_limit, app.total_out_tokens, tail
     )
+}
+
+/// Ring the terminal when the loop is blocked on the user.
+///
+/// The one event worth interrupting someone for is "I need you", and it is
+/// exactly the one they miss: an approval prompt sat unanswered in a background
+/// tab and stalled a run for half an hour, because nothing about a full-screen
+/// TUI reaches you when you are looking at a different tab.
+///
+/// Two sequences, both cheap and both ignored by terminals that do not speak
+/// them. BEL is universal and usually becomes a dock bounce or a tab badge.
+/// OSC 9 is a real desktop notification in iTerm2, WezTerm, Kitty and Ghostty.
+/// Neither moves the cursor, so neither disturbs the frame ratatui is drawing.
+///
+/// Deliberately not fired on "done": a notification you get for everything is
+/// one you stop reading, and finishing is what the transcript is for.
+fn alert(reason: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x07\x1b]9;worksmith: {reason}\x07");
+    let _ = out.flush();
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
