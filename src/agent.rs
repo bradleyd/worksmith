@@ -426,6 +426,14 @@ impl Agent {
         self.thinking.clone()
     }
 
+    /// Whether a tool is currently blocked on an approval prompt.
+    ///
+    /// The worker loop reads this so its idle clock does not run while a person
+    /// is deciding — a question waiting on a human is not a hung worker.
+    pub fn awaiting_approval(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.tool_ctx.awaiting_approval.clone()
+    }
+
     /// Point this agent's tools at a cancellation token.
     ///
     /// A fork inherits the parent's, which is wrong for a worker: it has its

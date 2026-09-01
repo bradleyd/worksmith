@@ -32,6 +32,15 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub session_id: String,
     pub bash_timeout: Duration,
+    /// Set while a tool is blocked on an approval prompt.
+    ///
+    /// A question waiting on a person is not a hung worker, and the
+    /// supervisor's idle clock must not run against them. Observed: a worker
+    /// asked to approve a `pkill`, the user took half an hour, and the
+    /// supervisor stopped it with "`bash` has been running for 1820s with no
+    /// result" — true, and the wrong conclusion. The tool layer has no event
+    /// bus, so the signal is a flag the worker loop reads.
+    pub awaiting_approval: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cancelled when the turn is abandoned — `/agents kill`, the supervisor
     /// pulling a worker, or Esc in the TUI.
     ///
@@ -76,6 +85,7 @@ impl Default for ToolContext {
             cwd: PathBuf::from("."),
             session_id: String::new(),
             bash_timeout: Duration::from_secs(120),
+            awaiting_approval: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancel: tokio_util::sync::CancellationToken::new(),
             is_worker: false,
             approver: std::sync::Arc::new(approval::AutoApprove),
@@ -278,13 +288,27 @@ fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
 /// it, and is not what "edit this file" was understood to mean.
 ///
 /// Returns the refusal text if the write must not proceed.
+/// Ask the approver, flagging the wait so the supervisor does not read a person
+/// thinking as a worker hanging.
+pub(crate) async fn ask_approval(
+    ctx: &ToolContext,
+    what: &str,
+    reason: &str,
+) -> approval::Approval {
+    use std::sync::atomic::Ordering;
+    ctx.awaiting_approval.store(true, Ordering::Relaxed);
+    let out = ctx.approver.ask(what, reason).await;
+    ctx.awaiting_approval.store(false, Ordering::Relaxed);
+    out
+}
+
 async fn approve_write_outside_cwd(ctx: &ToolContext, full: &Path) -> Option<String> {
     if !policy::path_escapes_cwd(full, &ctx.cwd) {
         return None;
     }
     let reason = "writes outside the working directory";
     let what = full.display().to_string();
-    match ctx.approver.ask(&what, reason).await {
+    match ask_approval(ctx, &what, reason).await {
         approval::Approval::Once | approval::Approval::AlwaysThisSession => None,
         approval::Approval::Deny => Some(format!(
             "the user did not approve writing outside {} (to {what}).\n\

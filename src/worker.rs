@@ -506,6 +506,7 @@ impl WorkerManager {
             check_passed: None,
         }));
 
+        let awaiting_approval = agent.awaiting_approval();
         let rt = runtime.clone();
         let cancel_task = cancel.clone();
         let cancel_sup = cancel.clone();
@@ -549,9 +550,17 @@ impl WorkerManager {
                     // is disabled and the worker is never interrupted.
                     _ = tokio::time::sleep_until(deadline.into()), if supervisor.is_on() => {
                         deadline = Instant::now() + idle;
-                        let action = supervisor.on_idle();
-                        let mut g = rt.lock().unwrap();
-                        apply(&mut g, action, &steer_sup, &cancel_sup);
+                        // A pending approval is not a hung worker. It is a
+                        // question waiting on a person, and the clock must not
+                        // run against them: one took half an hour to answer a
+                        // `pkill` prompt and the worker was stopped with
+                        // "`bash` has been running for 1820s with no result" —
+                        // true, and the wrong conclusion.
+                        if !awaiting_approval.load(std::sync::atomic::Ordering::Relaxed) {
+                            let action = supervisor.on_idle();
+                            let mut g = rt.lock().unwrap();
+                            apply(&mut g, action, &steer_sup, &cancel_sup);
+                        }
                     }
                     res = &mut turn => {
                         // The turn can finish with events still buffered on the

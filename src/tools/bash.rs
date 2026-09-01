@@ -62,7 +62,7 @@ impl Tool for BashTool {
             }
             crate::tools::policy::Decision::Ask(reason) => {
                 use crate::tools::approval::Approval;
-                match ctx.approver.ask(command, &reason).await {
+                match super::ask_approval(ctx, command, &reason).await {
                     Approval::Once | Approval::AlwaysThisSession => {}
                     // Not fatal: the model should be able to take a different
                     // route (say, leave the commit unpushed and report that)

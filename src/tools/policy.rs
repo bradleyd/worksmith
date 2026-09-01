@@ -120,6 +120,21 @@ fn ask_patterns() -> &'static [(&'static str, &'static str)] {
             r"(?:^|[;&|]\s*)(?:pkill|killall)\b",
             "kills processes by name or pattern, anywhere on the machine",
         ),
+        // `git stash` silently reverts the working tree, and a worker shares
+        // that tree with whoever spawned it. Observed: a worker ran
+        // `git stash && cargo test` to get a clean build, sweeping up a human's
+        // uncommitted edits in the same motion. It was harmless only because
+        // they happened to be committed a minute earlier — and the failure mode
+        // is invisible, since the files simply go back to how they were.
+        //
+        // `pop`/`apply` are not gated: recovering work is the safe direction.
+        // No lookahead in this regex crate, so the safe subcommands are excluded
+        // by construction rather than by negation: bare `git stash`, and the
+        // forms that push work away or throw it out.
+        (
+            r"\bgit\s+stash(?:\s+(?:push|save|clear|drop)\b|\s*(?:$|[;&|]))",
+            "reverts the working tree, including edits it did not make",
+        ),
         // `kill -9` on an explicit pid is narrower but still not undoable, and
         // a model reaching for it is usually guessing at what is wrong.
         (r"(?:^|[;&|]\s*)kill\s+-9\b", "force-kills a process"),
@@ -282,6 +297,8 @@ mod tests {
             r#"pkill -9 -f "cargo|rustc""#,
             "killall node",
             "kill -9 12345",
+            "git stash && cargo test",
+            "git stash push -m wip",
             // Still gated when it is not the first thing on the line.
             "cd /tmp && pkill -f cargo",
         ] {
@@ -297,6 +314,10 @@ mod tests {
             "grep -rn pkill src/",
             "echo 'use pkill to stop it' >> NOTES.md",
             "cargo test kill_tests",
+            // Getting work *back* is the safe direction.
+            "git stash pop",
+            "git stash apply",
+            "git stash list",
         ] {
             assert!(!asks(cmd), "should not ask: {cmd}");
         }
