@@ -497,17 +497,68 @@ impl Composer {
 /// Max visible rows for the multi-line composer before it scrolls internally.
 const MAX_INPUT_ROWS: usize = 8;
 
-struct App {
+struct Transcript {
     items: Vec<Item>,
+    /// Lines scrolled up from the bottom; 0 = following the tail.
+    scroll_up: u16,
+    follow: bool,
+    collapse_tools: bool,
+    // Cached wrapped rows so scrolling doesn't rebuild the whole transcript.
+    cached_rows: Vec<Line<'static>>,
+    cache_width: u16,
+    dirty: bool,
+    /// Index of the first item whose cached rows are stale, and where each
+    /// item's rows start in `cached_rows`. Streaming appends to the *last* item
+    /// and set `dirty` for the whole transcript, so every token re-wrapped
+    /// everything — 15ms per token at 60 turns of real tool output, in a debug
+    /// build. Now only the tail is rebuilt.
+    dirty_from: Option<usize>,
+    item_starts: Vec<usize>,
+    show_thinking: bool,
+    /// Insert (typing) or normal (reading). Normal mode exists to reclaim the
+    /// alphabet: `j`, `k`, `/`, `y` cannot coexist with a composer that eats
+    /// every character. Nothing is mode-*only* — every insert-mode key still
+    /// works — so a mode you never enter cannot trap you.
+    mode: Mode,
+    /// Row the cursor sits on in normal mode, an index into `cached_rows`.
+    cursor_row: usize,
+    /// The active `/` search: the pattern, and whether it is still being typed.
+    search: Option<Search>,
+    /// Cached row indexes matching `search`, invalidated with the row cache or
+    /// when the search pattern changes.
+    search_hit_rows: Vec<usize>,
+    search_hits_dirty: bool,
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            scroll_up: 0,
+            follow: true,
+            collapse_tools: false,
+            cached_rows: Vec::new(),
+            cache_width: 0,
+            dirty: true,
+            dirty_from: None,
+            item_starts: Vec::new(),
+            show_thinking: true,
+            mode: Mode::Insert,
+            cursor_row: 0,
+            search: None,
+            search_hit_rows: Vec::new(),
+            search_hits_dirty: false,
+        }
+    }
+}
+
+struct App {
+    transcript: Transcript,
     composer: Composer,
     /// Where the current session lives, cached so read-only commands
     /// (/history) never touch the session lock — the agent holds that lock for
     /// the whole turn, and awaiting it from the event loop froze the TUI.
     session_path: std::path::PathBuf,
-    /// Lines scrolled up from the bottom; 0 = following the tail.
-    scroll_up: u16,
-    follow: bool,
-    collapse_tools: bool,
     running: bool,
     model: String,
     context_limit: usize,
@@ -539,19 +590,7 @@ struct App {
     // index of the in-progress assistant / thinking item, for delta appends
     cur_assistant: Option<usize>,
     cur_thinking: Option<usize>,
-    // Cached wrapped rows so scrolling doesn't rebuild the whole transcript.
-    cached_rows: Vec<Line<'static>>,
-    cache_width: u16,
-    dirty: bool,
-    /// Index of the first item whose cached rows are stale, and where each
-    /// item's rows start in `cached_rows`. Streaming appends to the *last* item
-    /// and set `dirty` for the whole transcript, so every token re-wrapped
-    /// everything — 15ms per token at 60 turns of real tool output, in a debug
-    /// build. Now only the tail is rebuilt.
-    dirty_from: Option<usize>,
-    item_starts: Vec<usize>,
     // Cosmetic/among-turn state.
-    show_thinking: bool,
     spinner: usize,
     turn_start: Option<std::time::Instant>,
     agents_running: usize,
@@ -577,19 +616,6 @@ struct App {
     /// pending first key. `None` disables it.
     insert_escape: Option<(char, char, Duration)>,
     pending_escape: Option<Instant>,
-    /// Insert (typing) or normal (reading). Normal mode exists to reclaim the
-    /// alphabet: `j`, `k`, `/`, `y` cannot coexist with a composer that eats
-    /// every character. Nothing is mode-*only* — every insert-mode key still
-    /// works — so a mode you never enter cannot trap you.
-    mode: Mode,
-    /// Row the cursor sits on in normal mode, an index into `cached_rows`.
-    cursor_row: usize,
-    /// The active `/` search: the pattern, and whether it is still being typed.
-    search: Option<Search>,
-    /// Cached row indexes matching `search`, invalidated with the row cache or
-    /// when the search pattern changes.
-    search_hit_rows: Vec<usize>,
-    search_hits_dirty: bool,
     /// A floating picker, when one is open. It owns the keyboard while up.
     overlay: Option<Overlay>,
     /// Which worker we're following, and how far we've printed. A worker's
@@ -613,12 +639,9 @@ struct App {
 impl App {
     fn new(model: String, context_limit: usize, validate_cmd: Option<String>) -> Self {
         App {
-            items: Vec::new(),
+            transcript: Transcript::default(),
             composer: Composer::default(),
             session_path: std::path::PathBuf::new(),
-            scroll_up: 0,
-            follow: true,
-            collapse_tools: false,
             running: false,
             model,
             context_limit,
@@ -634,12 +657,6 @@ impl App {
             status: "/help for keys and commands".into(),
             cur_assistant: None,
             cur_thinking: None,
-            cached_rows: Vec::new(),
-            cache_width: 0,
-            dirty_from: None,
-            item_starts: Vec::new(),
-            dirty: true,
-            show_thinking: true,
             spinner: 0,
             turn_start: None,
             agents_running: 0,
@@ -652,11 +669,6 @@ impl App {
             pending_mine: None,
             insert_escape: Some(('j', 'j', Duration::from_millis(300))),
             pending_escape: None,
-            mode: Mode::Insert,
-            cursor_row: 0,
-            search: None,
-            search_hit_rows: Vec::new(),
-            search_hits_dirty: false,
             overlay: None,
             tail: None,
             pending_approval: None,
@@ -681,7 +693,7 @@ impl App {
     /// that quietly describes two sessions at once.
     fn reset_for_new_session(&mut self, path: PathBuf) {
         self.session_path = path;
-        self.items.clear();
+        self.transcript.items.clear();
         self.cur_assistant = None;
         self.cur_thinking = None;
         // Counters the footer reads. Totals are per-session: they sit next to a
@@ -694,14 +706,14 @@ impl App {
         self.total_out_tokens = 0;
         self.last_finish_reason = None;
         // A fresh transcript has nothing to be scrolled back into.
-        self.scroll_up = 0;
-        self.dirty = true;
-        self.search_hits_dirty = true;
+        self.transcript.scroll_up = 0;
+        self.transcript.dirty = true;
+        self.transcript.search_hits_dirty = true;
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
-        let at = self.items.len();
-        self.items.push(Item { kind, text: text.into() });
+        let at = self.transcript.items.len();
+        self.transcript.items.push(Item { kind, text: text.into() });
         self.touch(at);
     }
 
@@ -735,32 +747,32 @@ impl App {
 
     /// Enter reading mode, putting the cursor on the last visible row.
     fn enter_normal(&mut self) {
-        self.mode = Mode::Normal;
-        self.cursor_row = self.cached_rows.len().saturating_sub(1);
-        self.follow = false; // reading, not tailing
+        self.transcript.mode = Mode::Normal;
+        self.transcript.cursor_row = self.transcript.cached_rows.len().saturating_sub(1);
+        self.transcript.follow = false; // reading, not tailing
     }
 
     fn enter_insert(&mut self) {
-        self.mode = Mode::Insert;
+        self.transcript.mode = Mode::Insert;
         self.set_search(None);
-        self.follow = true;
+        self.transcript.follow = true;
     }
 
     /// Move the cursor by `delta` rows, clamped, keeping it on screen.
     fn cursor_by(&mut self, delta: isize) {
-        let last = self.cached_rows.len().saturating_sub(1);
-        let next = (self.cursor_row as isize + delta).clamp(0, last as isize) as usize;
-        self.cursor_row = next;
+        let last = self.transcript.cached_rows.len().saturating_sub(1);
+        let next = (self.transcript.cursor_row as isize + delta).clamp(0, last as isize) as usize;
+        self.transcript.cursor_row = next;
     }
 
     /// Which item a row belongs to. `item_starts` already records where each
     /// item begins, so this is the lookup that makes "yank what I'm looking at"
     /// mean the whole message rather than one wrapped line.
     fn item_at_row(&self, row: usize) -> Option<usize> {
-        if self.item_starts.is_empty() {
+        if self.transcript.item_starts.is_empty() {
             return None;
         }
-        Some(match self.item_starts.binary_search(&row) {
+        Some(match self.transcript.item_starts.binary_search(&row) {
             Ok(i) => i,
             Err(0) => 0,
             Err(i) => i - 1,
@@ -768,52 +780,53 @@ impl App {
     }
 
     fn set_search(&mut self, search: Option<Search>) {
-        self.search = search;
-        self.search_hits_dirty = true;
+        self.transcript.search = search;
+        self.transcript.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
 
     fn mutate_search(&mut self, f: impl FnOnce(&mut Search)) {
-        if let Some(search) = &mut self.search {
+        if let Some(search) = &mut self.transcript.search {
             f(search);
         }
-        self.search_hits_dirty = true;
+        self.transcript.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
 
     /// Rows matching the active search pattern, in order.
     fn rebuild_search_hits(&mut self) {
-        self.search_hit_rows.clear();
-        let Some(s) = &self.search else {
-            self.search_hits_dirty = false;
+        self.transcript.search_hit_rows.clear();
+        let Some(s) = &self.transcript.search else {
+            self.transcript.search_hits_dirty = false;
             return;
         };
         if s.pattern.is_empty() {
-            self.search_hits_dirty = false;
+            self.transcript.search_hits_dirty = false;
             return;
         }
         let needle = s.pattern.to_ascii_lowercase();
-        self.search_hit_rows = self
+        self.transcript.search_hit_rows = self
+            .transcript
             .cached_rows
             .iter()
             .enumerate()
             .filter(|(_, l)| row_text(l).to_ascii_lowercase().contains(&needle))
             .map(|(i, _)| i)
             .collect();
-        self.search_hits_dirty = false;
+        self.transcript.search_hits_dirty = false;
     }
 
     fn search_hits(&mut self) -> &[usize] {
-        if self.search_hits_dirty {
+        if self.transcript.search_hits_dirty {
             self.rebuild_search_hits();
         }
-        &self.search_hit_rows
+        &self.transcript.search_hit_rows
     }
 
     /// Jump to the next match after the cursor, wrapping. Returns false when
     /// nothing matches, so the caller can say so instead of moving silently.
     fn jump_match(&mut self, forward: bool) -> bool {
-        let cur = self.cursor_row;
+        let cur = self.transcript.cursor_row;
         let hits = self.search_hits();
         if hits.is_empty() {
             return false;
@@ -823,74 +836,79 @@ impl App {
         } else {
             hits.iter().rev().find(|&&r| r < cur).copied().unwrap_or(*hits.last().unwrap())
         };
-        self.cursor_row = next;
+        self.transcript.cursor_row = next;
         true
     }
 
     /// Mark item `index` (and everything after it) as needing re-wrapping.
     fn touch(&mut self, index: usize) {
-        self.dirty = true;
-        self.dirty_from = Some(self.dirty_from.map_or(index, |d| d.min(index)));
-        self.search_hits_dirty = true;
+        self.transcript.dirty = true;
+        self.transcript.dirty_from = Some(self.transcript.dirty_from.map_or(index, |d| d.min(index)));
+        self.transcript.search_hits_dirty = true;
     }
 
     /// Everything needs re-wrapping — a width change, or a toggle that changes
     /// how items render.
     fn touch_all(&mut self) {
-        self.dirty = true;
-        self.dirty_from = Some(0);
-        self.search_hits_dirty = true;
+        self.transcript.dirty = true;
+        self.transcript.dirty_from = Some(0);
+        self.transcript.search_hits_dirty = true;
     }
 
     /// Rebuild the wrapped-row cache, doing only the work that changed.
     fn ensure_rows(&mut self, width: u16) {
-        let width_changed = self.cache_width != width;
-        if !self.dirty && !width_changed {
-            if self.search_hits_dirty {
+        let width_changed = self.transcript.cache_width != width;
+        if !self.transcript.dirty && !width_changed {
+            if self.transcript.search_hits_dirty {
                 self.rebuild_search_hits();
             }
             return;
         }
-        let from = if width_changed { 0 } else { self.dirty_from.unwrap_or(0) };
+        let from = if width_changed { 0 } else { self.transcript.dirty_from.unwrap_or(0) };
         // Never start past the last item with recorded rows: `item_starts` is
         // what says where a rebuild may resume, and indexing past it would
         // truncate the cache to nothing and silently lose the transcript.
-        let from = from.min(self.item_starts.len());
+        let from = from.min(self.transcript.item_starts.len());
 
         // Drop the stale tail, keep the prefix, and re-wrap only from `from`.
         // A missing start means "nothing recorded yet for this item", i.e. keep
         // every cached row and append.
-        let keep_rows = self.item_starts.get(from).copied().unwrap_or(self.cached_rows.len());
-        self.cached_rows.truncate(keep_rows);
-        self.item_starts.truncate(from);
-        for item in &self.items[from..] {
-            self.item_starts.push(self.cached_rows.len());
+        let keep_rows = self
+            .transcript
+            .item_starts
+            .get(from)
+            .copied()
+            .unwrap_or(self.transcript.cached_rows.len());
+        self.transcript.cached_rows.truncate(keep_rows);
+        self.transcript.item_starts.truncate(from);
+        for item in &self.transcript.items[from..] {
+            self.transcript.item_starts.push(self.transcript.cached_rows.len());
             item_rows(
-                &mut self.cached_rows,
+                &mut self.transcript.cached_rows,
                 item,
-                self.collapse_tools,
-                self.show_thinking,
+                self.transcript.collapse_tools,
+                self.transcript.show_thinking,
                 width,
             );
         }
-        self.cache_width = width;
-        self.dirty = false;
-        self.dirty_from = None;
-        self.search_hits_dirty = true;
+        self.transcript.cache_width = width;
+        self.transcript.dirty = false;
+        self.transcript.dirty_from = None;
+        self.transcript.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
 
     /// Scroll toward older content.
     fn scroll_up(&mut self, n: u16) {
-        self.follow = false;
-        self.scroll_up = self.scroll_up.saturating_add(n);
+        self.transcript.follow = false;
+        self.transcript.scroll_up = self.transcript.scroll_up.saturating_add(n);
     }
 
     /// Scroll toward the newest content; re-enable follow at the bottom.
     fn scroll_down(&mut self, n: u16) {
-        self.scroll_up = self.scroll_up.saturating_sub(n);
-        if self.scroll_up == 0 {
-            self.follow = true;
+        self.transcript.scroll_up = self.transcript.scroll_up.saturating_sub(n);
+        if self.transcript.scroll_up == 0 {
+            self.transcript.follow = true;
         }
     }
 
@@ -907,13 +925,13 @@ impl App {
                 // point of tracking a start index per item.
                 let at = match self.cur_thinking {
                     Some(i) => {
-                        self.items[i].text.push_str(&text);
+                        self.transcript.items[i].text.push_str(&text);
                         i
                     }
                     None => {
-                        self.items.push(Item { kind: Kind::Thinking, text });
-                        self.cur_thinking = Some(self.items.len() - 1);
-                        self.items.len() - 1
+                        self.transcript.items.push(Item { kind: Kind::Thinking, text });
+                        self.cur_thinking = Some(self.transcript.items.len() - 1);
+                        self.transcript.items.len() - 1
                     }
                 };
                 self.touch(at);
@@ -921,13 +939,13 @@ impl App {
             Event::MessageDelta { text } => {
                 let at = match self.cur_assistant {
                     Some(i) => {
-                        self.items[i].text.push_str(&text);
+                        self.transcript.items[i].text.push_str(&text);
                         i
                     }
                     None => {
-                        self.items.push(Item { kind: Kind::Assistant, text });
-                        self.cur_assistant = Some(self.items.len() - 1);
-                        self.items.len() - 1
+                        self.transcript.items.push(Item { kind: Kind::Assistant, text });
+                        self.cur_assistant = Some(self.transcript.items.len() - 1);
+                        self.transcript.items.len() - 1
                     }
                 };
                 self.touch(at);
@@ -1192,8 +1210,8 @@ async fn run_loop(
         // Surface any workers that just finished (so you don't have to poll).
         for w in workers.take_newly_finished() {
             app.push(Kind::Notice, worker_headline(&w));
-            if app.follow {
-                app.scroll_up = 0;
+            if app.transcript.follow {
+                app.transcript.scroll_up = 0;
             }
 
             // A grouped worker waits for its siblings so the parent gets one
@@ -1380,7 +1398,7 @@ async fn run_loop(
                 match ev {
                     Ok(e) => {
                         app.apply_event(e);
-                        if app.follow { app.scroll_up = 0; }
+                        if app.transcript.follow { app.transcript.scroll_up = 0; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
@@ -1419,7 +1437,7 @@ async fn run_loop(
                     Ok(Err(e)) => app.push(Kind::Error, format!("extraction failed: {e}")),
                     Err(e) => app.push(Kind::Error, format!("extraction task failed: {e}")),
                 }
-                if app.follow { app.scroll_up = 0; }
+                if app.transcript.follow { app.transcript.scroll_up = 0; }
             }
 
             // The agent is asking whether it may do something outward-facing.
@@ -1433,8 +1451,8 @@ async fn run_loop(
                 app.status = "y = once · a = always this session · n = no".into();
                 alert("approval needed");
                 app.pending_approval = Some(req);
-                if app.follow { app.scroll_up = 0; }
-                app.dirty = true;
+                if app.transcript.follow { app.transcript.scroll_up = 0; }
+                app.transcript.dirty = true;
             }
 
             // A pairing checkpoint. The turn is blocked on it, but the user is
@@ -1448,8 +1466,8 @@ async fn run_loop(
                 app.status = "type your answer · Enter to send · Esc to skip".into();
                 alert("waiting on you");
                 app.pending_ask = Some(req);
-                if app.follow { app.scroll_up = 0; }
-                app.dirty = true;
+                if app.transcript.follow { app.transcript.scroll_up = 0; }
+                app.transcript.dirty = true;
             }
 
             // Mining finished: file the proposals from here, where the store is.
@@ -1466,7 +1484,7 @@ async fn run_loop(
                     }
                     Err(e) => app.push(Kind::Error, format!("mining task failed: {e}")),
                 }
-                if app.follow { app.scroll_up = 0; }
+                if app.transcript.follow { app.transcript.scroll_up = 0; }
             }
 
             // Fan-out planning finished.
@@ -1491,7 +1509,7 @@ async fn run_loop(
                             // part that distinguishes one task from another.
                             // Two rows' worth, so a long task still says
                             // something without the list becoming the screen.
-                            let budget = (app.cache_width.max(40) as usize)
+                            let budget = (app.transcript.cache_width.max(40) as usize)
                                 .saturating_sub(6)
                                 .saturating_mul(2);
                             match common_opening(&plan.tasks) {
@@ -1534,7 +1552,7 @@ async fn run_loop(
                     }
                     Err(e) => app.push(Kind::Error, format!("fan-out planning failed: {e}")),
                 }
-                if app.follow { app.scroll_up = 0; }
+                if app.transcript.follow { app.transcript.scroll_up = 0; }
             }
 
             // Turn finished.
@@ -1613,7 +1631,7 @@ async fn run_loop(
             *terminal = setup_terminal()?;
             events = Some(EventStream::new());
             terminal.clear().ok();
-            app.dirty = true;
+            app.transcript.dirty = true;
             if let Some(text) = edited {
                 app.composer.set_input(text);
                 app.status = "loaded from editor".into();
@@ -1676,7 +1694,7 @@ async fn handle_key(
         req.answer(answer);
         app.push(Kind::Notice, note.to_string());
         app.status = "/help for keys and commands".into();
-        app.dirty = true;
+        app.transcript.dirty = true;
         if key.code == KeyCode::Char('c') && ctrl {
             return Ok(Flow::Quit);
         }
@@ -1709,21 +1727,21 @@ async fn handle_key(
             KeyCode::Char(c) if !ctrl => ov.push_filter(c),
             _ => {}
         }
-        app.dirty = true;
+        app.transcript.dirty = true;
         return Ok(Flow::Continue);
     }
 
     // Normal mode owns the alphabet. Nothing here is reachable unless you
     // deliberately entered it, and every route out is one key.
-    if app.mode == Mode::Normal {
+    if app.transcript.mode == Mode::Normal {
         // A search being typed takes precedence: it is a prompt, not a mode.
-        if app.search.as_ref().is_some_and(|s| s.typing) {
+        if app.transcript.search.as_ref().is_some_and(|s| s.typing) {
             match key.code {
                 KeyCode::Esc => app.set_search(None),
                 KeyCode::Enter => {
                     app.mutate_search(|s| s.typing = false);
                     if !app.jump_match(true) {
-                        let p = app.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
+                        let p = app.transcript.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
                         app.status = format!("no match for `{p}`");
                         app.set_search(None);
                     }
@@ -1757,7 +1775,7 @@ async fn handle_key(
             KeyCode::Char('g') => {
                 // `gg` in vim; a single `g` here, since there is no other g-verb
                 // to disambiguate from and a hidden two-key chord is worse.
-                app.cursor_row = 0;
+                app.transcript.cursor_row = 0;
             }
             KeyCode::Char('/') => {
                 app.set_search(Some(Search { pattern: String::new(), typing: true }))
@@ -1774,9 +1792,9 @@ async fn handle_key(
             }
             // Yank the whole item under the cursor, not the wrapped row: what
             // you want is the message, the tool output, the code block.
-            KeyCode::Char('y') => match app.item_at_row(app.cursor_row) {
+            KeyCode::Char('y') => match app.item_at_row(app.transcript.cursor_row) {
                 Some(i) => {
-                    let text = app.items[i].text.clone();
+                    let text = app.transcript.items[i].text.clone();
                     match copy_to_clipboard(&text) {
                         Ok(()) => {
                             let n = text.lines().count();
@@ -1800,12 +1818,12 @@ async fn handle_key(
             // command, the list is what you are looking at.
             KeyCode::Up => {
                 app.composer.hint.as_mut().unwrap().move_by(-1);
-                app.dirty = true;
+                app.transcript.dirty = true;
                 return Ok(Flow::Continue);
             }
             KeyCode::Down => {
                 app.composer.hint.as_mut().unwrap().move_by(1);
-                app.dirty = true;
+                app.transcript.dirty = true;
                 return Ok(Flow::Continue);
             }
             // Enter takes the highlighted row too. Falling through to the
@@ -1817,7 +1835,7 @@ async fn handle_key(
                 if let Some(label) = app.composer.hint.as_ref().and_then(|h| h.chosen()) {
                     app.composer.set_input(format!("{label} "));
                     app.composer.hint = None;
-                    app.dirty = true;
+                    app.transcript.dirty = true;
                     return Ok(Flow::Continue);
                 }
             }
@@ -1827,7 +1845,7 @@ async fn handle_key(
                 if let Some(label) = app.composer.hint.as_ref().and_then(|h| h.chosen()) {
                     app.composer.set_input(format!("{label} "));
                     app.composer.hint = None;
-                    app.dirty = true;
+                    app.transcript.dirty = true;
                     return Ok(Flow::Continue);
                 }
             }
@@ -1835,7 +1853,7 @@ async fn handle_key(
             // Esc never does two things at once.
             KeyCode::Esc => {
                 app.composer.hint = None;
-                app.dirty = true;
+                app.transcript.dirty = true;
                 return Ok(Flow::Continue);
             }
             _ => {}
@@ -1851,15 +1869,21 @@ async fn handle_key(
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
         KeyCode::Tab => complete(app, cwd, mem, config),
         KeyCode::Char('o') if ctrl => {
-            app.collapse_tools = !app.collapse_tools;
+            app.transcript.collapse_tools = !app.transcript.collapse_tools;
             // Changes how *every* item renders, not just the tail.
             app.touch_all();
-            app.status = format!("tool output {}", if app.collapse_tools { "collapsed" } else { "expanded" });
+            app.status = format!(
+                "tool output {}",
+                if app.transcript.collapse_tools { "collapsed" } else { "expanded" }
+            );
         }
         KeyCode::Char('t') if ctrl => {
-            app.show_thinking = !app.show_thinking;
+            app.transcript.show_thinking = !app.transcript.show_thinking;
             app.touch_all();
-            app.status = format!("thinking {}", if app.show_thinking { "shown" } else { "hidden" });
+            app.status = format!(
+                "thinking {}",
+                if app.transcript.show_thinking { "shown" } else { "hidden" }
+            );
         }
         KeyCode::Char('p') if ctrl => {
             app.status = "model cycling: configure multiple models (coming soon)".into();
@@ -1968,8 +1992,8 @@ async fn handle_key(
                 agent.steering().push(message);
                 app.push(Kind::User, format!("↳ {input}"));
                 app.status = "sent — the model sees it at its next step".into();
-                if app.follow {
-                    app.scroll_up = 0;
+                if app.transcript.follow {
+                    app.transcript.scroll_up = 0;
                 }
                 return Ok(Flow::Continue);
             }
@@ -2851,8 +2875,8 @@ fn start_turn(
     app.running = true;
     app.turn_start = Some(std::time::Instant::now());
     app.status = "working (Esc aborts)".into();
-    app.follow = true;
-    app.scroll_up = 0;
+    app.transcript.follow = true;
+    app.transcript.scroll_up = 0;
     *turn = Some(tokio::spawn(async move {
         let validator = cmd.map(|c| CommandValidator::new(c, cwd2.clone(), bash_timeout));
         let mut sess = s.lock().await;
@@ -3632,22 +3656,22 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
 fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
     // Rows are pre-wrapped and cached (see App::ensure_rows); here we just slice
     // the tail (minus any manual scroll-up). Scrolling is therefore cheap.
-    let rows = &app.cached_rows;
+    let rows = &app.transcript.cached_rows;
     let h = area.height as usize;
     let total = rows.len();
 
     // In normal mode the window follows the cursor instead of the tail —
     // otherwise `k` would move a cursor you cannot see.
-    let end = if app.mode == Mode::Normal {
-        (app.cursor_row + 1).max(h.min(total)).min(total)
+    let end = if app.transcript.mode == Mode::Normal {
+        (app.transcript.cursor_row + 1).max(h.min(total)).min(total)
     } else {
-        let up = (app.scroll_up as usize).min(total.saturating_sub(1));
+        let up = (app.transcript.scroll_up as usize).min(total.saturating_sub(1));
         total.saturating_sub(up)
     };
     let start = end.saturating_sub(h);
 
-    let hits: HashSet<usize> = if app.mode == Mode::Normal {
-        app.search_hit_rows.iter().copied().collect()
+    let hits: HashSet<usize> = if app.transcript.mode == Mode::Normal {
+        app.transcript.search_hit_rows.iter().copied().collect()
     } else {
         HashSet::new()
     };
@@ -3656,7 +3680,7 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, line)| {
             let row = start + i;
-            if app.mode == Mode::Normal && row == app.cursor_row {
+            if app.transcript.mode == Mode::Normal && row == app.transcript.cursor_row {
                 // Reverse video: readable in any theme, unlike a colour choice.
                 let spans = line
                     .spans
@@ -3801,9 +3825,9 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         " APPROVE?  y = once · a = always this session · n = no ".to_string()
     } else if app.pending_ask.is_some() {
         " CHECKPOINT  Enter answers · Esc skips ".to_string()
-    } else if app.mode == Mode::Normal {
+    } else if app.transcript.mode == Mode::Normal {
         // The single worst modal failure is not knowing which mode you are in.
-        match &app.search {
+        match &app.transcript.search {
             Some(s) if s.typing => format!(" NORMAL · /{} ", s.pattern),
             _ => " NORMAL · j k · /search · y yank · i insert ".to_string(),
         }
@@ -4131,8 +4155,8 @@ pub fn bench_rows() {
         println!(
             "{:>4} turns ({:>5} items, {:>6} rows): {:>8.3?} per re-wrap  → {:>7.1} re-wraps/sec",
             turns,
-            app.items.len(),
-            app.cached_rows.len(),
+            app.transcript.items.len(),
+            app.transcript.cached_rows.len(),
             each,
             1.0 / each.as_secs_f64()
         );
@@ -4271,12 +4295,12 @@ mod tests {
         a.apply_event(Event::MessageDelta { text: "Hel".into() });
         a.apply_event(Event::MessageDelta { text: "lo".into() });
 
-        assert_eq!(a.items.len(), 3);
-        assert!(matches!(a.items[0].kind, Kind::User));
-        assert!(matches!(a.items[1].kind, Kind::Thinking));
-        assert_eq!(a.items[1].text, "let me think");
-        assert!(matches!(a.items[2].kind, Kind::Assistant));
-        assert_eq!(a.items[2].text, "Hello");
+        assert_eq!(a.transcript.items.len(), 3);
+        assert!(matches!(a.transcript.items[0].kind, Kind::User));
+        assert!(matches!(a.transcript.items[1].kind, Kind::Thinking));
+        assert_eq!(a.transcript.items[1].text, "let me think");
+        assert!(matches!(a.transcript.items[2].kind, Kind::Assistant));
+        assert_eq!(a.transcript.items[2].text, "Hello");
     }
 
     #[test]
@@ -4287,10 +4311,10 @@ mod tests {
         a.apply_event(Event::MessageDelta { text: "after".into() });
 
         // before-assistant, tool, after-assistant → 3 separate items.
-        assert_eq!(a.items.len(), 3);
-        assert_eq!(a.items[0].text, "before");
-        assert!(matches!(a.items[1].kind, Kind::Tool));
-        assert_eq!(a.items[2].text, "after");
+        assert_eq!(a.transcript.items.len(), 3);
+        assert_eq!(a.transcript.items[0].text, "before");
+        assert!(matches!(a.transcript.items[1].kind, Kind::Tool));
+        assert_eq!(a.transcript.items[2].text, "after");
     }
 
     #[test]
@@ -4330,7 +4354,7 @@ mod tests {
             reasoning_tokens: 52,
             finish_reason: Some("length".into()),
         });
-        a.scroll_up = 7;
+        a.transcript.scroll_up = 7;
         let before = footer_string(&a);
         assert!(before.contains("3055"), "precondition: the footer reports the old session");
 
@@ -4341,8 +4365,8 @@ mod tests {
             footer_string(&app()),
             "a new session's footer must read like a fresh one"
         );
-        assert!(a.items.is_empty(), "the transcript is empty");
-        assert_eq!(a.scroll_up, 0, "nothing to be scrolled back into");
+        assert!(a.transcript.items.is_empty(), "the transcript is empty");
+        assert_eq!(a.transcript.scroll_up, 0, "nothing to be scrolled back into");
         assert_eq!(a.session_path, PathBuf::from("/tmp/new-session.jsonl"));
     }
 
@@ -4640,8 +4664,8 @@ mod tests {
             subject: "ActiveModel::from_override".into(),
             detail: "stubbed at llm/mod.rs:440 — must reset sampling".into(),
         });
-        assert!(matches!(a.items[0].kind, Kind::Pair), "a checkpoint is not machinery chatter");
-        assert!(a.items[0].text.contains("yours — ActiveModel::from_override"));
+        assert!(matches!(a.transcript.items[0].kind, Kind::Pair), "a checkpoint is not machinery chatter");
+        assert!(a.transcript.items[0].text.contains("yours — ActiveModel::from_override"));
 
         // An `ask` renders when its answer lands, not when it is raised: the
         // question is already on screen in the composer's prompt.
@@ -4651,15 +4675,15 @@ mod tests {
             subject: "Pin the worker model".into(),
             detail: "pin or retarget?".into(),
         });
-        assert!(b.items.is_empty(), "the question is not printed twice");
+        assert!(b.transcript.items.is_empty(), "the question is not printed twice");
     }
 
     #[test]
     fn a_dropped_setting_is_shown_not_swallowed() {
         let mut a = app();
         a.apply_event(Event::Warning { message: "budget ignored".into() });
-        assert!(matches!(a.items[0].kind, Kind::Notice));
-        assert!(a.items[0].text.contains("budget ignored"));
+        assert!(matches!(a.transcript.items[0].kind, Kind::Notice));
+        assert!(a.transcript.items[0].text.contains("budget ignored"));
     }
 
     #[test]
@@ -4785,7 +4809,14 @@ mod tests {
     #[test]
     fn the_row_cache_matches_a_full_rebuild() {
         let mut a = app();
-        let full = |a: &App| build_rows(&a.items, a.collapse_tools, a.show_thinking, 60);
+        let full = |a: &App| {
+            build_rows(
+                &a.transcript.items,
+                a.transcript.collapse_tools,
+                a.transcript.show_thinking,
+                60,
+            )
+        };
         let text = |rows: &[Line]| -> Vec<String> {
             rows.iter()
                 .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
@@ -4795,36 +4826,41 @@ mod tests {
         a.push(Kind::User, "write the linter");
         a.push(Kind::ToolResult, "output ".repeat(80));
         a.ensure_rows(60);
-        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after appends");
+        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after appends");
 
         // Streaming: repeated appends to the last item, the hot path.
         for _ in 0..30 {
             a.apply_event(Event::MessageDelta { text: "token ".into() });
             a.ensure_rows(60);
         }
-        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after streaming");
+        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after streaming");
         // The prefix is the thing at risk: a truncation bug loses it silently.
         assert!(
-            text(&a.cached_rows)[0].contains("write the linter"),
+            text(&a.transcript.cached_rows)[0].contains("write the linter"),
             "the first item survived streaming: {:?}",
-            &text(&a.cached_rows)[..2]
+            &text(&a.transcript.cached_rows)[..2]
         );
 
         // An item pushed after streaming, then a toggle that changes how
         // *every* item renders, then a width change.
         a.push(Kind::Tool, "⚙ grep");
         a.ensure_rows(60);
-        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after a later push");
+        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after a later push");
 
-        a.collapse_tools = true;
+        a.transcript.collapse_tools = true;
         a.touch_all();
         a.ensure_rows(60);
-        assert_eq!(text(&a.cached_rows), text(&full(&a)), "after a render toggle");
+        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after a render toggle");
 
         a.ensure_rows(30);
         assert_eq!(
-            text(&a.cached_rows),
-            text(&build_rows(&a.items, a.collapse_tools, a.show_thinking, 30)),
+            text(&a.transcript.cached_rows),
+            text(&build_rows(
+                &a.transcript.items,
+                a.transcript.collapse_tools,
+                a.transcript.show_thinking,
+                30,
+            )),
             "after a width change"
         );
     }
@@ -4836,13 +4872,17 @@ mod tests {
         let mut a = app();
         a.push(Kind::ToolResult, "x".repeat(5_000));
         a.ensure_rows(60);
-        let prefix = a.cached_rows.len();
+        let prefix = a.transcript.cached_rows.len();
 
         a.apply_event(Event::MessageDelta { text: "hello".into() });
-        assert_eq!(a.dirty_from, Some(a.items.len() - 1), "only the last item is stale");
+        assert_eq!(
+            a.transcript.dirty_from,
+            Some(a.transcript.items.len() - 1),
+            "only the last item is stale"
+        );
         a.ensure_rows(60);
-        assert!(a.cached_rows.len() > prefix, "the prefix was kept, not rebuilt");
-        assert_eq!(a.item_starts.len(), a.items.len(), "one start per item");
+        assert!(a.transcript.cached_rows.len() > prefix, "the prefix was kept, not rebuilt");
+        assert_eq!(a.transcript.item_starts.len(), a.transcript.items.len(), "one start per item");
     }
 
     #[test]
@@ -4854,7 +4894,7 @@ mod tests {
         assert!(!a.escape_pair('j'));
         a.composer.insert_char('j');
         assert_eq!(a.composer.input, "j");
-        assert_eq!(a.mode, Mode::Insert);
+        assert_eq!(a.transcript.mode, Mode::Insert);
 
         // The second one completes the pair and takes the first `j` back with
         // it — otherwise you would land in normal mode with a stray character.
@@ -4958,7 +4998,7 @@ mod tests {
         let mut a = app();
         a.push(Kind::Assistant, "a reply");
         a.ensure_rows(78);
-        assert!(!a.cached_rows.is_empty(), "the transcript must actually render");
+        assert!(!a.transcript.cached_rows.is_empty(), "the transcript must actually render");
         assert_no_white(&a, "transcript");
 
         a.overlay = Some(Overlay::new(
@@ -4987,10 +5027,10 @@ mod tests {
         a.ensure_rows(40);
 
         assert_eq!(a.item_at_row(0), Some(0));
-        let assistant_start = a.item_starts[1];
+        let assistant_start = a.transcript.item_starts[1];
         assert_eq!(a.item_at_row(assistant_start), Some(1));
         assert_eq!(a.item_at_row(assistant_start + 1), Some(1), "a wrapped row is still item 1");
-        assert_eq!(a.item_at_row(a.item_starts[2]), Some(2));
+        assert_eq!(a.item_at_row(a.transcript.item_starts[2]), Some(2));
         assert_eq!(a.item_at_row(9_999), Some(2), "past the end clamps to the last item");
     }
 
@@ -5009,23 +5049,23 @@ mod tests {
 
         // Jumping repeatedly cycles the matches and comes back round, rather
         // than stopping at the last one.
-        a.cursor_row = 0;
+        a.transcript.cursor_row = 0;
         let mut visited = Vec::new();
         for _ in 0..3 {
             assert!(a.jump_match(true));
-            visited.push(a.cursor_row);
+            visited.push(a.transcript.cursor_row);
         }
         assert_eq!(visited, vec![hits[1], hits[0], hits[1]], "forward wraps: {visited:?}");
 
         // Backwards cycles the other way.
         assert!(a.jump_match(false));
-        assert_eq!(a.cursor_row, hits[0]);
+        assert_eq!(a.transcript.cursor_row, hits[0]);
 
         // A pattern that matches nothing must say so, not move the cursor.
         a.set_search(Some(Search { pattern: "zzz".into(), typing: false }));
-        let before = a.cursor_row;
+        let before = a.transcript.cursor_row;
         assert!(!a.jump_match(true));
-        assert_eq!(a.cursor_row, before);
+        assert_eq!(a.transcript.cursor_row, before);
     }
 
     #[test]
@@ -5038,13 +5078,13 @@ mod tests {
         assert!(a.search_hits().is_empty());
 
         a.push(Kind::Assistant, "needle arrived later");
-        assert!(a.search_hits_dirty, "new rows invalidate the cached hits");
+        assert!(a.transcript.search_hits_dirty, "new rows invalidate the cached hits");
         a.ensure_rows(80);
 
         let hits = a.search_hits().to_vec();
         assert_eq!(hits.len(), 1, "the appended row should be the only match: {hits:?}");
         assert!(
-            row_text(&a.cached_rows[hits[0]]).contains("needle arrived later"),
+            row_text(&a.transcript.cached_rows[hits[0]]).contains("needle arrived later"),
             "the cached search result must include rows appended after the search started"
         );
     }
@@ -5056,14 +5096,14 @@ mod tests {
         a.ensure_rows(80);
 
         a.enter_normal();
-        assert_eq!(a.mode, Mode::Normal);
-        assert!(!a.follow, "reading should not jump to the bottom on new output");
+        assert_eq!(a.transcript.mode, Mode::Normal);
+        assert!(!a.transcript.follow, "reading should not jump to the bottom on new output");
 
         a.set_search(Some(Search { pattern: "x".into(), typing: true }));
         a.enter_insert();
-        assert_eq!(a.mode, Mode::Insert);
-        assert!(a.follow, "typing means you want to see what arrives");
-        assert!(a.search.is_none(), "a stale search must not keep highlighting");
+        assert_eq!(a.transcript.mode, Mode::Insert);
+        assert!(a.transcript.follow, "typing means you want to see what arrives");
+        assert!(a.transcript.search.is_none(), "a stale search must not keep highlighting");
     }
 
     #[test]
@@ -5076,7 +5116,7 @@ mod tests {
         a.push(Kind::Assistant, "plain row");
         a.ensure_rows(78);
         a.enter_normal();
-        a.cursor_row = 0;
+        a.transcript.cursor_row = 0;
         a.set_search(Some(Search { pattern: "listing".into(), typing: false }));
 
         let mut term = Terminal::new(TestBackend::new(78, 10)).unwrap();
@@ -5522,7 +5562,7 @@ mod tests {
     fn build_rows_wraps_to_width_and_labels_channels() {
         let mut a = app();
         a.apply_event(Event::UserMessage { text: "hello world this is a long line".into() });
-        let rows = build_rows(&a.items, a.collapse_tools, true, 16);
+        let rows = build_rows(&a.transcript.items, a.transcript.collapse_tools, true, 16);
         // Every row must fit the width (accounting for prefix + content spans).
         for row in &rows {
             let len: usize = row.spans.iter().map(|s| s.content.chars().count()).sum();
