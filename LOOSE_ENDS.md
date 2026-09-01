@@ -679,6 +679,32 @@ workers that were merely running a slow check.
   the fastest way to teach someone to hit Esc without reading, which is how
   every approval prompt in the world stopped working.
 
+- **`/agents tail` should be a trace, not a stream — and the renderer exists.**
+  Extending the dashboard idea above: once there are per-worker metrics, the
+  tail belongs in a pane or overlay rather than interleaved into the
+  transcript, with Neovim as the influence.
+
+  **`evals/pool/trace.py` already does this**, offline and in Python, and its
+  docstring names the questions the TUI cannot answer: which tool, with what,
+  did it work — *"did the result change from the last time it ran the same
+  thing, the difference between checking your work after an edit, which is
+  correct, and thrashing, which is not"* — what the check said, and what ended
+  the turn. It marks a repeat `=` when the result is byte-identical and `~`
+  when it differs, so **a column of `=` is a loop and alternating `~` is
+  progress**.
+
+  That is the whole idea, already built and already validated by use — it was
+  written because counters cost three wrong diagnoses in one day. The live tail
+  has none of it: it prints lines as they arrive with no memory of what came
+  before, which is why tonight's readability work (arguments, real result lines,
+  nesting) makes each *line* legible and still cannot show that a worker has run
+  the same command five times to the same result.
+
+  So the port is the feature. The work is a Rust rendering of what `trace.py`
+  computes, over the worker's bounded log rather than a session file, in a pane
+  that can stay open. Same sequencing caveat as the dashboard: after
+  `TUI_REFACTOR.md` §3, not before.
+
 - **A first-edit deadline.** "At most N steps before your first write." The
   observed failure is never starting, and the validation loop — the whole
   differentiator — only helps a turn that makes an attempt. The step-limit
