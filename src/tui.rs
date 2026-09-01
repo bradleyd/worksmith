@@ -227,23 +227,178 @@ struct Completion {
     token_start: usize,
 }
 
-/// Max visible rows for the multi-line composer before it scrolls internally.
-const MAX_INPUT_ROWS: usize = 8;
-
-struct App {
-    items: Vec<Item>,
+#[derive(Default)]
+struct Composer {
     input: String,
     /// Cursor position as a char index into `input` (0..=char_count).
     cursor: usize,
-    /// Where the current session lives, cached so read-only commands
-    /// (/history) never touch the session lock — the agent holds that lock for
-    /// the whole turn, and awaiting it from the event loop froze the TUI.
-    session_path: std::path::PathBuf,
     /// Submitted-prompt history and the current navigation position.
     history: Vec<String>,
     history_idx: Option<usize>,
     /// The in-progress line stashed while browsing history.
     draft: String,
+    /// Tab-completion state for the composer.
+    completion: Option<Completion>,
+}
+
+impl Composer {
+    fn byte_at(&self, char_idx: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(self.input.len())
+    }
+
+    fn char_len(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    fn insert_str(&mut self, s: &str) {
+        let at = self.byte_at(self.cursor);
+        self.input.insert_str(at, s);
+        self.cursor += s.chars().count();
+        self.completion = None;
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let at = self.byte_at(self.cursor);
+        self.input.insert(at, c);
+        self.cursor += 1;
+        self.completion = None;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = self.byte_at(self.cursor - 1);
+        let end = self.byte_at(self.cursor);
+        self.input.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    /// Delete the word (and preceding whitespace) before the cursor.
+    fn delete_word(&mut self) {
+        let mut i = self.cursor;
+        let chars: Vec<char> = self.input.chars().collect();
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        let start = self.byte_at(i);
+        let end = self.byte_at(self.cursor);
+        self.input.replace_range(start..end, "");
+        self.cursor = i;
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor < self.char_len() {
+            self.cursor += 1;
+        }
+    }
+
+    /// Move to the start / end of the current logical line.
+    fn move_home(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i > 0 && chars[i - 1] != '\n' {
+            i -= 1;
+        }
+        self.cursor = i;
+    }
+
+    fn move_end(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i < chars.len() && chars[i] != '\n' {
+            i += 1;
+        }
+        self.cursor = i;
+    }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+        self.history_idx = None;
+        self.completion = None;
+    }
+
+    fn set_input(&mut self, text: String) {
+        self.cursor = text.chars().count();
+        self.input = text;
+        self.history_idx = None;
+        self.completion = None;
+    }
+
+    /// Take the composed input for submission, resetting the composer and
+    /// recording history.
+    fn take_input(&mut self) -> String {
+        let text = std::mem::take(&mut self.input);
+        self.cursor = 0;
+        self.history_idx = None;
+        self.completion = None;
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && self.history.last().map(String::as_str) != Some(trimmed) {
+            self.history.push(trimmed.to_string());
+        }
+        text
+    }
+
+    /// Recall the previous / next history entry into the composer.
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_idx {
+            None => {
+                self.draft = self.input.clone();
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.history_idx = Some(next);
+        self.input = self.history[next].clone();
+        self.cursor = self.char_len();
+        self.completion = None;
+    }
+
+    fn history_next(&mut self) {
+        match self.history_idx {
+            None => {}
+            Some(i) if i + 1 < self.history.len() => {
+                self.history_idx = Some(i + 1);
+                self.input = self.history[i + 1].clone();
+                self.cursor = self.char_len();
+            }
+            Some(_) => {
+                // Past the newest entry → restore the stashed draft.
+                self.history_idx = None;
+                self.input = std::mem::take(&mut self.draft);
+                self.cursor = self.char_len();
+            }
+        }
+        self.completion = None;
+    }
+}
+
+/// Max visible rows for the multi-line composer before it scrolls internally.
+const MAX_INPUT_ROWS: usize = 8;
+
+struct App {
+    items: Vec<Item>,
+    composer: Composer,
+    /// Where the current session lives, cached so read-only commands
+    /// (/history) never touch the session lock — the agent holds that lock for
+    /// the whole turn, and awaiting it from the event loop froze the TUI.
+    session_path: std::path::PathBuf,
     /// Lines scrolled up from the bottom; 0 = following the tail.
     scroll_up: u16,
     follow: bool,
@@ -290,8 +445,6 @@ struct App {
     /// build. Now only the tail is rebuilt.
     dirty_from: Option<usize>,
     item_starts: Vec<usize>,
-    // Tab-completion state for the composer.
-    completion: Option<Completion>,
     // Cosmetic/among-turn state.
     show_thinking: bool,
     spinner: usize,
@@ -356,12 +509,8 @@ impl App {
     fn new(model: String, context_limit: usize, validate_cmd: Option<String>) -> Self {
         App {
             items: Vec::new(),
-            input: String::new(),
-            cursor: 0,
+            composer: Composer::default(),
             session_path: std::path::PathBuf::new(),
-            history: Vec::new(),
-            history_idx: None,
-            draft: String::new(),
             scroll_up: 0,
             follow: true,
             collapse_tools: false,
@@ -385,7 +534,6 @@ impl App {
             dirty_from: None,
             item_starts: Vec::new(),
             dirty: true,
-            completion: None,
             show_thinking: true,
             spinner: 0,
             turn_start: None,
@@ -467,10 +615,10 @@ impl App {
         if c == second
             && let Some(at) = self.pending_escape
             && now.duration_since(at) <= window
-            && self.input.ends_with(first)
-            && self.cursor == self.char_len()
+            && self.composer.input.ends_with(first)
+            && self.composer.cursor == self.composer.char_len()
         {
-            self.backspace(); // remove the first key, which was already inserted
+            self.composer.backspace(); // remove the first key, which was already inserted
             self.pending_escape = None;
             return true;
         }
@@ -590,104 +738,14 @@ impl App {
         self.dirty_from = None;
     }
 
-    // ---- composer (input editing) ----
-
-    fn byte_at(&self, char_idx: usize) -> usize {
-        self.input
-            .char_indices()
-            .nth(char_idx)
-            .map(|(b, _)| b)
-            .unwrap_or(self.input.len())
-    }
-
-    fn char_len(&self) -> usize {
-        self.input.chars().count()
-    }
-
-    fn insert_str(&mut self, s: &str) {
-        let at = self.byte_at(self.cursor);
-        self.input.insert_str(at, s);
-        self.cursor += s.chars().count();
-        self.completion = None;
-    }
-
-    fn insert_char(&mut self, c: char) {
-        let at = self.byte_at(self.cursor);
-        self.input.insert(at, c);
-        self.cursor += 1;
-        self.completion = None;
-    }
-
-    fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = self.byte_at(self.cursor - 1);
-        let end = self.byte_at(self.cursor);
-        self.input.replace_range(start..end, "");
-        self.cursor -= 1;
-    }
-
-    /// Delete the word (and preceding whitespace) before the cursor.
-    fn delete_word(&mut self) {
-        let mut i = self.cursor;
-        let chars: Vec<char> = self.input.chars().collect();
-        while i > 0 && chars[i - 1].is_whitespace() {
-            i -= 1;
-        }
-        while i > 0 && !chars[i - 1].is_whitespace() {
-            i -= 1;
-        }
-        let start = self.byte_at(i);
-        let end = self.byte_at(self.cursor);
-        self.input.replace_range(start..end, "");
-        self.cursor = i;
-    }
-
-    fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    fn move_right(&mut self) {
-        if self.cursor < self.char_len() {
-            self.cursor += 1;
-        }
-    }
-
-    /// Move to the start / end of the current logical line.
-    fn move_home(&mut self) {
-        let chars: Vec<char> = self.input.chars().collect();
-        let mut i = self.cursor;
-        while i > 0 && chars[i - 1] != '\n' {
-            i -= 1;
-        }
-        self.cursor = i;
-    }
-
-    fn move_end(&mut self) {
-        let chars: Vec<char> = self.input.chars().collect();
-        let mut i = self.cursor;
-        while i < chars.len() && chars[i] != '\n' {
-            i += 1;
-        }
-        self.cursor = i;
-    }
-
-    fn clear_input(&mut self) {
-        self.input.clear();
-        self.cursor = 0;
-        self.history_idx = None;
-        self.completion = None;
-    }
-
     /// Show the command list while a `/command` is being typed, and hide it
     /// once the command is complete (a space means arguments now, and the
     /// argument completions are a different thing).
     fn refresh_hint(&mut self) {
-        let typed = self.input.trim_start();
+        let typed = self.composer.input.trim_start();
         let showing = typed.starts_with('/')
             && !typed.contains(char::is_whitespace)
-            && !self.input.contains('\n');
+            && !self.composer.input.contains('\n');
         if !showing {
             self.hint = None;
             return;
@@ -710,64 +768,6 @@ impl App {
         let mut ov = Overlay::new("commands", items);
         ov.selected = selected;
         self.hint = Some(ov);
-    }
-
-    fn set_input(&mut self, text: String) {
-        self.cursor = text.chars().count();
-        self.input = text;
-        self.history_idx = None;
-        self.completion = None;
-    }
-
-    /// Take the composed input for submission, resetting the composer and
-    /// recording history.
-    fn take_input(&mut self) -> String {
-        let text = std::mem::take(&mut self.input);
-        self.cursor = 0;
-        self.history_idx = None;
-        self.completion = None;
-        let trimmed = text.trim();
-        if !trimmed.is_empty() && self.history.last().map(String::as_str) != Some(trimmed) {
-            self.history.push(trimmed.to_string());
-        }
-        text
-    }
-
-    /// Recall the previous / next history entry into the composer.
-    fn history_prev(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let next = match self.history_idx {
-            None => {
-                self.draft = self.input.clone();
-                self.history.len() - 1
-            }
-            Some(0) => 0,
-            Some(i) => i - 1,
-        };
-        self.history_idx = Some(next);
-        self.input = self.history[next].clone();
-        self.cursor = self.char_len();
-        self.completion = None;
-    }
-
-    fn history_next(&mut self) {
-        match self.history_idx {
-            None => {}
-            Some(i) if i + 1 < self.history.len() => {
-                self.history_idx = Some(i + 1);
-                self.input = self.history[i + 1].clone();
-                self.cursor = self.char_len();
-            }
-            Some(_) => {
-                // Past the newest entry → restore the stashed draft.
-                self.history_idx = None;
-                self.input = std::mem::take(&mut self.draft);
-                self.cursor = self.char_len();
-            }
-        }
-        self.completion = None;
     }
 
     /// Scroll toward older content.
@@ -1259,7 +1259,7 @@ async fn run_loop(
                     },
                     // Bracketed paste: insert the whole payload at the cursor
                     // (multi-line and all) instead of firing Enter per line.
-                    Some(Ok(CEvent::Paste(text))) => app.insert_str(&text),
+                    Some(Ok(CEvent::Paste(text))) => app.composer.insert_str(&text),
                     Some(Ok(_)) => {} // resize etc — redraw next loop
                     Some(Err(_)) | None => break,
                 }
@@ -1499,13 +1499,13 @@ async fn run_loop(
             pending_edit = false;
             restore_terminal(terminal).ok();
             drop(events.take()); // stop the input reader so the editor owns the tty
-            let edited = external_edit(&app.input);
+            let edited = external_edit(&app.composer.input);
             *terminal = setup_terminal()?;
             events = Some(EventStream::new());
             terminal.clear().ok();
             app.dirty = true;
             if let Some(text) = edited {
-                app.set_input(text);
+                app.composer.set_input(text);
                 app.status = "loaded from editor".into();
             }
         }
@@ -1596,7 +1596,7 @@ async fn handle_key(
                     // Put it in the composer rather than running it: a picker
                     // that fires commands on Enter is a picker you cannot use
                     // to *look* at something.
-                    app.set_input(format!("{label} "));
+                    app.composer.set_input(format!("{label} "));
                 }
             }
             KeyCode::Char(c) if !ctrl => {
@@ -1707,9 +1707,9 @@ async fn handle_key(
             // command: /agen", which is the opposite of what a visible,
             // highlighted list implies pressing Enter will do. An exactly-typed
             // command still runs, so muscle memory for `/help<Enter>` survives.
-            KeyCode::Enter if hint_enter_accepts(&app.input) => {
+            KeyCode::Enter if hint_enter_accepts(&app.composer.input) => {
                 if let Some(label) = app.hint.as_ref().and_then(|h| h.chosen()) {
-                    app.set_input(format!("{label} "));
+                    app.composer.set_input(format!("{label} "));
                     app.hint = None;
                     app.dirty = true;
                     return Ok(Flow::Continue);
@@ -1719,7 +1719,7 @@ async fn handle_key(
             // blind prefix-cycling: you can see what you are accepting.
             KeyCode::Tab => {
                 if let Some(label) = app.hint.as_ref().and_then(|h| h.chosen()) {
-                    app.set_input(format!("{label} "));
+                    app.composer.set_input(format!("{label} "));
                     app.hint = None;
                     app.dirty = true;
                     return Ok(Flow::Continue);
@@ -1738,7 +1738,7 @@ async fn handle_key(
 
     // Any key other than Tab ends an in-progress completion cycle.
     if key.code != KeyCode::Tab {
-        app.completion = None;
+        app.composer.completion = None;
     }
 
     match key.code {
@@ -1770,13 +1770,13 @@ async fn handle_key(
             } else if app.running {
                 cancel.cancel();
                 app.status = "aborting…".into();
-            } else if app.input.is_empty() {
+            } else if app.composer.input.is_empty() {
                 // Nothing to clear, so Esc means "stop typing, start reading".
                 // Never steals an Esc that had a job to do.
                 app.enter_normal();
                 app.status = "normal · j k /search n N · y yank · i insert".into();
             } else {
-                app.clear_input();
+                app.composer.clear_input();
             }
         }
         // Transcript scrolling (mouse wheel also works).
@@ -1785,26 +1785,26 @@ async fn handle_key(
         KeyCode::Char('u') if ctrl => app.scroll_up(10),
         KeyCode::Char('d') if ctrl => app.scroll_down(10),
         // Composer editing.
-        KeyCode::Up => app.history_prev(),
-        KeyCode::Down => app.history_next(),
-        KeyCode::Left => app.move_left(),
-        KeyCode::Right => app.move_right(),
-        KeyCode::Home => app.move_home(),
-        KeyCode::End => app.move_end(),
+        KeyCode::Up => app.composer.history_prev(),
+        KeyCode::Down => app.composer.history_next(),
+        KeyCode::Left => app.composer.move_left(),
+        KeyCode::Right => app.composer.move_right(),
+        KeyCode::Home => app.composer.move_home(),
+        KeyCode::End => app.composer.move_end(),
         // Readline bindings, because every other text box in a terminal has
         // them and the hands go there without asking. Ctrl+U and Ctrl+D are
         // already transcript scrolling, so the kill-line pair is deliberately
         // absent rather than fighting over the keys.
-        KeyCode::Char('a') if ctrl => app.move_home(),
-        KeyCode::Char('e') if ctrl => app.move_end(),
-        KeyCode::Char('w') if ctrl => app.delete_word(),
-        KeyCode::Backspace => app.backspace(),
+        KeyCode::Char('a') if ctrl => app.composer.move_home(),
+        KeyCode::Char('e') if ctrl => app.composer.move_end(),
+        KeyCode::Char('w') if ctrl => app.composer.delete_word(),
+        KeyCode::Backspace => app.composer.backspace(),
         // Alt/Shift+Enter inserts a newline; plain Enter sends.
         KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
-            app.insert_char('\n');
+            app.composer.insert_char('\n');
         }
         KeyCode::Enter => {
-            let raw = app.take_input();
+            let raw = app.composer.take_input();
             let input = raw.trim().to_string();
             if input.is_empty() {
                 // Empty input with a pending checkpoint: answer with None (skip).
@@ -1876,7 +1876,7 @@ async fn handle_key(
                 app.refresh_hint();
                 return Ok(Flow::Continue);
             }
-            app.insert_char(c);
+            app.composer.insert_char(c);
         }
         _ => {}
     }
@@ -3120,27 +3120,27 @@ fn tool_summary(name: &str, arguments: &str) -> String {
 /// Tab-complete the current token: `/command` in command position, or `@path`
 /// file references anywhere. Repeated Tab cycles the candidates.
 fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore, config: &Config) {
-    if let Some(c) = &mut app.completion {
+    if let Some(c) = &mut app.composer.completion {
         if c.candidates.len() > 1 {
             c.idx = (c.idx + 1) % c.candidates.len();
-            app.input.truncate(c.token_start);
-            app.input.push_str(&c.candidates[c.idx]);
+            app.composer.input.truncate(c.token_start);
+            app.composer.input.push_str(&c.candidates[c.idx]);
             let status = completion_status(c);
-            app.cursor = app.char_len();
+            app.composer.cursor = app.composer.char_len();
             app.status = status;
         }
         return;
     }
 
-    let Some((start, candidates)) = compute_completions(&app.input, cwd, mem, config) else {
+    let Some((start, candidates)) = compute_completions(&app.composer.input, cwd, mem, config) else {
         return;
     };
-    app.input.truncate(start);
-    app.input.push_str(&candidates[0]);
+    app.composer.input.truncate(start);
+    app.composer.input.push_str(&candidates[0]);
     let compl = Completion { candidates, idx: 0, token_start: start };
     app.status = completion_status(&compl);
-    app.cursor = app.char_len();
-    app.completion = Some(compl);
+    app.composer.cursor = app.composer.char_len();
+    app.composer.completion = Some(compl);
 }
 
 fn completion_status(c: &Completion) -> String {
@@ -3375,7 +3375,7 @@ fn expand_file_mentions(input: &str, cwd: &Path) -> String {
 
 fn ui(f: &mut Frame, app: &App) {
     // The composer grows with its content (up to MAX_INPUT_ROWS), + borders.
-    let lines = app.input.split('\n').count().clamp(1, MAX_INPUT_ROWS);
+    let lines = app.composer.input.split('\n').count().clamp(1, MAX_INPUT_ROWS);
     let input_height = (lines + 2) as u16;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3720,7 +3720,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let inner_w = area.width.saturating_sub(2) as usize;
-    let (rows, crow, ccol) = wrap_input(&app.input, inner_w, app.cursor);
+    let (rows, crow, ccol) = wrap_input(&app.composer.input, inner_w, app.composer.cursor);
     let inner_h = area.height.saturating_sub(2) as usize;
     // Vertical scroll so the cursor's row stays visible.
     let scroll = (crow + 1).saturating_sub(inner_h.max(1)) as u16;
@@ -4074,7 +4074,7 @@ pub fn print_hint_preview(typed: &str) {
 
     let mut app = App::new("qwen/qwen3.8-27b".into(), 128_000, None);
     app.push(Kind::User, "review chapter 9".to_string());
-    app.set_input(typed.to_string());
+    app.composer.set_input(typed.to_string());
     app.refresh_hint();
     app.ensure_rows(80);
 
@@ -4376,18 +4376,18 @@ mod tests {
         let mut a = app();
         a.running = true; // the turn is blocked on the answer
         a.pending_ask = Some(req);
-        a.insert_str("Pin it.");
+        a.composer.insert_str("Pin it.");
 
         // Unlike an approval, the composer stays a composer — typing works,
         // and only Enter is routed somewhere else. This covers that routing
         // decision, not the key dispatch: the Enter handler needs the whole
         // turn's context (agent, session, workers) to call directly.
-        assert_eq!(a.input, "Pin it.");
-        let input = a.take_input().trim().to_string();
+        assert_eq!(a.composer.input, "Pin it.");
+        let input = a.composer.take_input().trim().to_string();
         a.pending_ask.take().unwrap().answer(Some(input));
 
         assert_eq!(h.await.unwrap().as_deref(), Some("Pin it."));
-        assert!(a.input.is_empty(), "the answer left the composer");
+        assert!(a.composer.input.is_empty(), "the answer left the composer");
     }
 
     #[tokio::test]
@@ -4433,7 +4433,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut a = app();
-        a.insert_str(
+        a.composer.insert_str(
             "/spawn -n 3 --until \"cd docs && zola check\" Write ONE Zola content page and \
              only that page, do not touch another worker's file. ENDMARKER",
         );
@@ -4581,27 +4581,27 @@ mod tests {
     fn composer_edits_at_cursor() {
         let mut a = app();
         for c in "helo".chars() {
-            a.insert_char(c);
+            a.composer.insert_char(c);
         }
-        assert_eq!(a.input, "helo");
-        assert_eq!(a.cursor, 4);
+        assert_eq!(a.composer.input, "helo");
+        assert_eq!(a.composer.cursor, 4);
         // Cursor before 'o'; insert the missing 'l' → "hello".
-        a.move_left();
-        a.insert_char('l');
-        assert_eq!(a.input, "hello");
-        assert_eq!(a.cursor, 4); // between the new 'l' and 'o'
-        a.move_end();
-        a.backspace();
-        assert_eq!(a.input, "hell");
+        a.composer.move_left();
+        a.composer.insert_char('l');
+        assert_eq!(a.composer.input, "hello");
+        assert_eq!(a.composer.cursor, 4); // between the new 'l' and 'o'
+        a.composer.move_end();
+        a.composer.backspace();
+        assert_eq!(a.composer.input, "hell");
     }
 
     #[test]
     fn composer_paste_is_multiline_at_cursor() {
         let mut a = app();
-        a.insert_str("line1\nline2\nline3");
-        assert_eq!(a.input.split('\n').count(), 3);
-        assert_eq!(a.cursor, a.char_len());
-        let (_, row, _col) = wrap_input(&a.input, 80, a.cursor);
+        a.composer.insert_str("line1\nline2\nline3");
+        assert_eq!(a.composer.input.split('\n').count(), 3);
+        assert_eq!(a.composer.cursor, a.composer.char_len());
+        let (_, row, _col) = wrap_input(&a.composer.input, 80, a.composer.cursor);
         assert_eq!(row, 2, "cursor should be on the last pasted line");
     }
 
@@ -4611,33 +4611,33 @@ mod tests {
         // did nothing. These are asserted on the App methods the key handler
         // calls; the handler itself needs the whole turn's context to invoke.
         let mut a = app();
-        a.insert_str("hello world");
-        assert_eq!(a.cursor, 11);
+        a.composer.insert_str("hello world");
+        assert_eq!(a.composer.cursor, 11);
 
-        a.move_home(); // Ctrl+A
-        assert_eq!(a.cursor, 0);
-        a.move_end(); // Ctrl+E
-        assert_eq!(a.cursor, 11);
+        a.composer.move_home(); // Ctrl+A
+        assert_eq!(a.composer.cursor, 0);
+        a.composer.move_end(); // Ctrl+E
+        assert_eq!(a.composer.cursor, 11);
 
         // Home/End work per logical line, so a multi-line paste stays sane.
-        a.clear_input();
-        a.insert_str("one\ntwo");
-        a.move_home();
-        assert_eq!(a.cursor, 4, "start of the line the cursor is on, not of the buffer");
-        a.move_end();
-        assert_eq!(a.cursor, 7);
+        a.composer.clear_input();
+        a.composer.insert_str("one\ntwo");
+        a.composer.move_home();
+        assert_eq!(a.composer.cursor, 4, "start of the line the cursor is on, not of the buffer");
+        a.composer.move_end();
+        assert_eq!(a.composer.cursor, 7);
     }
 
     #[test]
     fn composer_delete_word_and_home_end() {
         let mut a = app();
-        a.insert_str("foo bar baz");
-        a.delete_word();
-        assert_eq!(a.input, "foo bar ");
-        a.move_home();
-        assert_eq!(a.cursor, 0);
-        a.move_end();
-        assert_eq!(a.cursor, a.char_len());
+        a.composer.insert_str("foo bar baz");
+        a.composer.delete_word();
+        assert_eq!(a.composer.input, "foo bar ");
+        a.composer.move_home();
+        assert_eq!(a.composer.cursor, 0);
+        a.composer.move_end();
+        assert_eq!(a.composer.cursor, a.composer.char_len());
     }
 
     #[cfg(unix)]
@@ -4658,21 +4658,21 @@ mod tests {
     #[test]
     fn composer_history_recall() {
         let mut a = app();
-        a.insert_str("first");
-        let _ = a.take_input();
-        a.insert_str("second");
-        let _ = a.take_input();
-        assert_eq!(a.history.len(), 2);
+        a.composer.insert_str("first");
+        let _ = a.composer.take_input();
+        a.composer.insert_str("second");
+        let _ = a.composer.take_input();
+        assert_eq!(a.composer.history.len(), 2);
 
-        a.insert_str("draft");
-        a.history_prev();
-        assert_eq!(a.input, "second");
-        a.history_prev();
-        assert_eq!(a.input, "first");
-        a.history_next();
-        assert_eq!(a.input, "second");
-        a.history_next();
-        assert_eq!(a.input, "draft", "past newest restores the draft");
+        a.composer.insert_str("draft");
+        a.composer.history_prev();
+        assert_eq!(a.composer.input, "second");
+        a.composer.history_prev();
+        assert_eq!(a.composer.input, "first");
+        a.composer.history_next();
+        assert_eq!(a.composer.input, "second");
+        a.composer.history_next();
+        assert_eq!(a.composer.input, "draft", "past newest restores the draft");
     }
 
     /// Completion needs a store to offer memory ids; these tests are about the
@@ -4756,14 +4756,14 @@ mod tests {
 
         // A lone `j` is just a character.
         assert!(!a.escape_pair('j'));
-        a.insert_char('j');
-        assert_eq!(a.input, "j");
+        a.composer.insert_char('j');
+        assert_eq!(a.composer.input, "j");
         assert_eq!(a.mode, Mode::Insert);
 
         // The second one completes the pair and takes the first `j` back with
         // it — otherwise you would land in normal mode with a stray character.
         assert!(a.escape_pair('j'));
-        assert_eq!(a.input, "", "the pending j is removed");
+        assert_eq!(a.composer.input, "", "the pending j is removed");
     }
 
     #[test]
@@ -4771,11 +4771,11 @@ mod tests {
         let mut a = app();
         a.insert_escape = Some(('j', 'j', Duration::from_millis(1)));
         assert!(!a.escape_pair('j'));
-        a.insert_char('j');
+        a.composer.insert_char('j');
         std::thread::sleep(Duration::from_millis(5));
         assert!(!a.escape_pair('j'), "too slow to be the escape");
-        a.insert_char('j');
-        assert_eq!(a.input, "jj", "prose survives: this composer holds words");
+        a.composer.insert_char('j');
+        assert_eq!(a.composer.input, "jj", "prose survives: this composer holds words");
     }
 
     #[test]
@@ -4785,11 +4785,11 @@ mod tests {
 
         // A `j` typed mid-word, then the cursor moved: the pair must not fire
         // and quietly delete a character somewhere else.
-        a.set_input("hajj".into());
-        a.cursor = 2;
+        a.composer.set_input("hajj".into());
+        a.composer.cursor = 2;
         assert!(!a.escape_pair('j'));
         assert!(!a.escape_pair('j'));
-        assert_eq!(a.input, "hajj", "nothing was removed");
+        assert_eq!(a.composer.input, "hajj", "nothing was removed");
     }
 
     #[test]
@@ -4797,16 +4797,16 @@ mod tests {
         let mut a = app();
         a.insert_escape = None;
         assert!(!a.escape_pair('j'));
-        a.insert_char('j');
+        a.composer.insert_char('j');
         assert!(!a.escape_pair('j'), "disabled means it is only ever a letter");
 
         // Rebinding to a different pair works the same way.
         let mut b = app();
         b.insert_escape = Some(('j', 'k', Duration::from_millis(300)));
         assert!(!b.escape_pair('j'));
-        b.insert_char('j');
+        b.composer.insert_char('j');
         assert!(b.escape_pair('k'));
-        assert_eq!(b.input, "");
+        assert_eq!(b.composer.input, "");
     }
 
     #[test]
@@ -5000,11 +5000,11 @@ mod tests {
     #[test]
     fn the_hint_follows_a_command_being_typed() {
         let mut a = app();
-        a.set_input("/".into());
+        a.composer.set_input("/".into());
         a.refresh_hint();
         assert_eq!(a.hint.as_ref().unwrap().matches().len(), COMMANDS.len());
 
-        a.set_input("/me".into());
+        a.composer.set_input("/me".into());
         a.refresh_hint();
         let got: Vec<String> =
             a.hint.as_ref().unwrap().matches().iter().map(|(_, i)| i.label.clone()).collect();
@@ -5012,17 +5012,17 @@ mod tests {
 
         // Once the command is complete and arguments start, this is the wrong
         // list to be showing — argument completion is a different thing.
-        a.set_input("/memory ".into());
+        a.composer.set_input("/memory ".into());
         a.refresh_hint();
         assert!(a.hint.is_none(), "a space ends it");
 
         // Nothing matches: no popup rather than an empty box.
-        a.set_input("/zzz".into());
+        a.composer.set_input("/zzz".into());
         a.refresh_hint();
         assert!(a.hint.is_none());
 
         // Ordinary prose is not a command.
-        a.set_input("what does /memory do".into());
+        a.composer.set_input("what does /memory do".into());
         a.refresh_hint();
         assert!(a.hint.is_none());
     }
@@ -5130,12 +5130,12 @@ mod tests {
         // This pins the invariant the fix restores rather than the call site:
         // whatever the composer holds, the hint must agree with it.
         let mut a = app();
-        a.set_input("/agents".into());
+        a.composer.set_input("/agents".into());
         a.refresh_hint();
         assert!(a.hint.is_some(), "the list is up while the command is typed");
 
         // What submitting does: the composer empties.
-        a.set_input(String::new());
+        a.composer.set_input(String::new());
         a.refresh_hint();
         assert!(a.hint.is_none(), "an empty composer must not still show a command list");
     }
@@ -5143,14 +5143,14 @@ mod tests {
     #[test]
     fn typing_further_does_not_jump_the_selection() {
         let mut a = app();
-        a.set_input("/m".into());
+        a.composer.set_input("/m".into());
         a.refresh_hint();
         a.hint.as_mut().unwrap().move_by(1); // highlight /model
         assert_eq!(a.hint.as_ref().unwrap().chosen().as_deref(), Some("/model"));
 
         // One more character narrows the list; the selection must stay valid
         // rather than pointing past the end or silently resetting.
-        a.set_input("/mo".into());
+        a.composer.set_input("/mo".into());
         a.refresh_hint();
         let h = a.hint.as_ref().unwrap();
         assert!(h.chosen().is_some(), "something is always selectable");
@@ -5163,7 +5163,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut a = app();
-        a.set_input("/me".into());
+        a.composer.set_input("/me".into());
         a.refresh_hint();
         a.ensure_rows(80);
 
