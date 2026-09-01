@@ -455,3 +455,64 @@ async fn nudging_a_finished_worker_is_refused() {
     // The timing a reader needs to tell "just now" from "half an hour ago".
     assert!(w.finished.is_some(), "a terminal worker records when it ended");
 }
+
+/// A worker inside a slow *tool* call is not nudged, end to end.
+///
+/// The unit test on `Supervisor::on_idle` covers the decision. This covers the
+/// wiring, which is where the doubt actually is: whether `Event::ToolCall`
+/// reaches `observe` through the worker loop at all, and whether the guard
+/// survives the trip.
+///
+/// It exists because a live run escalated with "still off track after 2 nudges"
+/// during a 60s bash call at a 20s stuck timeout, which is exactly three ticks,
+/// and reading the code did not explain it. Guessing twice was already one time
+/// too many.
+#[tokio::test]
+async fn a_worker_inside_a_slow_tool_call_is_not_nudged() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+
+    // One bash call that outlives the whole nudge budget, then a plain answer.
+    let mut responses: VecDeque<Completion> = VecDeque::new();
+    responses.push_back(Completion {
+        tool_calls: vec![worksmith::llm::ToolCall {
+            id: "c".into(),
+            name: "bash".into(),
+            arguments: r#"{"command":"sleep 2"}"#.into(),
+        }],
+        ..Default::default()
+    });
+    responses.push_back(Completion {
+        content: Some("done".into()),
+        ..Default::default()
+    });
+
+    let client = Arc::new(MockClient {
+        responses: Mutex::new(responses),
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = Arc::new(template_agent(client, dir.path()));
+
+    // 200ms idle, 2 nudges. The 2s sleep is ten ticks, so under the old
+    // behaviour this is nudge, nudge, escalate several times over.
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
+        SupervisorConfig {
+            idle_timeout: Duration::from_millis(200),
+            max_nudges: 2,
+            request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        },
+    );
+
+    let id = started(&mut mgr, "sleep then answer");
+    let status = wait_terminal(&mgr, &id).await;
+
+    let w = mgr.get(&id).unwrap();
+    assert_eq!(
+        w.nudges, 0,
+        "a running tool must not cost a nudge; got {} and escalation {:?}",
+        w.nudges, w.escalation
+    );
+    assert!(w.escalation.is_none(), "nor an escalation: {:?}", w.escalation);
+    assert_eq!(status, WorkerStatus::Done, "and the worker finishes normally");
+}
