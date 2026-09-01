@@ -224,7 +224,11 @@ per wrap. Hoist to a `fn kind_style(kind) -> (Style, &'static str)` (or a
 Store `search_hits` on `Transcript`, invalidated when the pattern or the rows
 change. `jump_match` and `render_transcript` then read the cache.
 
-### R8. Make the `select!` poll idiom explicit (pairs with the bug list)
+### R8. ~~Make the `select!` poll idiom explicit (pairs with the bug list)~~ ✅ DONE
+
+> **Follow-up.** Guarded joins now go through `join_in_flight` or
+> `join_planned_fanout`, so the `Option::expect` invariant is named once
+> instead of repeated in the `select!` arms.
 
 A `poll_opt` helper removes four copies of the fragile
 `async { (&mut x.as_mut().unwrap()).await }` pattern.
@@ -245,7 +249,7 @@ Ordered by (impact × safety), each independently shippable and testable:
 6. **R2 / R3 / R4** — break the three big functions. Pure extraction; the
    existing tests (footer, wrap, completion, approval/checkpoint rendering)
    keep the refactor honest.
-7. **R5 / R6 / R8** — small cleanups. R5/R6 ✅ DONE.
+7. **R5 / R6 / R8** — small cleanups. ✅ DONE.
 8. **P6 / P7** — composer O(n) edits and transcript cap. Defer until a real
    long-session complaint appears.
 

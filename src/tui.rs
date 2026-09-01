@@ -76,6 +76,24 @@ struct PlannedFanOut {
     validate: Option<String>,
 }
 
+async fn join_in_flight<T>(
+    task: &mut Option<JoinHandle<T>>,
+) -> std::result::Result<T, tokio::task::JoinError> {
+    task.as_mut()
+        .expect("select branch guard ensures task is present")
+        .await
+}
+
+async fn join_planned_fanout(
+    fanout: &mut Option<PlannedFanOut>,
+) -> std::result::Result<crate::fanout::FanOutPlan, tokio::task::JoinError> {
+    let planner = &mut fanout
+        .as_mut()
+        .expect("select branch guard ensures fan-out is present")
+        .planner;
+    planner.await
+}
+
 /// Put `text` on the system clipboard using OSC 52, the terminal's own
 /// clipboard escape. No pbcopy/xclip dependency, and it works over SSH — the
 /// terminal emulator does the writing, wherever it is running.
@@ -871,7 +889,7 @@ async fn run_loop(
             }
 
             // Memory extraction finished.
-            res = async { (&mut extract.as_mut().unwrap()).await }, if extract.is_some() => {
+            res = join_in_flight(&mut extract), if extract.is_some() => {
                 extract = None;
                 app.status = "/help for keys and commands".into();
                 match res {
@@ -936,7 +954,7 @@ async fn run_loop(
             }
 
             // Mining finished: file the proposals from here, where the store is.
-            res = async { (&mut mine.as_mut().unwrap()).await }, if mine.is_some() => {
+            res = join_in_flight(&mut mine), if mine.is_some() => {
                 mine = None;
                 app.status = "/help for keys and commands".into();
                 match res {
@@ -953,7 +971,7 @@ async fn run_loop(
             }
 
             // Fan-out planning finished.
-            res = async { (&mut fanout.as_mut().unwrap().planner).await }, if fanout.is_some() => {
+            res = join_planned_fanout(&mut fanout), if fanout.is_some() => {
                 let PlannedFanOut { system, request, model, validate, .. } = fanout.take().unwrap();
                 app.status = "/help for keys and commands".into();
                 match res {
@@ -1021,7 +1039,7 @@ async fn run_loop(
             }
 
             // Turn finished.
-            res = async { turn.as_mut().unwrap().await }, if turn.is_some() => {
+            res = join_in_flight(&mut turn), if turn.is_some() => {
                 turn = None;
                 app.running = false;
                 app.turn_start = None;
