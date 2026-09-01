@@ -387,6 +387,29 @@ impl Composer {
         }
         self.completion = None;
     }
+
+    fn complete(&mut self, cwd: &Path, mem: &MemoryStore, config: &Config) -> Option<String> {
+        if let Some(c) = &mut self.completion {
+            if c.candidates.len() > 1 {
+                c.idx = (c.idx + 1) % c.candidates.len();
+                self.input.truncate(c.token_start);
+                self.input.push_str(&c.candidates[c.idx]);
+                let status = completion_status(c);
+                self.cursor = self.char_len();
+                return Some(status);
+            }
+            return None;
+        }
+
+        let (start, candidates) = compute_completions(&self.input, cwd, mem, config)?;
+        self.input.truncate(start);
+        self.input.push_str(&candidates[0]);
+        let compl = Completion { candidates, idx: 0, token_start: start };
+        let status = completion_status(&compl);
+        self.cursor = self.char_len();
+        self.completion = Some(compl);
+        Some(status)
+    }
 }
 
 /// Max visible rows for the multi-line composer before it scrolls internally.
@@ -3120,27 +3143,9 @@ fn tool_summary(name: &str, arguments: &str) -> String {
 /// Tab-complete the current token: `/command` in command position, or `@path`
 /// file references anywhere. Repeated Tab cycles the candidates.
 fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore, config: &Config) {
-    if let Some(c) = &mut app.composer.completion {
-        if c.candidates.len() > 1 {
-            c.idx = (c.idx + 1) % c.candidates.len();
-            app.composer.input.truncate(c.token_start);
-            app.composer.input.push_str(&c.candidates[c.idx]);
-            let status = completion_status(c);
-            app.composer.cursor = app.composer.char_len();
-            app.status = status;
-        }
-        return;
+    if let Some(status) = app.composer.complete(cwd, mem, config) {
+        app.status = status;
     }
-
-    let Some((start, candidates)) = compute_completions(&app.composer.input, cwd, mem, config) else {
-        return;
-    };
-    app.composer.input.truncate(start);
-    app.composer.input.push_str(&candidates[0]);
-    let compl = Completion { candidates, idx: 0, token_start: start };
-    app.status = completion_status(&compl);
-    app.composer.cursor = app.composer.char_len();
-    app.composer.completion = Some(compl);
 }
 
 fn completion_status(c: &Completion) -> String {
