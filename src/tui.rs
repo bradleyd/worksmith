@@ -156,6 +156,7 @@ struct Overlay {
     title: String,
     items: Vec<OverlayItem>,
     filter: String,
+    matched: Vec<usize>,
     selected: usize,
     /// A picker lets you select a row (Enter puts it in the composer). A
     /// reference — like the footer legend — has nothing to pick: Enter just
@@ -171,27 +172,67 @@ struct OverlayItem {
 
 impl Overlay {
     fn new(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
-        Self { title: title.into(), items, filter: String::new(), selected: 0, picking: true }
+        let matched = (0..items.len()).collect();
+        Self {
+            title: title.into(),
+            items,
+            filter: String::new(),
+            matched,
+            selected: 0,
+            picking: true,
+        }
     }
 
     /// A read-only list: rows can be scrolled and filtered, but there is
     /// nothing to select. Enter closes rather than putting a row in the
     /// composer, which would be nonsense for a legend.
     fn reference(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
-        Self { title: title.into(), items, filter: String::new(), selected: 0, picking: false }
+        let matched = (0..items.len()).collect();
+        Self {
+            title: title.into(),
+            items,
+            filter: String::new(),
+            matched,
+            selected: 0,
+            picking: false,
+        }
     }
 
     /// Items matching the filter, as `(original index, item)`.
     fn matches(&self) -> Vec<(usize, &OverlayItem)> {
-        let f = self.filter.trim().to_ascii_lowercase();
-        self.items
+        self.matched.iter().map(|&i| (i, &self.items[i])).collect()
+    }
+
+    #[cfg(test)]
+    fn set_filter(&mut self, filter: impl Into<String>) {
+        self.filter = filter.into();
+        self.rebuild_matches();
+    }
+
+    fn push_filter(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+        self.rebuild_matches();
+    }
+
+    fn pop_filter(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+        self.rebuild_matches();
+    }
+
+    fn rebuild_matches(&mut self) {
+        let filter = self.filter.trim().to_ascii_lowercase();
+        self.matched = self
+            .items
             .iter()
             .enumerate()
             .filter(|(_, i)| {
-                f.is_empty()
-                    || i.label.to_ascii_lowercase().contains(&f)
-                    || i.description.to_ascii_lowercase().contains(&f)
+                filter.is_empty()
+                    || i.label.to_ascii_lowercase().contains(&filter)
+                    || i.description.to_ascii_lowercase().contains(&filter)
             })
+            .map(|(i, _)| i)
             .collect()
     }
 
@@ -1653,10 +1694,7 @@ async fn handle_key(
             KeyCode::Char('p') if ctrl => ov.move_by(-1),
             KeyCode::Char('n') if ctrl => ov.move_by(1),
             KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
-            KeyCode::Backspace => {
-                ov.filter.pop();
-                ov.selected = 0;
-            }
+            KeyCode::Backspace => ov.pop_filter(),
             KeyCode::Enter => {
                 let (chosen, picking) = (ov.chosen(), ov.picking);
                 app.overlay = None;
@@ -1668,10 +1706,7 @@ async fn handle_key(
                     app.composer.set_input(format!("{label} "));
                 }
             }
-            KeyCode::Char(c) if !ctrl => {
-                ov.filter.push(c);
-                ov.selected = 0;
-            }
+            KeyCode::Char(c) if !ctrl => ov.push_filter(c),
             _ => {}
         }
         app.dirty = true;
@@ -5320,19 +5355,41 @@ mod tests {
         );
         assert_eq!(ov.matches().len(), 3);
 
-        ov.filter = "mo".into();
+        ov.set_filter("mo");
         let got: Vec<&str> = ov.matches().iter().map(|(_, i)| i.label.as_str()).collect();
         assert_eq!(got, vec!["/memory", "/mouse"]);
 
         // Matching the description too is the point: you look for what a thing
         // *does* when you cannot remember what it is called.
-        ov.filter = "remember".into();
+        ov.set_filter("remember");
         assert_eq!(ov.matches().len(), 1);
         assert_eq!(ov.chosen().as_deref(), Some("/memory"));
 
-        ov.filter = "zzz".into();
+        ov.set_filter("zzz");
         assert!(ov.matches().is_empty());
         assert_eq!(ov.chosen(), None, "an empty list must not yield a selection");
+    }
+
+    #[test]
+    fn overlay_filter_edits_refresh_cached_matches() {
+        let mut ov = Overlay::new(
+            "commands",
+            vec![
+                OverlayItem { label: "/memory".into(), description: "what is remembered".into() },
+                OverlayItem { label: "/mouse".into(), description: "wheel vs. selection".into() },
+                OverlayItem { label: "/quit".into(), description: "exit".into() },
+            ],
+        );
+
+        ov.push_filter('m');
+        ov.push_filter('o');
+        let got: Vec<&str> = ov.matches().iter().map(|(_, i)| i.label.as_str()).collect();
+        assert_eq!(got, vec!["/memory", "/mouse"]);
+
+        ov.pop_filter();
+        assert_eq!(ov.matches().len(), 2);
+        ov.set_filter("exit");
+        assert_eq!(ov.chosen().as_deref(), Some("/quit"));
     }
 
     #[test]
@@ -5354,7 +5411,7 @@ mod tests {
         // Filtering to fewer items than the current index must not panic or
         // point past the end.
         ov.selected = 1;
-        ov.filter = "one".into();
+        ov.set_filter("one");
         assert_eq!(ov.chosen().as_deref(), Some("/a"));
     }
 
