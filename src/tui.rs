@@ -299,6 +299,10 @@ impl Composer {
         self.input.chars().count()
     }
 
+    fn wrapped_rows(&self, width: usize) -> (Vec<String>, usize, usize) {
+        wrap_input(&self.input, width, self.cursor)
+    }
+
     fn insert_str(&mut self, s: &str) {
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, s);
@@ -3912,7 +3916,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let inner_w = area.width.saturating_sub(2) as usize;
-    let (rows, crow, ccol) = wrap_input(&app.composer.input, inner_w, app.composer.cursor);
+    let (rows, crow, ccol) = app.composer.wrapped_rows(inner_w);
     let inner_h = area.height.saturating_sub(2) as usize;
     // Vertical scroll so the cursor's row stays visible.
     let scroll = (crow + 1).saturating_sub(inner_h.max(1)) as u16;
