@@ -239,6 +239,10 @@ struct Composer {
     draft: String,
     /// Tab-completion state for the composer.
     completion: Option<Completion>,
+    /// The as-you-type command hint. Unlike `overlay` it is *not* modal: the
+    /// composer keeps the keyboard and this just follows what is typed, the way
+    /// a shell completion menu does.
+    hint: Option<Overlay>,
 }
 
 impl Composer {
@@ -259,6 +263,11 @@ impl Composer {
         self.input.insert_str(at, s);
         self.cursor += s.chars().count();
         self.completion = None;
+    }
+
+    fn paste(&mut self, text: &str) {
+        self.insert_str(text);
+        self.refresh_hint();
     }
 
     fn insert_char(&mut self, c: char) {
@@ -410,6 +419,38 @@ impl Composer {
         self.completion = Some(compl);
         Some(status)
     }
+
+    /// Show the command list while a `/command` is being typed, and hide it
+    /// once the command is complete (a space means arguments now, and the
+    /// argument completions are a different thing).
+    fn refresh_hint(&mut self) {
+        let typed = self.input.trim_start();
+        let showing = typed.starts_with('/')
+            && !typed.contains(char::is_whitespace)
+            && !self.input.contains('\n');
+        if !showing {
+            self.hint = None;
+            return;
+        }
+        let items: Vec<OverlayItem> = COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(typed))
+            .map(|(name, desc)| OverlayItem {
+                label: (*name).to_string(),
+                description: (*desc).to_string(),
+            })
+            .collect();
+        if items.is_empty() {
+            self.hint = None;
+            return;
+        }
+        // Keep the highlighted row where it was if it is still in range, so
+        // typing one more character doesn't jump the selection around.
+        let selected = self.hint.as_ref().map(|h| h.selected).unwrap_or(0).min(items.len() - 1);
+        let mut ov = Overlay::new("commands", items);
+        ov.selected = selected;
+        self.hint = Some(ov);
+    }
 }
 
 /// Max visible rows for the multi-line composer before it scrolls internally.
@@ -506,10 +547,6 @@ struct App {
     search: Option<Search>,
     /// A floating picker, when one is open. It owns the keyboard while up.
     overlay: Option<Overlay>,
-    /// The as-you-type command hint. Unlike `overlay` it is *not* modal: the
-    /// composer keeps the keyboard and this just follows what is typed, the way
-    /// a shell completion menu does.
-    hint: Option<Overlay>,
     /// Which worker we're following, and how far we've printed. A worker's
     /// events go to its own bus, so this polls its recorded log instead.
     tail: Option<(String, usize)>,
@@ -574,7 +611,6 @@ impl App {
             cursor_row: 0,
             search: None,
             overlay: None,
-            hint: None,
             tail: None,
             pending_approval: None,
             pending_ask: None,
@@ -759,38 +795,6 @@ impl App {
         self.cache_width = width;
         self.dirty = false;
         self.dirty_from = None;
-    }
-
-    /// Show the command list while a `/command` is being typed, and hide it
-    /// once the command is complete (a space means arguments now, and the
-    /// argument completions are a different thing).
-    fn refresh_hint(&mut self) {
-        let typed = self.composer.input.trim_start();
-        let showing = typed.starts_with('/')
-            && !typed.contains(char::is_whitespace)
-            && !self.composer.input.contains('\n');
-        if !showing {
-            self.hint = None;
-            return;
-        }
-        let items: Vec<OverlayItem> = COMMANDS
-            .iter()
-            .filter(|(name, _)| name.starts_with(typed))
-            .map(|(name, desc)| OverlayItem {
-                label: (*name).to_string(),
-                description: (*desc).to_string(),
-            })
-            .collect();
-        if items.is_empty() {
-            self.hint = None;
-            return;
-        }
-        // Keep the highlighted row where it was if it is still in range, so
-        // typing one more character doesn't jump the selection around.
-        let selected = self.hint.as_ref().map(|h| h.selected).unwrap_or(0).min(items.len() - 1);
-        let mut ov = Overlay::new("commands", items);
-        ov.selected = selected;
-        self.hint = Some(ov);
     }
 
     /// Scroll toward older content.
@@ -1282,7 +1286,7 @@ async fn run_loop(
                     },
                     // Bracketed paste: insert the whole payload at the cursor
                     // (multi-line and all) instead of firing Enter per line.
-                    Some(Ok(CEvent::Paste(text))) => app.composer.insert_str(&text),
+                    Some(Ok(CEvent::Paste(text))) => app.composer.paste(&text),
                     Some(Ok(_)) => {} // resize etc — redraw next loop
                     Some(Err(_)) | None => break,
                 }
@@ -1711,17 +1715,17 @@ async fn handle_key(
 
     // The as-you-type hint is not modal — it only claims the keys it needs, and
     // only while it is visible.
-    if app.hint.is_some() {
+    if app.composer.hint.is_some() {
         match key.code {
             // Up/Down browse the list rather than input history: while typing a
             // command, the list is what you are looking at.
             KeyCode::Up => {
-                app.hint.as_mut().unwrap().move_by(-1);
+                app.composer.hint.as_mut().unwrap().move_by(-1);
                 app.dirty = true;
                 return Ok(Flow::Continue);
             }
             KeyCode::Down => {
-                app.hint.as_mut().unwrap().move_by(1);
+                app.composer.hint.as_mut().unwrap().move_by(1);
                 app.dirty = true;
                 return Ok(Flow::Continue);
             }
@@ -1731,9 +1735,9 @@ async fn handle_key(
             // highlighted list implies pressing Enter will do. An exactly-typed
             // command still runs, so muscle memory for `/help<Enter>` survives.
             KeyCode::Enter if hint_enter_accepts(&app.composer.input) => {
-                if let Some(label) = app.hint.as_ref().and_then(|h| h.chosen()) {
+                if let Some(label) = app.composer.hint.as_ref().and_then(|h| h.chosen()) {
                     app.composer.set_input(format!("{label} "));
-                    app.hint = None;
+                    app.composer.hint = None;
                     app.dirty = true;
                     return Ok(Flow::Continue);
                 }
@@ -1741,9 +1745,9 @@ async fn handle_key(
             // Tab accepts the highlighted command. This is better than the old
             // blind prefix-cycling: you can see what you are accepting.
             KeyCode::Tab => {
-                if let Some(label) = app.hint.as_ref().and_then(|h| h.chosen()) {
+                if let Some(label) = app.composer.hint.as_ref().and_then(|h| h.chosen()) {
                     app.composer.set_input(format!("{label} "));
-                    app.hint = None;
+                    app.composer.hint = None;
                     app.dirty = true;
                     return Ok(Flow::Continue);
                 }
@@ -1751,7 +1755,7 @@ async fn handle_key(
             // First Esc dismisses the list; a second one clears the composer, so
             // Esc never does two things at once.
             KeyCode::Esc => {
-                app.hint = None;
+                app.composer.hint = None;
                 app.dirty = true;
                 return Ok(Flow::Continue);
             }
@@ -1822,8 +1826,10 @@ async fn handle_key(
         KeyCode::Char('e') if ctrl => app.composer.move_end(),
         KeyCode::Char('w') if ctrl => app.composer.delete_word(),
         KeyCode::Backspace => app.composer.backspace(),
-        // Alt/Shift+Enter inserts a newline; plain Enter sends.
-        KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+        // Alt/Shift+Enter inserts a newline when the terminal reports the
+        // modifier. Many macOS terminals send Option+Enter as plain Enter, so
+        // Ctrl+N is the portable fallback.
+        _ if key_inserts_newline(&key) => {
             app.composer.insert_char('\n');
         }
         KeyCode::Enter => {
@@ -1867,7 +1873,7 @@ async fn handle_key(
                 // empty, so the list of matching commands is stale, and it hung
                 // on screen until the next keystroke or an Esc. Reported as
                 // "/agents shows the list and the popup will not go away".
-                app.refresh_hint();
+                app.composer.refresh_hint();
                 return Ok(Flow::Continue);
             }
 
@@ -1896,7 +1902,7 @@ async fn handle_key(
             if app.escape_pair(c) {
                 app.enter_normal();
                 app.status = "normal · j k /search n N · y yank · i insert".into();
-                app.refresh_hint();
+                app.composer.refresh_hint();
                 return Ok(Flow::Continue);
             }
             app.composer.insert_char(c);
@@ -1904,7 +1910,7 @@ async fn handle_key(
         _ => {}
     }
     // One place, so no edit path can forget it.
-    app.refresh_hint();
+    app.composer.refresh_hint();
     Ok(Flow::Continue)
 }
 
@@ -1950,7 +1956,7 @@ async fn handle_command(
 KEYS
   Esc / jj       (empty composer) read the transcript — see NORMAL below
   Enter          send — or steer the running turn
-  Alt+Enter      newline
+  Ctrl+N         newline             Alt/Shift+Enter if your terminal reports it
   Tab            complete             Ctrl+G       edit in $EDITOR
   Esc            abort / clear        Ctrl+C       quit
   Ctrl+O         show tool output     Ctrl+T       show thinking
@@ -3397,7 +3403,7 @@ fn ui(f: &mut Frame, app: &App) {
 
     // The as-you-type hint sits directly above the composer, where you are
     // already looking, rather than in the middle of the screen.
-    if let Some(hint) = &app.hint {
+    if let Some(hint) = &app.composer.hint {
         render_hint(f, chunks[1], hint);
     }
 
@@ -3412,6 +3418,12 @@ fn ui(f: &mut Frame, app: &App) {
 /// `/help<Enter>` still works the way the fingers expect.
 fn hint_enter_accepts(input: &str) -> bool {
     !COMMANDS.iter().any(|(name, _)| *name == input.trim())
+}
+
+fn key_inserts_newline(key: &KeyEvent) -> bool {
+    (matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (matches!(key.code, KeyCode::Enter)
+            && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
 }
 
 /// Draw the command hint anchored to the bottom of `above`, growing upward.
@@ -3721,7 +3733,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         // which is what made people assume input was ignored — and it was.
         " working… · Enter steers the running turn · Esc aborts ".to_string()
     } else {
-        " message · Enter send · Alt+Enter newline ".to_string()
+        " message · Enter send · Ctrl+N newline ".to_string()
     };
 
     let inner_w = area.width.saturating_sub(2) as usize;
@@ -4080,7 +4092,7 @@ pub fn print_hint_preview(typed: &str) {
     let mut app = App::new("qwen/qwen3.8-27b".into(), 128_000, None);
     app.push(Kind::User, "review chapter 9".to_string());
     app.composer.set_input(typed.to_string());
-    app.refresh_hint();
+    app.composer.refresh_hint();
     app.ensure_rows(80);
 
     let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
@@ -5006,30 +5018,30 @@ mod tests {
     fn the_hint_follows_a_command_being_typed() {
         let mut a = app();
         a.composer.set_input("/".into());
-        a.refresh_hint();
-        assert_eq!(a.hint.as_ref().unwrap().matches().len(), COMMANDS.len());
+        a.composer.refresh_hint();
+        assert_eq!(a.composer.hint.as_ref().unwrap().matches().len(), COMMANDS.len());
 
         a.composer.set_input("/me".into());
-        a.refresh_hint();
+        a.composer.refresh_hint();
         let got: Vec<String> =
-            a.hint.as_ref().unwrap().matches().iter().map(|(_, i)| i.label.clone()).collect();
+            a.composer.hint.as_ref().unwrap().matches().iter().map(|(_, i)| i.label.clone()).collect();
         assert_eq!(got, vec!["/memory"]);
 
         // Once the command is complete and arguments start, this is the wrong
         // list to be showing — argument completion is a different thing.
         a.composer.set_input("/memory ".into());
-        a.refresh_hint();
-        assert!(a.hint.is_none(), "a space ends it");
+        a.composer.refresh_hint();
+        assert!(a.composer.hint.is_none(), "a space ends it");
 
         // Nothing matches: no popup rather than an empty box.
         a.composer.set_input("/zzz".into());
-        a.refresh_hint();
-        assert!(a.hint.is_none());
+        a.composer.refresh_hint();
+        assert!(a.composer.hint.is_none());
 
         // Ordinary prose is not a command.
         a.composer.set_input("what does /memory do".into());
-        a.refresh_hint();
-        assert!(a.hint.is_none());
+        a.composer.refresh_hint();
+        assert!(a.composer.hint.is_none());
     }
 
     #[test]
@@ -5136,28 +5148,66 @@ mod tests {
         // whatever the composer holds, the hint must agree with it.
         let mut a = app();
         a.composer.set_input("/agents".into());
-        a.refresh_hint();
-        assert!(a.hint.is_some(), "the list is up while the command is typed");
+        a.composer.refresh_hint();
+        assert!(a.composer.hint.is_some(), "the list is up while the command is typed");
 
         // What submitting does: the composer empties.
         a.composer.set_input(String::new());
-        a.refresh_hint();
-        assert!(a.hint.is_none(), "an empty composer must not still show a command list");
+        a.composer.refresh_hint();
+        assert!(a.composer.hint.is_none(), "an empty composer must not still show a command list");
+    }
+
+    #[test]
+    fn ctrl_n_is_a_portable_newline_chord() {
+        assert!(key_inserts_newline(&KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(key_inserts_newline(&KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
+        assert!(key_inserts_newline(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT
+        )));
+
+        assert!(!key_inserts_newline(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!key_inserts_newline(&KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn pasting_a_command_refreshes_a_stale_hint() {
+        // Bracketed paste bypasses `handle_key`, so it must maintain the same
+        // hint invariant itself. Otherwise a stale `/help` hint can accept on
+        // Enter and replace the pasted `/spawn ...` command.
+        let mut a = app();
+        a.composer.set_input("/h".into());
+        a.composer.refresh_hint();
+        assert_eq!(a.composer.hint.as_ref().unwrap().chosen().as_deref(), Some("/help"));
+
+        a.composer.set_input(String::new());
+        a.composer.paste("/spawn --model openrouter/qwen/qwen3.5-9b run pwd");
+
+        assert!(
+            a.composer.hint.is_none(),
+            "a pasted command with arguments must not keep an old command hint"
+        );
     }
 
     #[test]
     fn typing_further_does_not_jump_the_selection() {
         let mut a = app();
         a.composer.set_input("/m".into());
-        a.refresh_hint();
-        a.hint.as_mut().unwrap().move_by(1); // highlight /model
-        assert_eq!(a.hint.as_ref().unwrap().chosen().as_deref(), Some("/model"));
+        a.composer.refresh_hint();
+        a.composer.hint.as_mut().unwrap().move_by(1); // highlight /model
+        assert_eq!(a.composer.hint.as_ref().unwrap().chosen().as_deref(), Some("/model"));
 
         // One more character narrows the list; the selection must stay valid
         // rather than pointing past the end or silently resetting.
         a.composer.set_input("/mo".into());
-        a.refresh_hint();
-        let h = a.hint.as_ref().unwrap();
+        a.composer.refresh_hint();
+        let h = a.composer.hint.as_ref().unwrap();
         assert!(h.chosen().is_some(), "something is always selectable");
         assert!(h.matches().len() <= 2);
     }
@@ -5169,7 +5219,7 @@ mod tests {
 
         let mut a = app();
         a.composer.set_input("/me".into());
-        a.refresh_hint();
+        a.composer.refresh_hint();
         a.ensure_rows(80);
 
         let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
