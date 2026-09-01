@@ -16,13 +16,14 @@ loop, the evals, and the configuration reference are all there.
 There is a lot of room between one-shotting a prompt and turning an agent loose
 for six hours. Worksmith lives in that gap.
 
-I have written code and prose in a terminal for twenty years. That is where I
-think. What I want out of a model is not a contractor I hand a spec to and check
-on later. I want a peer who builds alongside me and occasionally teaches me
+I have written code and prose in a terminal for over twenty years.
+What I want out of a model is not a contractor I hand a spec to and check
+on later via SMS. I want a peer who builds alongside me and occasionally teaches me
 something. Something that stops and says it is stuck, or says it is about to
 change forty files and asks whether I want to drive. The cost of the alternative
 is not wasted tokens. It is opening a file six months later and not recognising
-your own codebase.
+your own codebase. I understand that "do we even need to know what the code looks like"
+is a hot debate right now.
 
 So the loop is built to keep you in it.
 
@@ -45,10 +46,10 @@ None of this is only for code. The loop cares that a command exits zero and not
 what that command looked at. A writer using it as a rubber duck gets the same
 machinery, and `--until "vale docs/"` is as good a check as `cargo test`.
 
-The other half of the bet is making cheap models good enough. A supervised 9B on
+The other half of the bet is making smaller models good enough. A supervised 9B on
 your laptop will not match a frontier model over a long context, and for a lot of
 daily work it does not have to. Most of the gap is not intelligence. It is the
-harness giving up too early, or believing the model's own account of itself.
+tooling giving up too early, or believing the model's own account of itself.
 Concretely, worksmith does four things about that.
 
 **It runs the check and feeds failures back.** That is worth 34 points on a 9B,
@@ -63,21 +64,24 @@ output instead of a vague nudge.
 
 **It gates what reaches outside the task.** Pushing, publishing, killing
 processes, and reverting your working tree all stop and ask first, so unattended
-work stays inside the job.
+work stays inside the job. Failing fast is better than maybe it will figure it out.
 
 ## Is this for you?
 
 Probably yes if you want work gated on a real check rather than a model's
 self-assessment. Or if you run models locally with vLLM, llama.cpp, or Ollama, or
-on cheap hosted endpoints. Or if you live in a terminal and want to stay close
+on inexpensive hosted endpoints. Or if you live in a terminal and want to stay close
 enough to the work to know what changed.
 
 Probably not if you drive a frontier model that already checks its own work. The
-eval below found the loop is dead weight there, spending tokens for no gain. Also
-not if what you want is to write a prompt and come back to a finished branch.
+eval below found the loop is dead weight there, spending tokens for no gain.
+However, using Qwen3.8 27B as a driver produces great results as well for those
+non-deterministic times when things go awry.
+
+Also not if what you want is to write a prompt and come back to a finished branch.
 That is a real way to work and there are good tools for it, but the whole design
 here points the other way. And not if you want IDE integration, a GUI, or a
-hosted service. Worksmith is one Rust binary that talks to any OpenAI-compatible
+hosted service. Worksmith is one Rust binary that talks to any AI compatible
 endpoint, and nothing else.
 
 ## Does it actually help?
@@ -115,14 +119,13 @@ A Qwen3.5-4B scores 56% that way, and 97% with the harness in the loop. A bare
 9B, more than twice the parameters, manages 80%.
 
 The pass rate undersells it. Counting tasks rather than attempts, the same 4B
-goes from 9 that always pass to 20, and from 6 it never passes to none. Nothing
-in the suite is beyond the harness.
+goes from 9 that always pass to 20, and from 6 it never passes to none.
 
-Claude Sonnet 5 one-shots all 22 tasks, three times out of three, for 26 cents,
-and is 22 always-pass with no coin flips against the 4B's 20 and 2. Per task
-that is three points. Across a 22 step chain those two coin flips compound, so
-the harness closes most of the gap and not all of it. The local model is free
-and takes 111 minutes instead of a few.
+For a comparison, Claude Sonnet 5 one-shots all 22 tasks, three times out of
+three, for 0.26 cents, and is 22 always-pass with no coin flips against the 4B's
+20 and 2. Per task that is three points. Across a 22 step chain those two coin
+flips compound, so the harness closes most of the gap and not all of it. The
+local model is free and takes 111 minutes instead of a few.
 
 Getting to those numbers took four wrong answers first, and they are written up
 alongside the right one in [Measuring the harness](https://worksmith.sh/guide/measuring/).
