@@ -3572,7 +3572,7 @@ fn ui(f: &mut Frame, app: &App) {
         ])
         .split(f.area());
 
-    render_transcript(f, chunks[0], app);
+    render_transcript(f, chunks[0], &app.transcript);
     render_input(f, chunks[1], app);
     render_footer(f, chunks[2], app);
 
@@ -3725,25 +3725,25 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     f.render_widget(Paragraph::new(body), inner);
 }
 
-fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
-    // Rows are pre-wrapped and cached (see App::ensure_rows); here we just slice
-    // the tail (minus any manual scroll-up). Scrolling is therefore cheap.
-    let rows = &app.transcript.cached_rows;
+fn render_transcript(f: &mut Frame, area: Rect, transcript: &Transcript) {
+    // Rows are pre-wrapped and cached (see Transcript::ensure_rows); here we
+    // just slice the tail (minus any manual scroll-up). Scrolling is cheap.
+    let rows = &transcript.cached_rows;
     let h = area.height as usize;
     let total = rows.len();
 
     // In normal mode the window follows the cursor instead of the tail —
     // otherwise `k` would move a cursor you cannot see.
-    let end = if app.transcript.mode == Mode::Normal {
-        (app.transcript.cursor_row + 1).max(h.min(total)).min(total)
+    let end = if transcript.mode == Mode::Normal {
+        (transcript.cursor_row + 1).max(h.min(total)).min(total)
     } else {
-        let up = (app.transcript.scroll_up as usize).min(total.saturating_sub(1));
+        let up = (transcript.scroll_up as usize).min(total.saturating_sub(1));
         total.saturating_sub(up)
     };
     let start = end.saturating_sub(h);
 
-    let hits: HashSet<usize> = if app.transcript.mode == Mode::Normal {
-        app.transcript.search_hit_rows.iter().copied().collect()
+    let hits: HashSet<usize> = if transcript.mode == Mode::Normal {
+        transcript.search_hit_rows.iter().copied().collect()
     } else {
         HashSet::new()
     };
@@ -3752,7 +3752,7 @@ fn render_transcript(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, line)| {
             let row = start + i;
-            if app.transcript.mode == Mode::Normal && row == app.transcript.cursor_row {
+            if transcript.mode == Mode::Normal && row == transcript.cursor_row {
                 // Reverse video: readable in any theme, unlike a colour choice.
                 let spans = line
                     .spans
