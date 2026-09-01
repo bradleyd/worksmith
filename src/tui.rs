@@ -303,6 +303,11 @@ impl Composer {
         wrap_input(&self.input, width, self.cursor)
     }
 
+    fn render_height(&self) -> u16 {
+        let lines = self.input.split('\n').count().clamp(1, MAX_INPUT_ROWS);
+        (lines + 2) as u16
+    }
+
     fn insert_str(&mut self, s: &str) {
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, s);
@@ -3565,8 +3570,7 @@ fn expand_file_mentions(input: &str, cwd: &Path) -> String {
 
 fn ui(f: &mut Frame, app: &App) {
     // The composer grows with its content (up to MAX_INPUT_ROWS), + borders.
-    let lines = app.composer.input.split('\n').count().clamp(1, MAX_INPUT_ROWS);
-    let input_height = (lines + 2) as u16;
+    let input_height = app.composer.render_height();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
