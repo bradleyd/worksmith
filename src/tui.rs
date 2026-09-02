@@ -1167,6 +1167,43 @@ fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow>
     }
 }
 
+fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
+    let mut close_overlay = false;
+    let mut chosen_label = None;
+    {
+        let ov = app.overlay.as_mut()?;
+        match key.code {
+            KeyCode::Esc => close_overlay = true,
+            KeyCode::Up => ov.move_by(-1),
+            KeyCode::Down => ov.move_by(1),
+            KeyCode::Char('p') if ctrl => ov.move_by(-1),
+            KeyCode::Char('n') if ctrl => ov.move_by(1),
+            KeyCode::Char('c') if ctrl => return Some(Flow::Quit),
+            KeyCode::Backspace => ov.pop_filter(),
+            KeyCode::Enter => {
+                let (chosen, picking) = (ov.chosen(), ov.picking);
+                close_overlay = true;
+                // A reference has nothing to pick, so Enter just closes.
+                if picking {
+                    chosen_label = chosen;
+                }
+            }
+            KeyCode::Char(c) if !ctrl => ov.push_filter(c),
+            _ => {}
+        }
+    }
+    if close_overlay {
+        app.overlay = None;
+    }
+    if let Some(label) = chosen_label {
+        // Put it in the composer rather than running it: a picker that fires
+        // commands on Enter is a picker you cannot use to *look* at something.
+        app.composer.set_input(format!("{label} "));
+    }
+    app.transcript.dirty = true;
+    Some(Flow::Continue)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_key(
     key: KeyEvent,
@@ -1193,31 +1230,8 @@ async fn handle_key(
     // A picker owns the keyboard while it is up. Esc always returns to the
     // composer with whatever was typed still there — a modal you can get stuck
     // in is worse than no modal.
-    if let Some(ov) = &mut app.overlay {
-        match key.code {
-            KeyCode::Esc => app.overlay = None,
-            KeyCode::Up => ov.move_by(-1),
-            KeyCode::Down => ov.move_by(1),
-            KeyCode::Char('p') if ctrl => ov.move_by(-1),
-            KeyCode::Char('n') if ctrl => ov.move_by(1),
-            KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
-            KeyCode::Backspace => ov.pop_filter(),
-            KeyCode::Enter => {
-                let (chosen, picking) = (ov.chosen(), ov.picking);
-                app.overlay = None;
-                // A reference has nothing to pick, so Enter just closes.
-                if picking && let Some(label) = chosen {
-                    // Put it in the composer rather than running it: a picker
-                    // that fires commands on Enter is a picker you cannot use
-                    // to *look* at something.
-                    app.composer.set_input(format!("{label} "));
-                }
-            }
-            KeyCode::Char(c) if !ctrl => ov.push_filter(c),
-            _ => {}
-        }
-        app.transcript.dirty = true;
-        return Ok(Flow::Continue);
+    if let Some(flow) = handle_overlay_key(key, app, ctrl) {
+        return Ok(flow);
     }
 
     // Normal mode owns the alphabet. Nothing here is reachable unless you
