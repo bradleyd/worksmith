@@ -1574,11 +1574,7 @@ impl<'a, 'b> From<&'a mut KeyContext<'b>> for CommandContext<'a> {
 }
 
 /// Returns true if the input was a recognized command (already handled).
-async fn handle_command(
-    input: &str,
-    app: &mut App,
-    ctx: &mut CommandContext<'_>,
-) -> Result<bool> {
+async fn handle_command(input: &str, app: &mut App, ctx: &mut CommandContext<'_>) -> Result<bool> {
     let agent = ctx.agent;
     let session = ctx.session;
     let mem = ctx.mem;
@@ -1925,42 +1921,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 }
             }
         }
-        "pair" => {
-            match parts.next() {
-                None => {
-                    // Report current pairing state
-                    let on = agent.pairing_on();
-                    app.push(
-                        Kind::Notice,
-                        if on {
-                            "pairing on — the loop will stop at decisions worth your say. Spawned \
-                             workers never will.".to_string()
-                        } else {
-                            "pairing off — the checkpoint is no longer offered to the model".to_string()
-                        },
-                    );
-                }
-                Some("on") => {
-                    agent.set_pairing(true);
-                    app.push(
-                        Kind::Notice,
-                        "pairing on — the loop will stop at decisions worth your say. Spawned \
-                         workers never will.".to_string(),
-                    );
-                }
-                Some("off") => {
-                    agent.set_pairing(false);
-                    app.push(
-                        Kind::Notice,
-                        "pairing off — the checkpoint is no longer offered to the model".to_string(),
-                    );
-                }
-                Some(other) => {
-                    app.push(Kind::Error, format!("usage: /pair [on|off] (got {other})"));
-                    return Ok(true);
-                }
-            }
-        }
+        "pair" => pair_command(app, agent, parts),
         "route" => {
             // Deliberately not folded into /fast. `sort` changes *which
             // provider* serves the request, and OpenRouter endpoints differ in
@@ -2096,6 +2057,36 @@ fn validate_command<'a>(app: &mut App, parts: impl Iterator<Item = &'a str>) {
             app.validate_cmd = Some(cmd.to_string());
             app.push(Kind::Notice, format!("validation: `{cmd}`"));
         }
+    }
+}
+
+fn pair_command<'a>(
+    app: &mut App,
+    agent: &Agent,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
+    match parts.next() {
+        None => app.push(Kind::Notice, pair_status(agent.pairing_on())),
+        Some("on") => {
+            agent.set_pairing(true);
+            app.push(Kind::Notice, pair_status(true));
+        }
+        Some("off") => {
+            agent.set_pairing(false);
+            app.push(Kind::Notice, pair_status(false));
+        }
+        Some(other) => app.push(
+            Kind::Error,
+            format!("usage: /pair [on|off] (got {other})"),
+        ),
+    }
+}
+
+fn pair_status(on: bool) -> &'static str {
+    if on {
+        "pairing on — the loop will stop at decisions worth your say. Spawned workers never will."
+    } else {
+        "pairing off — the checkpoint is no longer offered to the model"
     }
 }
 
@@ -3297,6 +3288,37 @@ mod tests {
         App::new("m".into(), 1000, None)
     }
 
+    struct SilentClient;
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmClient for SilentClient {
+        async fn stream(
+            &self,
+            _req: crate::llm::ChatRequest,
+            _sink: tokio::sync::mpsc::Sender<crate::llm::StreamEvent>,
+            _cancel: CancellationToken,
+        ) -> Result<crate::llm::Completion> {
+            Ok(crate::llm::Completion::default())
+        }
+    }
+
+    fn test_agent() -> Agent {
+        Agent::new(
+            Arc::new(SilentClient),
+            Arc::new(crate::tools::ToolRegistry::with_builtins()),
+            EventBus::new(),
+            "test/model".to_string(),
+            None,
+            None,
+            8,
+            1,
+            3,
+            32_000,
+            6,
+            crate::tools::ToolContext::default(),
+        )
+    }
+
     #[test]
     fn model_list_marks_the_entry_serving_the_session() {
         use std::collections::HashMap;
@@ -3377,6 +3399,54 @@ mod tests {
         assert_eq!(
             a.transcript.items.last().unwrap().text,
             "validation cleared"
+        );
+    }
+
+    #[test]
+    fn pair_command_reports_the_current_mode() {
+        let mut a = app();
+        let agent = test_agent();
+
+        pair_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "pairing off — the checkpoint is no longer offered to the model"
+        );
+
+        agent.set_pairing(true);
+        pair_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(a.transcript.items.last().unwrap().text, pair_status(true));
+    }
+
+    #[test]
+    fn pair_command_sets_and_clears_pairing() {
+        let mut a = app();
+        let agent = test_agent();
+
+        pair_command(&mut a, &agent, ["on"].into_iter());
+        assert!(agent.pairing_on());
+        assert_eq!(a.transcript.items.last().unwrap().text, pair_status(true));
+
+        pair_command(&mut a, &agent, ["off"].into_iter());
+        assert!(!agent.pairing_on());
+        assert_eq!(a.transcript.items.last().unwrap().text, pair_status(false));
+    }
+
+    #[test]
+    fn pair_command_rejects_unknown_args_without_changing_mode() {
+        let mut a = app();
+        let agent = test_agent().with_pairing(true);
+
+        pair_command(&mut a, &agent, ["maybe"].into_iter());
+
+        assert!(agent.pairing_on());
+        assert!(matches!(
+            a.transcript.items.last().unwrap().kind,
+            Kind::Error
+        ));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "usage: /pair [on|off] (got maybe)"
         );
     }
 

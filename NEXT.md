@@ -7,20 +7,21 @@ re-deriving it.
 
 ## Current stopping point
 
-The latest clean commits before this note were `b92b05a Extract TUI modal state`
-and `9d63281 Name checkpoint test helper return type`. The current local
-refactor checkpoint is uncommitted.
+The latest clean command-refactor commit before this note was `eba4feb Extract
+validate command handling`. The current local refactor checkpoint is
+uncommitted.
 
 The TUI refactor has been moving one small behavior at a time out of the old
-monolithic input path. The latest local slice introduced `CommandContext` for
-`handle_command` and extracted `/validate` into `validate_command`, with direct
-tests for reporting, setting, and clearing the validation command.
+monolithic input path. The latest local slice extracted `/pair` into
+`pair_command`, with direct tests for reporting current state, toggling on/off,
+and rejecting unknown arguments without changing pairing mode.
 
 Checks for this slice were:
 
-- `cargo test validate_command --lib`
+- `cargo test pair_command --lib`
 - `cargo test tui::tests --lib`
 - `git diff --check`
+- targeted rustfmt review of the touched `src/tui.rs` hunks
 - `cargo check`
 - `cargo clippy --all-targets`
 - `cargo test`
@@ -31,16 +32,17 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for the command slice: open the TUI, run `/validate`, `/validate
-cargo test tui::tests --lib`, `/validate`, `/validate off`, and `/validate`
-again. Confirm the transcript text matches the command state and no stale
+Manual testing for this command slice: open the TUI, run `/pair`, `/pair on`,
+`/pair`, `/pair off`, `/pair`, and `/pair maybe`. Confirm the transcript text
+matches the pairing state, the bad argument reports usage, and no stale
 completion hint remains after Enter.
 
 ## 1. Break command handling, one command family at a time.
 
 Move to the next `TUI_REFACTOR.md` R4 command family. Do not extract all of
-`handle_command` at once. `CommandContext` now exists and `/validate` is already
-out; a good next low-risk family is `/pair`.
+`handle_command` at once. `CommandContext` now exists and `/validate` and
+`/pair` are already out. A reasonable next family is `/mouse`, with a manual
+check because it toggles terminal mouse capture.
 
 This is where the refactor gets riskier: slash commands touch session state,
 worker state, config, validation, hints, footer status, and transcript output.
