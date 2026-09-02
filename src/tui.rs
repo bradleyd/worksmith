@@ -1204,6 +1204,31 @@ fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> 
     Some(Flow::Continue)
 }
 
+fn handle_search_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
+    if !app.transcript.search.as_ref().is_some_and(|s| s.typing) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => app.set_search(None),
+        KeyCode::Enter => {
+            app.mutate_search(|s| s.typing = false);
+            if !app.jump_match(true) {
+                let p = app.transcript.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
+                app.status = format!("no match for `{p}`");
+                app.set_search(None);
+            }
+        }
+        KeyCode::Backspace => {
+            app.mutate_search(|s| {
+                s.pattern.pop();
+            });
+        }
+        KeyCode::Char(c) if !ctrl => app.mutate_search(|s| s.pattern.push(c)),
+        _ => {}
+    }
+    Some(Flow::Continue)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_key(
     key: KeyEvent,
@@ -1238,26 +1263,8 @@ async fn handle_key(
     // deliberately entered it, and every route out is one key.
     if app.transcript.mode == Mode::Normal {
         // A search being typed takes precedence: it is a prompt, not a mode.
-        if app.transcript.search.as_ref().is_some_and(|s| s.typing) {
-            match key.code {
-                KeyCode::Esc => app.set_search(None),
-                KeyCode::Enter => {
-                    app.mutate_search(|s| s.typing = false);
-                    if !app.jump_match(true) {
-                        let p = app.transcript.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
-                        app.status = format!("no match for `{p}`");
-                        app.set_search(None);
-                    }
-                }
-                KeyCode::Backspace => {
-                    app.mutate_search(|s| {
-                        s.pattern.pop();
-                    });
-                }
-                KeyCode::Char(c) if !ctrl => app.mutate_search(|s| s.pattern.push(c)),
-                _ => {}
-            }
-            return Ok(Flow::Continue);
+        if let Some(flow) = handle_search_key(key, app, ctrl) {
+            return Ok(flow);
         }
 
         match key.code {

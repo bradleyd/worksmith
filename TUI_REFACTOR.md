@@ -192,7 +192,8 @@ handler is unit-testable.
 > **Follow-up.** Approval prompt input now lives in `handle_approval_key`, so
 > the top of `handle_key` delegates the modal owner instead of carrying the
 > whole answer/restore flow inline. Overlay picker input now follows the same
-> pattern through `handle_overlay_key`.
+> pattern through `handle_overlay_key`. Normal-mode search prompt input is now
+> isolated in `handle_search_key`.
 
 `handle_approval_key`, `handle_overlay_key`, `handle_normal_key`,
 `handle_hint_key`, `handle_insert_key`. The current nesting (approval →
