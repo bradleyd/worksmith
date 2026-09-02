@@ -91,7 +91,7 @@ pub(super) fn footer_string(app: &App) -> String {
 
 pub(super) fn footer_status(app: &App) -> String {
     // While a turn runs, show an animated spinner + elapsed seconds.
-    if app.pending_approval.is_some() || app.pending_ask.is_some() {
+    if app.modals.approval_pending() || app.modals.ask_pending() {
         // No spinner: nothing is happening, and an animation would say it is.
         format!("⏸ waiting for you  {}", app.status)
     } else if app.running {

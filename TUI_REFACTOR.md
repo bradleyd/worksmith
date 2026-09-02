@@ -174,7 +174,8 @@ Each independently testable:
   `last_finish_reason`. The state still lives on `App`; only the rendering and
   legend helpers have moved.
 - **`Overlay`** — ✅ moved to `src/tui/overlay.rs`.
-- **`Modals`** — still pending: `pending_approval`, `pending_ask`.
+- **`Modals`** — ✅ moved to `src/tui/modals.rs`: `pending_approval`,
+  `pending_ask`, approval key answers, and checkpoint answer/skip delivery.
 
 This turns the 50-line `App::new` (349) into small constructors and lets
 `reset_for_new_session` (420) reset the right sub-structs by construction
@@ -200,6 +201,10 @@ handler is unit-testable.
 > dependencies instead of threading every field through both input helpers.
 > Enter submission now lives in `handle_enter_key`. Pending checkpoint answers
 > now route through one helper instead of being split across Enter and Esc.
+> **Follow-up, 2026-09-02.** Approval/checkpoint request state now lives in
+> `Modals`; `handle_approval_key`, `handle_enter_key`, and the Esc checkpoint
+> path all route through it while keeping precedence as approval, overlay,
+> normal, hint, insert.
 
 `handle_approval_key`, `handle_overlay_key`, `handle_normal_key`,
 `handle_hint_key`, `handle_insert_key`. The current nesting (approval →

@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 mod composer;
 mod footer;
+mod modals;
 mod overlay;
 mod transcript;
 
@@ -60,6 +61,7 @@ use composer::{compute_completions, wrap_input};
 use footer::{footer_legend, footer_status, footer_string, render_footer};
 #[cfg(test)]
 use footer::compact_tokens;
+use modals::{ApprovalKey, AskAnswer, Modals};
 use overlay::{Overlay, OverlayItem};
 use transcript::{Item, Kind, Mode, Search, Transcript};
 #[cfg(test)]
@@ -209,14 +211,7 @@ struct App {
     /// Which worker we're following, and how far we've printed. A worker's
     /// events go to its own bus, so this polls its recorded log instead.
     tail: Option<(String, usize)>,
-    /// A command waiting on the user's yes/no. While this is set, keys answer
-    /// the question instead of editing the composer — the agent's task is
-    /// blocked until it gets a reply.
-    pending_approval: Option<crate::tools::approval::ApprovalRequest>,
-    /// A pairing checkpoint waiting on an answer. Unlike an approval it does
-    /// *not* seize the keyboard: the answer is prose, so the composer stays a
-    /// composer and only Enter is routed somewhere else.
-    pending_ask: Option<crate::tools::approval::TextRequest>,
+    modals: Modals,
     /// OpenRouter provider routing, when set live with `/route`.
     route: Option<String>,
     /// Is mouse capture on? On by default, so the wheel scrolls the transcript
@@ -260,8 +255,7 @@ impl App {
             pending_escape: None,
             overlay: None,
             tail: None,
-            pending_approval: None,
-            pending_ask: None,
+            modals: Modals::default(),
             route: None,
             mouse: true,
         }
@@ -935,14 +929,14 @@ async fn run_loop(
             // The agent is asking whether it may do something outward-facing.
             // It is blocked until this loop answers, so nothing else matters
             // until the user decides.
-            Some(req) = approvals.recv(), if app.pending_approval.is_none() => {
+            Some(req) = approvals.recv(), if !app.modals.approval_pending() => {
                 app.push(
                     Kind::Error,
                     format!("⚠ approve? {}\n  {}", req.reason, req.command),
                 );
                 app.status = "y = once · a = always this session · n = no".into();
                 alert("approval needed");
-                app.pending_approval = Some(req);
+                app.modals.set_approval(req);
                 if app.transcript.follow { app.transcript.scroll_up = 0; }
                 app.transcript.dirty = true;
             }
@@ -950,14 +944,14 @@ async fn run_loop(
             // A pairing checkpoint. The turn is blocked on it, but the user is
             // free to ignore it — Esc skips, and the work carries on without
             // their answer rather than stalling.
-            Some(req) = asks.recv(), if app.pending_ask.is_none() => {
+            Some(req) = asks.recv(), if !app.modals.ask_pending() => {
                 app.push(
                     Kind::Pair,
                     format!("{}\n  {}", req.subject, req.question),
                 );
                 app.status = "type your answer · Enter to send · Esc to skip".into();
                 alert("waiting on you");
-                app.pending_ask = Some(req);
+                app.modals.set_ask(req);
                 if app.transcript.follow { app.transcript.scroll_up = 0; }
                 app.transcript.dirty = true;
             }
@@ -1147,32 +1141,21 @@ enum Flow {
 }
 
 fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
-    let req = app.pending_approval.take()?;
-    use crate::tools::approval::Approval;
-    let (answer, note) = match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => (Approval::Once, "approved once"),
-        KeyCode::Char('a') | KeyCode::Char('A') => (
-            Approval::AlwaysThisSession,
-            "approved — and not asking again this session for this kind of command",
-        ),
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => (Approval::Deny, "denied"),
-        KeyCode::Char('c') if ctrl => (Approval::Deny, "denied (quitting)"),
-        // Anything else is not an answer. Put the question back rather than
-        // guessing, because both guesses are bad.
-        _ => {
-            app.pending_approval = Some(req);
+    match app.modals.answer_approval_key(key, ctrl)? {
+        ApprovalKey::WaitingForAnswer => {
             app.status = "y = once · a = always this session · n = no".into();
-            return Some(Flow::Continue);
+            Some(Flow::Continue)
         }
-    };
-    req.answer(answer);
-    app.push(Kind::Notice, note.to_string());
-    app.status = "/help for keys and commands".into();
-    app.transcript.dirty = true;
-    if key.code == KeyCode::Char('c') && ctrl {
-        Some(Flow::Quit)
-    } else {
-        Some(Flow::Continue)
+        ApprovalKey::Answered { note, quit } => {
+            app.push(Kind::Notice, note.to_string());
+            app.status = "/help for keys and commands".into();
+            app.transcript.dirty = true;
+            if quit {
+                Some(Flow::Quit)
+            } else {
+                Some(Flow::Continue)
+            }
+        }
     }
 }
 
@@ -1355,16 +1338,15 @@ struct KeyContext<'a> {
 }
 
 fn answer_pending_ask(app: &mut App, answer: Option<String>) -> bool {
-    let Some(req) = app.pending_ask.take() else {
+    let Some(answer) = app.modals.answer_ask(answer) else {
         return false;
     };
 
-    match &answer {
-        Some(input) => app.push(Kind::Pair, format!("you ▸ {input}")),
-        None => app.push(Kind::Pair, "skipped".to_string()),
+    match answer {
+        AskAnswer::Answered(input) => app.push(Kind::Pair, format!("you ▸ {input}")),
+        AskAnswer::Skipped => app.push(Kind::Pair, "skipped".to_string()),
     }
     app.status = "/help for keys and commands".into();
-    req.answer(answer);
     true
 }
 
@@ -1386,7 +1368,7 @@ async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flo
     // Answering a checkpoint, not starting a turn. Checked before the command
     // dispatch below so an answer that happens to start with a slash is still
     // an answer.
-    if app.pending_ask.is_some() {
+    if app.modals.ask_pending() {
         answer_pending_ask(app, Some(input));
         return Ok(Flow::Continue);
     }
@@ -3118,9 +3100,9 @@ fn input_title(app: &App) -> String {
     // has to say that. It used to keep saying "working…" with the elapsed timer
     // climbing, which reads as "the model is busy" — observed costing 79 minutes
     // of waiting for a keypress nobody knew was wanted.
-    if app.pending_approval.is_some() {
+    if app.modals.approval_pending() {
         " APPROVE?  y = once · a = always this session · n = no ".to_string()
-    } else if app.pending_ask.is_some() {
+    } else if app.modals.ask_pending() {
         " CHECKPOINT  Enter answers · Esc skips ".to_string()
     } else if app.transcript.mode == Mode::Normal {
         // The single worst modal failure is not knowing which mode you are in.
@@ -3538,7 +3520,7 @@ mod tests {
 
         let mut a = app();
         a.running = true; // the turn is blocked on this, not finished
-        a.pending_approval = Some(req);
+        a.modals.set_approval(req);
         a.ensure_rows(78);
 
         let mut term = Terminal::new(TestBackend::new(78, 12)).unwrap();
@@ -3558,8 +3540,61 @@ mod tests {
         assert!(!screen.contains("working…"), "and stops claiming to be busy");
         assert!(screen.contains("waiting for you"), "no spinner, no elapsed time");
 
-        a.pending_approval.take().unwrap().answer(crate::tools::approval::Approval::Once);
+        assert!(matches!(
+            handle_approval_key(
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                &mut a,
+                false
+            ),
+            Some(Flow::Continue)
+        ));
         assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Once);
+    }
+
+    #[tokio::test]
+    async fn denying_an_approval_is_not_an_abort() {
+        let (approver, mut rx) = crate::tools::approval::ChannelApprover::new();
+        let h = tokio::spawn(async move {
+            use crate::tools::approval::Approver;
+            approver.ask("git push", "pushes commits to a remote").await
+        });
+        let req = rx.recv().await.unwrap();
+
+        let mut a = app();
+        a.running = true;
+        a.modals.set_approval(req);
+
+        let flow = handle_approval_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &mut a,
+            false,
+        );
+
+        assert!(
+            matches!(flow, Some(Flow::Continue)),
+            "denial does not quit the TUI"
+        );
+        assert!(a.running, "denial answers the gate but does not abort the turn");
+        assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Deny);
+    }
+
+    #[tokio::test]
+    async fn escape_denies_an_approval() {
+        let (approver, mut rx) = crate::tools::approval::ChannelApprover::new();
+        let h = tokio::spawn(async move {
+            use crate::tools::approval::Approver;
+            approver.ask("git push", "pushes commits to a remote").await
+        });
+        let req = rx.recv().await.unwrap();
+
+        let mut a = app();
+        a.modals.set_approval(req);
+
+        let flow =
+            handle_approval_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut a, false);
+
+        assert!(matches!(flow, Some(Flow::Continue)));
+        assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Deny);
     }
 
     #[tokio::test]
@@ -3574,7 +3609,7 @@ mod tests {
 
         let mut a = app();
         a.running = true; // the turn is blocked on the answer
-        a.pending_ask = Some(req);
+        a.modals.set_ask(req);
         a.composer.insert_str("Pin it.");
 
         // Unlike an approval, the composer stays a composer — typing works,
@@ -3604,7 +3639,7 @@ mod tests {
         let mut a = app();
         a.running = true;
         a.status = "type your answer · Enter to send · Esc to skip".into();
-        a.pending_ask = Some(req);
+        a.modals.set_ask(req);
         a.ensure_rows(78);
 
         let mut term = Terminal::new(TestBackend::new(78, 12)).unwrap();
