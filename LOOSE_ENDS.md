@@ -16,7 +16,8 @@ forgiving tool-call parser (`llm/rescue.rs`); both checkpoint complaints — it
 shows its evidence now, and it can take a question; the worker tail; the
 footer's worker spend and the truncated agent count; `/agents` timestamps; a
 nudge to a stopped worker; the stale command popup; and the supervisor killing
-workers that were merely running a slow check.
+workers that were merely running a slow check; empty Enter on a pending
+checkpoint now skips it; and checkpoint answers now share one TUI helper.
 
 ## Bugs
 
@@ -483,9 +484,10 @@ workers that were merely running a slow check.
   `/pair on|off` should set.
 
 - **Enter on an empty composer does nothing while a checkpoint is pending.**
-  The handler returns early on empty input *before* it checks `pending_ask`, so
-  the prompt says "Enter to send · Esc to skip" and bare Enter does neither. It
-  should mean skip, like Esc. Found on the first real checkpoint.
+  *Fixed — `eb9588c`, then deduplicated in `f199b91`.* The handler returned
+  early on empty input *before* it checked `pending_ask`, so the prompt said
+  "Enter to send · Esc to skip" and bare Enter did neither. It now means skip,
+  like Esc, while empty Enter with no pending checkpoint still does nothing.
 
 - **`/model`'s mid-turn refusal goes to the footer, not the transcript.**
   `app.status` is overwritten by the next keystroke — the same complaint that
@@ -552,13 +554,15 @@ workers that were merely running a slow check.
 
 ## Structural
 
-- **`src/tui.rs` is over 5,000 lines and no small model can hold it.** Measured:
-  asked for three plan steps at once, a 27B spent 104 then 300 steps and made
-  **zero edits**, reading that one file 17 and then 110 times — at ~200 lines per
-  read against the 8k tool-result cap, into a 65k window that compacts at 49k.
-  Scoped to one step it finished in 25. For a harness whose thesis is that small
-  models can do real work, this file is the wound. The command dispatch is a
-  clean seam.
+- **`src/tui.rs` is still too large for small models to hold comfortably.**
+  Originally over 5,000 lines; after the first refactor run it is 4,656 lines,
+  with `composer`, `footer`, `overlay`, and `transcript` split into
+  `src/tui/`. The original measurement still matters: asked for three plan
+  steps at once, a 27B spent 104 then 300 steps and made **zero edits**, reading
+  that one file 17 and then 110 times — at ~200 lines per read against the 8k
+  tool-result cap, into a 65k window that compacts at 49k. Scoped to one step it
+  finished in 25. For a harness whose thesis is that small models can do real
+  work, this file is still the wound. The command dispatch remains a clean seam.
 
 - **`CONVENTIONS.md` §12 does not mention `build.rs`**, so the document written
   to answer "where does everything live" does not cover a file in the root.
@@ -773,13 +777,14 @@ workers that were merely running a slow check.
   can stay up, not a modal you dismiss. The existing `Overlay` is modal and owns
   the keyboard, so it is the wrong machinery to reuse despite being the closest.
 
-  **Sequencing matters more than the design.** `src/tui.rs` is 5,153 lines and
-  is already the file `LOOSE_ENDS` calls the wound — a 27B made zero edits in it
-  across 404 steps. A dashboard is several hundred more lines. Building it
-  before `TUI_REFACTOR.md` §3 (R1 splits `App` into focused structs, R4 breaks
-  up `handle_command`) makes the project's own thesis harder to demonstrate in
-  the project's own codebase. After the split it is a new module with a clear
-  seam, which is the difference between paying the debt and adding to it.
+  **Sequencing matters more than the design.** `src/tui.rs` was 5,153 lines
+  when this was written and is still 4,656 lines after the first split — a 27B
+  made zero edits in it across 404 steps. A dashboard is several hundred more
+  lines. Building it before `TUI_REFACTOR.md` §3 (R1 splits `App` into focused
+  structs, R4 breaks up `handle_command`) makes the project's own thesis harder
+  to demonstrate in the project's own codebase. After the split it is a new
+  module with a clear seam, which is the difference between paying the debt and
+  adding to it.
 
 - **A notification hook.** `[notify] on = [...]` running a shell command off the
   event bus. One-way only: inbound control would mean the approval gate answers
