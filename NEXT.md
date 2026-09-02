@@ -7,41 +7,40 @@ re-deriving it.
 
 ## Current stopping point
 
-The last clean commit before this note was `f199b91 Deduplicate checkpoint
-answers`. The current local refactor checkpoint is uncommitted.
+The latest clean commits before this note were `b92b05a Extract TUI modal state`
+and `9d63281 Name checkpoint test helper return type`. The current local
+refactor checkpoint is uncommitted.
 
 The TUI refactor has been moving one small behavior at a time out of the old
-monolithic input path. The latest local slice introduced `src/tui/modals.rs`,
-moving `pending_approval` and `pending_ask` out of `App` and routing approval
-keys, checkpoint Enter answers, and checkpoint Esc skips through that owner.
-It also added focused approval tests for `n` denial and Esc denial.
+monolithic input path. The latest local slice introduced `CommandContext` for
+`handle_command` and extracted `/validate` into `validate_command`, with direct
+tests for reporting, setting, and clearing the validation command.
 
 Checks for this slice were:
 
-- `cargo test checkpoint --lib`
+- `cargo test validate_command --lib`
 - `cargo test tui::tests --lib`
 - `git diff --check`
-- `rustfmt --check src/tui/modals.rs`
 - `cargo check`
-- `cargo clippy --all-targets` (exits 0, still prints the pre-existing
-  `src/agent.rs:2093` type-complexity warning)
+- `cargo clippy --all-targets`
 - `cargo test`
 
 `cargo fmt --check` is still not a useful narrow check: rustfmt wants broad
-pre-existing rewrites outside this slice. Do not run a whole-repo format pass as
-part of a small TUI extraction.
+pre-existing rewrites outside this slice. Bare `rustfmt --check src/tui.rs` is
+also noisy because it follows `mod` children and reports older formatting in the
+split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
+`git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing is still worth doing before calling this UX-perfect, because the
-change moved keyboard ownership state: run with pairing on and a failing
-validator, trigger an approval prompt with `git push --dry-run`, deny it with
-`n`, then use Esc to abort the continuing turn. Confirm the transcript/session
-distinguishes denial from abort.
+Manual testing for the command slice: open the TUI, run `/validate`, `/validate
+cargo test tui::tests --lib`, `/validate`, `/validate off`, and `/validate`
+again. Confirm the transcript text matches the command state and no stale
+completion hint remains after Enter.
 
 ## 1. Break command handling, one command family at a time.
 
-Move to `TUI_REFACTOR.md` R4. Do not extract all of `handle_command` at once.
-Start by grouping the command dependencies into a command context, then move
-one low-risk command family such as `/pair` or `/validate`.
+Move to the next `TUI_REFACTOR.md` R4 command family. Do not extract all of
+`handle_command` at once. `CommandContext` now exists and `/validate` is already
+out; a good next low-risk family is `/pair`.
 
 This is where the refactor gets riskier: slash commands touch session state,
 worker state, config, validation, hints, footer status, and transcript output.

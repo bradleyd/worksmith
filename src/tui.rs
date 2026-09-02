@@ -1377,29 +1377,19 @@ async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flo
     if input == "/quit" || input == "/exit" || input == "quit" || input == "exit" {
         return Ok(Flow::Quit);
     }
-    if input.starts_with('/')
-        && handle_command(
-            &input,
-            app,
-            ctx.agent,
-            ctx.session,
-            ctx.mem,
-            ctx.cwd,
-            ctx.workers,
-            ctx.config,
-        )
-        .await?
-    {
-        // This return skips the `refresh_hint()` at the bottom of
-        // `handle_insert_key` — the one whose comment says no edit path can
-        // forget it. Running a command *is* an edit path: the composer is now
-        // empty, so the list of matching commands is stale, and it hung on
-        // screen until the next keystroke or an Esc. Reported as "/agents shows
-        // the list and the popup will not go away".
-        app.composer.refresh_hint();
-        return Ok(Flow::Continue);
+    if input.starts_with('/') {
+        let mut command_ctx = CommandContext::from(&mut *ctx);
+        if handle_command(&input, app, &mut command_ctx).await? {
+            // This return skips the `refresh_hint()` at the bottom of
+            // `handle_insert_key` — the one whose comment says no edit path can
+            // forget it. Running a command *is* an edit path: the composer is now
+            // empty, so the list of matching commands is stale, and it hung on
+            // screen until the next keystroke or an Esc. Reported as "/agents shows
+            // the list and the popup will not go away".
+            app.composer.refresh_hint();
+            return Ok(Flow::Continue);
+        }
     }
-
     let message = expand_file_mentions(&input, ctx.cwd);
 
     // Mid-turn, this is *steering*: the agent drains its mailbox at the top of
@@ -1561,18 +1551,40 @@ async fn handle_key(key: KeyEvent, app: &mut App, ctx: &mut KeyContext<'_>) -> R
     handle_insert_key(key, app, ctx, ctrl).await
 }
 
+struct CommandContext<'a> {
+    agent: &'a Arc<Agent>,
+    session: &'a Arc<AsyncMutex<Session>>,
+    mem: &'a MemoryStore,
+    cwd: &'a Path,
+    workers: &'a mut WorkerManager,
+    config: &'a Config,
+}
+
+impl<'a, 'b> From<&'a mut KeyContext<'b>> for CommandContext<'a> {
+    fn from(ctx: &'a mut KeyContext<'b>) -> Self {
+        Self {
+            agent: ctx.agent,
+            session: ctx.session,
+            mem: ctx.mem,
+            cwd: ctx.cwd,
+            workers: ctx.workers,
+            config: ctx.config,
+        }
+    }
+}
+
 /// Returns true if the input was a recognized command (already handled).
-#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     input: &str,
     app: &mut App,
-    agent: &Arc<Agent>,
-    session: &Arc<AsyncMutex<Session>>,
-    mem: &MemoryStore,
-    cwd: &Path,
-    workers: &mut WorkerManager,
-    config: &Config,
+    ctx: &mut CommandContext<'_>,
 ) -> Result<bool> {
+    let agent = ctx.agent;
+    let session = ctx.session;
+    let mem = ctx.mem;
+    let cwd = ctx.cwd;
+    let workers = &mut *ctx.workers;
+    let config = ctx.config;
     let mut parts = input.trim_start_matches('/').split_whitespace();
     let head = parts.next().unwrap_or("");
     match head {
@@ -2061,29 +2073,30 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 Err(e) => app.push(Kind::Error, format!("mouse: {e}")),
             }
         }
-        "validate" => {
-            let rest: Vec<&str> = parts.collect();
-            let rest = rest.join(" ");
-            match rest.as_str() {
-                "" => {
-                    let cur = app.validate_cmd.clone().unwrap_or_else(|| "(none)".into());
-                    app.push(Kind::Notice, format!("validation: {cur}"));
-                }
-                "off" | "none" => {
-                    app.validate_cmd = None;
-                    app.push(Kind::Notice, "validation cleared".to_string());
-                }
-                cmd => {
-                    app.validate_cmd = Some(cmd.to_string());
-                    app.push(Kind::Notice, format!("validation: `{cmd}`"));
-                }
-            }
-        }
+        "validate" => validate_command(app, parts),
         _ => {
             app.push(Kind::Error, format!("unknown command: /{head}"));
         }
     }
     Ok(true)
+}
+
+fn validate_command<'a>(app: &mut App, parts: impl Iterator<Item = &'a str>) {
+    let rest = parts.collect::<Vec<_>>().join(" ");
+    match rest.as_str() {
+        "" => {
+            let cur = app.validate_cmd.clone().unwrap_or_else(|| "(none)".into());
+            app.push(Kind::Notice, format!("validation: {cur}"));
+        }
+        "off" | "none" => {
+            app.validate_cmd = None;
+            app.push(Kind::Notice, "validation cleared".to_string());
+        }
+        cmd => {
+            app.validate_cmd = Some(cmd.to_string());
+            app.push(Kind::Notice, format!("validation: `{cmd}`"));
+        }
+    }
 }
 
 /// The lines for a bare `/model`: the configured `provider/model` entries,
@@ -3326,6 +3339,45 @@ mod tests {
 
         let lines = model_list("27b", &models);
         assert_eq!(lines, vec!["* alpha/27b".to_string(), "  zeta/7b".to_string()]);
+    }
+
+    #[test]
+    fn validate_command_reports_the_current_check() {
+        let mut a = app();
+        a.validate_cmd = Some("cargo test".to_string());
+
+        validate_command(&mut a, std::iter::empty());
+
+        assert_eq!(a.validate_cmd.as_deref(), Some("cargo test"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "validation: cargo test"
+        );
+    }
+
+    #[test]
+    fn validate_command_sets_and_clears_the_check() {
+        let mut a = app();
+
+        validate_command(
+            &mut a,
+            ["cargo", "test", "tui::tests", "--lib"].into_iter(),
+        );
+        assert_eq!(
+            a.validate_cmd.as_deref(),
+            Some("cargo test tui::tests --lib")
+        );
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "validation: `cargo test tui::tests --lib`"
+        );
+
+        validate_command(&mut a, ["off"].into_iter());
+        assert!(a.validate_cmd.is_none());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "validation cleared"
+        );
     }
 
     #[test]

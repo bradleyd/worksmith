@@ -218,6 +218,11 @@ remaining inline arms (`help`, `new`, `compact`, `spawn`, `history`, `fast`,
 function each. Consider a `Command` enum parsed once instead of repeated `&str`
 matching.
 
+> **Follow-up, 2026-09-02.** `handle_command` now receives a `CommandContext`
+> instead of a long argument list. `/validate` moved to `validate_command`, with
+> tests for reporting, setting, and clearing the check. The next low-risk family
+> is probably `/pair`.
+
 ### R5. ~~Replace the `PlannedFanOut` 5-tuple (54) with a named struct~~ ✅ DONE
 
 > **Follow-up.** `PlannedFanOut` is now a named struct with `planner`,
