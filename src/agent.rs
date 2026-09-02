@@ -2086,11 +2086,13 @@ mod checkpoint_tests {
         }
     }
 
+    type AgentTestResult = (Agent, Arc<Mutex<Vec<(String, String)>>>, Session, tempfile::TempDir);
+
     fn agent_with(
         replies: Vec<crate::llm::Completion>,
         answers: Vec<Option<String>>,
         max_steps: usize,
-    ) -> (Agent, Arc<Mutex<Vec<(String, String)>>>, Session, tempfile::TempDir) {
+    ) -> AgentTestResult {
         let asker = Arc::new(RecordingAsker::new(answers));
         let asked = asker.asked.clone();
         let dir = tempfile::tempdir().unwrap();
