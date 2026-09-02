@@ -1290,6 +1290,49 @@ fn handle_normal_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Result<Option<
     Ok(Some(Flow::Continue))
 }
 
+fn handle_hint_key(key: KeyEvent, app: &mut App) -> Option<Flow> {
+    app.composer.hint.as_ref()?;
+    match key.code {
+        // Up/Down browse the list rather than input history: while typing a
+        // command, the list is what you are looking at.
+        KeyCode::Up => {
+            app.composer.hint.as_mut()?.move_by(-1);
+            app.transcript.dirty = true;
+            Some(Flow::Continue)
+        }
+        KeyCode::Down => {
+            app.composer.hint.as_mut()?.move_by(1);
+            app.transcript.dirty = true;
+            Some(Flow::Continue)
+        }
+        // Enter takes the highlighted row too. Falling through to the command
+        // handler ran the half-typed text and answered "unknown command:
+        // /agen", which is the opposite of what a visible, highlighted list
+        // implies pressing Enter will do. An exactly-typed command still runs,
+        // so muscle memory for `/help<Enter>` survives.
+        KeyCode::Enter if hint_enter_accepts(&app.composer.input) => accept_hint(app),
+        // Tab accepts the highlighted command. This is better than the old
+        // blind prefix-cycling: you can see what you are accepting.
+        KeyCode::Tab => accept_hint(app),
+        // First Esc dismisses the list; a second one clears the composer, so
+        // Esc never does two things at once.
+        KeyCode::Esc => {
+            app.composer.hint = None;
+            app.transcript.dirty = true;
+            Some(Flow::Continue)
+        }
+        _ => None,
+    }
+}
+
+fn accept_hint(app: &mut App) -> Option<Flow> {
+    let label = app.composer.hint.as_ref().and_then(|h| h.chosen())?;
+    app.composer.set_input(format!("{label} "));
+    app.composer.hint = None;
+    app.transcript.dirty = true;
+    Some(Flow::Continue)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_key(
     key: KeyEvent,
@@ -1328,52 +1371,8 @@ async fn handle_key(
 
     // The as-you-type hint is not modal — it only claims the keys it needs, and
     // only while it is visible.
-    if app.composer.hint.is_some() {
-        match key.code {
-            // Up/Down browse the list rather than input history: while typing a
-            // command, the list is what you are looking at.
-            KeyCode::Up => {
-                app.composer.hint.as_mut().unwrap().move_by(-1);
-                app.transcript.dirty = true;
-                return Ok(Flow::Continue);
-            }
-            KeyCode::Down => {
-                app.composer.hint.as_mut().unwrap().move_by(1);
-                app.transcript.dirty = true;
-                return Ok(Flow::Continue);
-            }
-            // Enter takes the highlighted row too. Falling through to the
-            // command handler ran the half-typed text and answered "unknown
-            // command: /agen", which is the opposite of what a visible,
-            // highlighted list implies pressing Enter will do. An exactly-typed
-            // command still runs, so muscle memory for `/help<Enter>` survives.
-            KeyCode::Enter if hint_enter_accepts(&app.composer.input) => {
-                if let Some(label) = app.composer.hint.as_ref().and_then(|h| h.chosen()) {
-                    app.composer.set_input(format!("{label} "));
-                    app.composer.hint = None;
-                    app.transcript.dirty = true;
-                    return Ok(Flow::Continue);
-                }
-            }
-            // Tab accepts the highlighted command. This is better than the old
-            // blind prefix-cycling: you can see what you are accepting.
-            KeyCode::Tab => {
-                if let Some(label) = app.composer.hint.as_ref().and_then(|h| h.chosen()) {
-                    app.composer.set_input(format!("{label} "));
-                    app.composer.hint = None;
-                    app.transcript.dirty = true;
-                    return Ok(Flow::Continue);
-                }
-            }
-            // First Esc dismisses the list; a second one clears the composer, so
-            // Esc never does two things at once.
-            KeyCode::Esc => {
-                app.composer.hint = None;
-                app.transcript.dirty = true;
-                return Ok(Flow::Continue);
-            }
-            _ => {}
-        }
+    if let Some(flow) = handle_hint_key(key, app) {
+        return Ok(flow);
     }
 
     // Any key other than Tab ends an in-progress completion cycle.
