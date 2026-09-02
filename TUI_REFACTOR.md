@@ -195,7 +195,8 @@ handler is unit-testable.
 > pattern through `handle_overlay_key`. Normal-mode search prompt input is now
 > isolated in `handle_search_key`, and normal-mode navigation now lives in
 > `handle_normal_key`. Visible command hint input now lives in
-> `handle_hint_key`.
+> `handle_hint_key`, and insert/composer input now lives in
+> `handle_insert_key`.
 
 `handle_approval_key`, `handle_overlay_key`, `handle_normal_key`,
 `handle_hint_key`, `handle_insert_key`. The current nesting (approval →

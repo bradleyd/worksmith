@@ -1334,7 +1334,7 @@ fn accept_hint(app: &mut App) -> Option<Flow> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_key(
+async fn handle_insert_key(
     key: KeyEvent,
     app: &mut App,
     agent: &Arc<Agent>,
@@ -1346,35 +1346,8 @@ async fn handle_key(
     cancel: &mut CancellationToken,
     workers: &mut WorkerManager,
     config: &Config,
+    ctrl: bool,
 ) -> Result<Flow> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-    // A pending approval owns the keyboard. The agent's task is blocked waiting
-    // for the answer, so typing into the composer here would look like a hang;
-    // and an approval answered by accident is the failure this exists to stop.
-    if let Some(flow) = handle_approval_key(key, app, ctrl) {
-        return Ok(flow);
-    }
-
-    // A picker owns the keyboard while it is up. Esc always returns to the
-    // composer with whatever was typed still there — a modal you can get stuck
-    // in is worse than no modal.
-    if let Some(flow) = handle_overlay_key(key, app, ctrl) {
-        return Ok(flow);
-    }
-
-    // Normal mode owns the alphabet. Nothing here is reachable unless you
-    // deliberately entered it, and every route out is one key.
-    if let Some(flow) = handle_normal_key(key, app, ctrl)? {
-        return Ok(flow);
-    }
-
-    // The as-you-type hint is not modal — it only claims the keys it needs, and
-    // only while it is visible.
-    if let Some(flow) = handle_hint_key(key, app) {
-        return Ok(flow);
-    }
-
     // Any key other than Tab ends an in-progress completion cycle.
     if key.code != KeyCode::Tab {
         app.composer.clear_completion();
@@ -1530,6 +1503,65 @@ async fn handle_key(
     // One place, so no edit path can forget it.
     app.composer.refresh_hint();
     Ok(Flow::Continue)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_key(
+    key: KeyEvent,
+    app: &mut App,
+    agent: &Arc<Agent>,
+    session: &Arc<AsyncMutex<Session>>,
+    mem: &MemoryStore,
+    cwd: &Path,
+    bash_timeout: Duration,
+    turn: &mut Option<JoinHandle<Result<TurnResult>>>,
+    cancel: &mut CancellationToken,
+    workers: &mut WorkerManager,
+    config: &Config,
+) -> Result<Flow> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // A pending approval owns the keyboard. The agent's task is blocked waiting
+    // for the answer, so typing into the composer here would look like a hang;
+    // and an approval answered by accident is the failure this exists to stop.
+    if let Some(flow) = handle_approval_key(key, app, ctrl) {
+        return Ok(flow);
+    }
+
+    // A picker owns the keyboard while it is up. Esc always returns to the
+    // composer with whatever was typed still there — a modal you can get stuck
+    // in is worse than no modal.
+    if let Some(flow) = handle_overlay_key(key, app, ctrl) {
+        return Ok(flow);
+    }
+
+    // Normal mode owns the alphabet. Nothing here is reachable unless you
+    // deliberately entered it, and every route out is one key.
+    if let Some(flow) = handle_normal_key(key, app, ctrl)? {
+        return Ok(flow);
+    }
+
+    // The as-you-type hint is not modal — it only claims the keys it needs, and
+    // only while it is visible.
+    if let Some(flow) = handle_hint_key(key, app) {
+        return Ok(flow);
+    }
+
+    handle_insert_key(
+        key,
+        app,
+        agent,
+        session,
+        mem,
+        cwd,
+        bash_timeout,
+        turn,
+        cancel,
+        workers,
+        config,
+        ctrl,
+    )
+    .await
 }
 
 /// Returns true if the input was a recognized command (already handled).
