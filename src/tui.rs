@@ -1354,6 +1354,93 @@ struct KeyContext<'a> {
     config: &'a Config,
 }
 
+async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flow> {
+    let raw = app.composer.take_input();
+    let input = raw.trim().to_string();
+    if input.is_empty() {
+        // Empty input with a pending checkpoint: answer with None (skip).
+        if let Some(req) = app.pending_ask.take() {
+            app.push(Kind::Pair, "skipped".to_string());
+            app.status = "/help for keys and commands".into();
+            req.answer(None);
+            return Ok(Flow::Continue);
+        }
+        // Empty input with nothing pending: Enter does nothing. Without this
+        // return it falls through to `start_turn` and spends a model call on an
+        // empty prompt, which is what every stray Enter in a terminal would then
+        // cost.
+        return Ok(Flow::Continue);
+    }
+
+    // Answering a checkpoint, not starting a turn. Checked before the command
+    // dispatch below so an answer that happens to start with a slash is still
+    // an answer.
+    if let Some(req) = app.pending_ask.take() {
+        app.push(Kind::Pair, format!("you ▸ {input}"));
+        app.status = "/help for keys and commands".into();
+        req.answer(Some(input));
+        return Ok(Flow::Continue);
+    }
+
+    // Commands (start with '/', or bare quit/exit).
+    if input == "/quit" || input == "/exit" || input == "quit" || input == "exit" {
+        return Ok(Flow::Quit);
+    }
+    if input.starts_with('/')
+        && handle_command(
+            &input,
+            app,
+            ctx.agent,
+            ctx.session,
+            ctx.mem,
+            ctx.cwd,
+            ctx.workers,
+            ctx.config,
+        )
+        .await?
+    {
+        // This return skips the `refresh_hint()` at the bottom of
+        // `handle_insert_key` — the one whose comment says no edit path can
+        // forget it. Running a command *is* an edit path: the composer is now
+        // empty, so the list of matching commands is stale, and it hung on
+        // screen until the next keystroke or an Esc. Reported as "/agents shows
+        // the list and the popup will not go away".
+        app.composer.refresh_hint();
+        return Ok(Flow::Continue);
+    }
+
+    let message = expand_file_mentions(&input, ctx.cwd);
+
+    // Mid-turn, this is *steering*: the agent drains its mailbox at the top of
+    // every step, so the message lands before the next model call. Previously
+    // the composer was cleared and the text thrown away with a "a turn is
+    // already running" notice — typing a correction while the model worked
+    // simply destroyed it, in a harness whose stated bet is human-in-the-loop.
+    if app.running {
+        ctx.agent.steering().push(message);
+        app.push(Kind::User, format!("↳ {input}"));
+        app.status = "sent — the model sees it at its next step".into();
+        if app.transcript.follow {
+            app.transcript.scroll_up = 0;
+        }
+        return Ok(Flow::Continue);
+    }
+
+    start_turn(
+        message,
+        app,
+        ctx.agent,
+        ctx.session,
+        ctx.mem,
+        ctx.cwd,
+        ctx.bash_timeout,
+        ctx.turn,
+        ctx.cancel,
+    );
+    app.composer.refresh_hint();
+    Ok(Flow::Continue)
+}
+
 async fn handle_insert_key(
     key: KeyEvent,
     app: &mut App,
@@ -1435,91 +1522,7 @@ async fn handle_insert_key(
         _ if key_inserts_newline(&key) => {
             app.composer.insert_char('\n');
         }
-        KeyCode::Enter => {
-            let raw = app.composer.take_input();
-            let input = raw.trim().to_string();
-            if input.is_empty() {
-                // Empty input with a pending checkpoint: answer with None (skip).
-                if let Some(req) = app.pending_ask.take() {
-                    app.push(Kind::Pair, "skipped".to_string());
-                    app.status = "/help for keys and commands".into();
-                    req.answer(None);
-                    return Ok(Flow::Continue);
-                }
-                // Empty input with nothing pending: Enter does nothing. Without
-                // this return it falls through to `start_turn` and spends a
-                // model call on an empty prompt, which is what every stray
-                // Enter in a terminal would then cost.
-                return Ok(Flow::Continue);
-            }
-
-            // Answering a checkpoint, not starting a turn. Checked before the
-            // command dispatch below so an answer that happens to start with a
-            // slash is still an answer.
-            if let Some(req) = app.pending_ask.take() {
-                app.push(Kind::Pair, format!("you ▸ {input}"));
-                app.status = "/help for keys and commands".into();
-                req.answer(Some(input));
-                return Ok(Flow::Continue);
-            }
-
-            // Commands (start with '/', or bare quit/exit).
-            if input == "/quit" || input == "/exit" || input == "quit" || input == "exit" {
-                return Ok(Flow::Quit);
-            }
-            if input.starts_with('/')
-                && handle_command(
-                    &input,
-                    app,
-                    ctx.agent,
-                    ctx.session,
-                    ctx.mem,
-                    ctx.cwd,
-                    ctx.workers,
-                    ctx.config,
-                )
-                .await?
-            {
-                // This return skips the `refresh_hint()` at the bottom of the
-                // handler — the one whose comment says no edit path can forget
-                // it. Running a command *is* an edit path: the composer is now
-                // empty, so the list of matching commands is stale, and it hung
-                // on screen until the next keystroke or an Esc. Reported as
-                // "/agents shows the list and the popup will not go away".
-                app.composer.refresh_hint();
-                return Ok(Flow::Continue);
-            }
-
-            let message = expand_file_mentions(&input, ctx.cwd);
-
-            // Mid-turn, this is *steering*: the agent drains its mailbox at the
-            // top of every step, so the message lands before the next model
-            // call. Previously the composer was cleared and the text thrown
-            // away with a "a turn is already running" notice — typing a
-            // correction while the model worked simply destroyed it, in a
-            // harness whose stated bet is human-in-the-loop.
-            if app.running {
-                ctx.agent.steering().push(message);
-                app.push(Kind::User, format!("↳ {input}"));
-                app.status = "sent — the model sees it at its next step".into();
-                if app.transcript.follow {
-                    app.transcript.scroll_up = 0;
-                }
-                return Ok(Flow::Continue);
-            }
-
-            start_turn(
-                message,
-                app,
-                ctx.agent,
-                ctx.session,
-                ctx.mem,
-                ctx.cwd,
-                ctx.bash_timeout,
-                ctx.turn,
-                ctx.cancel,
-            );
-        }
+        KeyCode::Enter => return handle_enter_key(app, ctx).await,
         // Ignore control-chords; accept normal (and shifted) chars at the cursor.
         KeyCode::Char(c) if !ctrl => {
             if app.escape_pair(c) {
@@ -4312,10 +4315,12 @@ mod tests {
         // agent, session and worker manager. Crude, and it fails when the guard
         // goes, which is the requirement.
         let src = include_str!("tui.rs");
-        let block_start = src
-            .find("            if input.is_empty() {")
+        let enter_start = src.find("async fn handle_enter_key").expect("Enter handling stays named");
+        let rest = &src[enter_start..];
+        let block_start = rest
+            .find("    if input.is_empty() {")
             .expect("the composer's empty-input guard");
-        let rest = &src[block_start..];
+        let rest = &rest[block_start..];
 
         // Walk to the matching close brace so the count cannot wander into the
         // command dispatch below.
