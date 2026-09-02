@@ -1229,6 +1229,67 @@ fn handle_search_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
     Some(Flow::Continue)
 }
 
+fn handle_normal_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Result<Option<Flow>> {
+    if app.transcript.mode != Mode::Normal {
+        return Ok(None);
+    }
+
+    // A search being typed takes precedence: it is a prompt, not a mode.
+    if let Some(flow) = handle_search_key(key, app, ctrl) {
+        return Ok(Some(flow));
+    }
+
+    match key.code {
+        KeyCode::Char('c') if ctrl => return Ok(Some(Flow::Quit)),
+        // Back to typing. Several routes, because being stuck in a mode is
+        // the failure people remember.
+        KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Enter | KeyCode::Esc => {
+            app.enter_insert();
+            app.status = "insert".into();
+        }
+        KeyCode::Char('j') | KeyCode::Down => app.cursor_by(1),
+        KeyCode::Char('k') | KeyCode::Up => app.cursor_by(-1),
+        KeyCode::Char('d') if ctrl => app.cursor_by(10),
+        KeyCode::Char('u') if ctrl => app.cursor_by(-10),
+        KeyCode::PageDown => app.cursor_by(20),
+        KeyCode::PageUp => app.cursor_by(-20),
+        KeyCode::Char('G') => app.cursor_by(isize::MAX / 2),
+        KeyCode::Char('g') => {
+            // `gg` in vim; a single `g` here, since there is no other g-verb
+            // to disambiguate from and a hidden two-key chord is worse.
+            app.transcript.cursor_row = 0;
+        }
+        KeyCode::Char('/') => app.set_search(Some(Search { pattern: String::new(), typing: true })),
+        KeyCode::Char('n') => {
+            if !app.jump_match(true) {
+                app.status = "no matches".into();
+            }
+        }
+        KeyCode::Char('N') => {
+            if !app.jump_match(false) {
+                app.status = "no matches".into();
+            }
+        }
+        // Yank the whole item under the cursor, not the wrapped row: what you
+        // want is the message, the tool output, the code block.
+        KeyCode::Char('y') => match app.item_at_row(app.transcript.cursor_row) {
+            Some(i) => {
+                let text = app.transcript.items[i].text.clone();
+                match copy_to_clipboard(&text) {
+                    Ok(()) => {
+                        let n = text.lines().count();
+                        app.status = format!("yanked {n} lines");
+                    }
+                    Err(e) => app.push(Kind::Error, format!("clipboard: {e}")),
+                }
+            }
+            None => app.status = "nothing to yank".into(),
+        },
+        _ => {}
+    }
+    Ok(Some(Flow::Continue))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_key(
     key: KeyEvent,
@@ -1261,63 +1322,8 @@ async fn handle_key(
 
     // Normal mode owns the alphabet. Nothing here is reachable unless you
     // deliberately entered it, and every route out is one key.
-    if app.transcript.mode == Mode::Normal {
-        // A search being typed takes precedence: it is a prompt, not a mode.
-        if let Some(flow) = handle_search_key(key, app, ctrl) {
-            return Ok(flow);
-        }
-
-        match key.code {
-            KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
-            // Back to typing. Several routes, because being stuck in a mode is
-            // the failure people remember.
-            KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Enter | KeyCode::Esc => {
-                app.enter_insert();
-                app.status = "insert".into();
-            }
-            KeyCode::Char('j') | KeyCode::Down => app.cursor_by(1),
-            KeyCode::Char('k') | KeyCode::Up => app.cursor_by(-1),
-            KeyCode::Char('d') if ctrl => app.cursor_by(10),
-            KeyCode::Char('u') if ctrl => app.cursor_by(-10),
-            KeyCode::PageDown => app.cursor_by(20),
-            KeyCode::PageUp => app.cursor_by(-20),
-            KeyCode::Char('G') => app.cursor_by(isize::MAX / 2),
-            KeyCode::Char('g') => {
-                // `gg` in vim; a single `g` here, since there is no other g-verb
-                // to disambiguate from and a hidden two-key chord is worse.
-                app.transcript.cursor_row = 0;
-            }
-            KeyCode::Char('/') => {
-                app.set_search(Some(Search { pattern: String::new(), typing: true }))
-            }
-            KeyCode::Char('n') => {
-                if !app.jump_match(true) {
-                    app.status = "no matches".into();
-                }
-            }
-            KeyCode::Char('N') => {
-                if !app.jump_match(false) {
-                    app.status = "no matches".into();
-                }
-            }
-            // Yank the whole item under the cursor, not the wrapped row: what
-            // you want is the message, the tool output, the code block.
-            KeyCode::Char('y') => match app.item_at_row(app.transcript.cursor_row) {
-                Some(i) => {
-                    let text = app.transcript.items[i].text.clone();
-                    match copy_to_clipboard(&text) {
-                        Ok(()) => {
-                            let n = text.lines().count();
-                            app.status = format!("yanked {n} lines");
-                        }
-                        Err(e) => app.push(Kind::Error, format!("clipboard: {e}")),
-                    }
-                }
-                None => app.status = "nothing to yank".into(),
-            },
-            _ => {}
-        }
-        return Ok(Flow::Continue);
+    if let Some(flow) = handle_normal_key(key, app, ctrl)? {
+        return Ok(flow);
     }
 
     // The as-you-type hint is not modal — it only claims the keys it needs, and
