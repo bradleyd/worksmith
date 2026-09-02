@@ -198,7 +198,8 @@ handler is unit-testable.
 > `handle_hint_key`, and insert/composer input now lives in
 > `handle_insert_key`. `KeyContext` now carries the shared key-handling
 > dependencies instead of threading every field through both input helpers.
-> Enter submission now lives in `handle_enter_key`.
+> Enter submission now lives in `handle_enter_key`. Pending checkpoint answers
+> now route through one helper instead of being split across Enter and Esc.
 
 `handle_approval_key`, `handle_overlay_key`, `handle_normal_key`,
 `handle_hint_key`, `handle_insert_key`. The current nesting (approval →

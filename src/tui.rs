@@ -1354,15 +1354,26 @@ struct KeyContext<'a> {
     config: &'a Config,
 }
 
+fn answer_pending_ask(app: &mut App, answer: Option<String>) -> bool {
+    let Some(req) = app.pending_ask.take() else {
+        return false;
+    };
+
+    match &answer {
+        Some(input) => app.push(Kind::Pair, format!("you ▸ {input}")),
+        None => app.push(Kind::Pair, "skipped".to_string()),
+    }
+    app.status = "/help for keys and commands".into();
+    req.answer(answer);
+    true
+}
+
 async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flow> {
     let raw = app.composer.take_input();
     let input = raw.trim().to_string();
     if input.is_empty() {
         // Empty input with a pending checkpoint: answer with None (skip).
-        if let Some(req) = app.pending_ask.take() {
-            app.push(Kind::Pair, "skipped".to_string());
-            app.status = "/help for keys and commands".into();
-            req.answer(None);
+        if answer_pending_ask(app, None) {
             return Ok(Flow::Continue);
         }
         // Empty input with nothing pending: Enter does nothing. Without this
@@ -1375,10 +1386,8 @@ async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flo
     // Answering a checkpoint, not starting a turn. Checked before the command
     // dispatch below so an answer that happens to start with a slash is still
     // an answer.
-    if let Some(req) = app.pending_ask.take() {
-        app.push(Kind::Pair, format!("you ▸ {input}"));
-        app.status = "/help for keys and commands".into();
-        req.answer(Some(input));
+    if app.pending_ask.is_some() {
+        answer_pending_ask(app, Some(input));
         return Ok(Flow::Continue);
     }
 
@@ -1480,10 +1489,8 @@ async fn handle_insert_key(
             // Skipping a checkpoint outranks the other Esc meanings: the turn
             // is blocked on it, and "abort the turn" is not what someone who
             // just wants to move on is reaching for.
-            if let Some(req) = app.pending_ask.take() {
-                app.push(Kind::Pair, "skipped".to_string());
-                app.status = "/help for keys and commands".into();
-                req.answer(None);
+            if answer_pending_ask(app, None) {
+                return Ok(Flow::Continue);
             } else if app.running {
                 ctx.cancel.cancel();
                 app.status = "aborting…".into();
@@ -3576,7 +3583,7 @@ mod tests {
         // turn's context (agent, session, workers) to call directly.
         assert_eq!(a.composer.input, "Pin it.");
         let input = a.composer.take_input().trim().to_string();
-        a.pending_ask.take().unwrap().answer(Some(input));
+        assert!(answer_pending_ask(&mut a, Some(input)));
 
         assert_eq!(h.await.unwrap().as_deref(), Some("Pin it."));
         assert!(a.composer.input.is_empty(), "the answer left the composer");
@@ -3613,7 +3620,7 @@ mod tests {
         assert!(screen.contains("waiting for you"), "no spinner while it waits: {screen}");
 
         // Esc answers None, and the work carries on.
-        a.pending_ask.take().unwrap().answer(None);
+        assert!(answer_pending_ask(&mut a, None));
         assert_eq!(h.await.unwrap(), None);
     }
 
