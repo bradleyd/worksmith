@@ -777,9 +777,18 @@ async fn run_loop(
             maybe_ev = events.as_mut().unwrap().next(), if events.is_some() => {
                 match maybe_ev {
                     Some(Ok(CEvent::Key(key))) => {
-                        match handle_key(key, &mut app, &agent, &session, &mem, &cwd,
-                                         bash_timeout, &mut turn, &mut cancel, &mut workers,
-                                         &config).await? {
+                        let mut key_ctx = KeyContext {
+                            agent: &agent,
+                            session: &session,
+                            mem: &mem,
+                            cwd: &cwd,
+                            bash_timeout,
+                            turn: &mut turn,
+                            cancel: &mut cancel,
+                            workers: &mut workers,
+                            config: &config,
+                        };
+                        match handle_key(key, &mut app, &mut key_ctx).await? {
                             Flow::Quit => break,
                             Flow::Continue => {}
                             Flow::ExternalEdit => pending_edit = true,
@@ -1333,19 +1342,22 @@ fn accept_hint(app: &mut App) -> Option<Flow> {
     Some(Flow::Continue)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct KeyContext<'a> {
+    agent: &'a Arc<Agent>,
+    session: &'a Arc<AsyncMutex<Session>>,
+    mem: &'a MemoryStore,
+    cwd: &'a Path,
+    bash_timeout: Duration,
+    turn: &'a mut Option<JoinHandle<Result<TurnResult>>>,
+    cancel: &'a mut CancellationToken,
+    workers: &'a mut WorkerManager,
+    config: &'a Config,
+}
+
 async fn handle_insert_key(
     key: KeyEvent,
     app: &mut App,
-    agent: &Arc<Agent>,
-    session: &Arc<AsyncMutex<Session>>,
-    mem: &MemoryStore,
-    cwd: &Path,
-    bash_timeout: Duration,
-    turn: &mut Option<JoinHandle<Result<TurnResult>>>,
-    cancel: &mut CancellationToken,
-    workers: &mut WorkerManager,
-    config: &Config,
+    ctx: &mut KeyContext<'_>,
     ctrl: bool,
 ) -> Result<Flow> {
     // Any key other than Tab ends an in-progress completion cycle.
@@ -1355,7 +1367,7 @@ async fn handle_insert_key(
 
     match key.code {
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
-        KeyCode::Tab => complete(app, cwd, mem, config),
+        KeyCode::Tab => complete(app, ctx.cwd, ctx.mem, ctx.config),
         KeyCode::Char('o') if ctrl => {
             app.transcript.collapse_tools = !app.transcript.collapse_tools;
             // Changes how *every* item renders, not just the tail.
@@ -1386,7 +1398,7 @@ async fn handle_insert_key(
                 app.status = "/help for keys and commands".into();
                 req.answer(None);
             } else if app.running {
-                cancel.cancel();
+                ctx.cancel.cancel();
                 app.status = "aborting…".into();
             } else if app.composer.input.is_empty() {
                 // Nothing to clear, so Esc means "stop typing, start reading".
@@ -1456,7 +1468,17 @@ async fn handle_insert_key(
                 return Ok(Flow::Quit);
             }
             if input.starts_with('/')
-                && handle_command(&input, app, agent, session, mem, cwd, workers, config).await?
+                && handle_command(
+                    &input,
+                    app,
+                    ctx.agent,
+                    ctx.session,
+                    ctx.mem,
+                    ctx.cwd,
+                    ctx.workers,
+                    ctx.config,
+                )
+                .await?
             {
                 // This return skips the `refresh_hint()` at the bottom of the
                 // handler — the one whose comment says no edit path can forget
@@ -1468,7 +1490,7 @@ async fn handle_insert_key(
                 return Ok(Flow::Continue);
             }
 
-            let message = expand_file_mentions(&input, cwd);
+            let message = expand_file_mentions(&input, ctx.cwd);
 
             // Mid-turn, this is *steering*: the agent drains its mailbox at the
             // top of every step, so the message lands before the next model
@@ -1477,7 +1499,7 @@ async fn handle_insert_key(
             // correction while the model worked simply destroyed it, in a
             // harness whose stated bet is human-in-the-loop.
             if app.running {
-                agent.steering().push(message);
+                ctx.agent.steering().push(message);
                 app.push(Kind::User, format!("↳ {input}"));
                 app.status = "sent — the model sees it at its next step".into();
                 if app.transcript.follow {
@@ -1486,7 +1508,17 @@ async fn handle_insert_key(
                 return Ok(Flow::Continue);
             }
 
-            start_turn(message, app, agent, session, mem, cwd, bash_timeout, turn, cancel);
+            start_turn(
+                message,
+                app,
+                ctx.agent,
+                ctx.session,
+                ctx.mem,
+                ctx.cwd,
+                ctx.bash_timeout,
+                ctx.turn,
+                ctx.cancel,
+            );
         }
         // Ignore control-chords; accept normal (and shifted) chars at the cursor.
         KeyCode::Char(c) if !ctrl => {
@@ -1505,20 +1537,7 @@ async fn handle_insert_key(
     Ok(Flow::Continue)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_key(
-    key: KeyEvent,
-    app: &mut App,
-    agent: &Arc<Agent>,
-    session: &Arc<AsyncMutex<Session>>,
-    mem: &MemoryStore,
-    cwd: &Path,
-    bash_timeout: Duration,
-    turn: &mut Option<JoinHandle<Result<TurnResult>>>,
-    cancel: &mut CancellationToken,
-    workers: &mut WorkerManager,
-    config: &Config,
-) -> Result<Flow> {
+async fn handle_key(key: KeyEvent, app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flow> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // A pending approval owns the keyboard. The agent's task is blocked waiting
@@ -1547,21 +1566,7 @@ async fn handle_key(
         return Ok(flow);
     }
 
-    handle_insert_key(
-        key,
-        app,
-        agent,
-        session,
-        mem,
-        cwd,
-        bash_timeout,
-        turn,
-        cancel,
-        workers,
-        config,
-        ctrl,
-    )
-    .await
+    handle_insert_key(key, app, ctx, ctrl).await
 }
 
 /// Returns true if the input was a recognized command (already handled).

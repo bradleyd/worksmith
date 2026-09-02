@@ -196,7 +196,8 @@ handler is unit-testable.
 > isolated in `handle_search_key`, and normal-mode navigation now lives in
 > `handle_normal_key`. Visible command hint input now lives in
 > `handle_hint_key`, and insert/composer input now lives in
-> `handle_insert_key`.
+> `handle_insert_key`. `KeyContext` now carries the shared key-handling
+> dependencies instead of threading every field through both input helpers.
 
 `handle_approval_key`, `handle_overlay_key`, `handle_normal_key`,
 `handle_hint_key`, `handle_insert_key`. The current nesting (approval →
