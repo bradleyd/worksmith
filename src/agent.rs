@@ -379,6 +379,11 @@ impl Agent {
         *self.route.lock().unwrap() = sort;
     }
 
+    #[cfg(test)]
+    pub(crate) fn route_for_test(&self) -> Option<String> {
+        self.route.lock().unwrap().clone()
+    }
+
     /// Swap the model the session runs on. `&self` + interior mutability so it
     /// works from the TUI (`&Arc<Agent>`) and the REPL (owned `Agent`) alike,
     /// exactly like `set_route`.

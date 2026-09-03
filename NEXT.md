@@ -7,20 +7,19 @@ re-deriving it.
 
 ## Current stopping point
 
-The latest clean command-refactor commit before this note was `6957680 Extract
-pair command handling`. The current local refactor checkpoint is
+The latest clean command-refactor commit before this note was `115c639 Extract
+mouse command handling`. The current local refactor checkpoint is
 uncommitted.
 
 The TUI refactor has been moving one small behavior at a time out of the old
-monolithic input path. The latest local slice extracted `/mouse` into
-`mouse_command`, which takes an `io::Write` so tests can exercise terminal
-escape writes without touching the real terminal. Direct tests cover toggling,
-explicit on/off, and rejecting unknown arguments without changing mouse mode or
-writing terminal escapes.
+monolithic input path. The latest local slice extracted `/route` into
+`route_command`. Direct tests cover reporting the current route, setting and
+clearing the route, and rejecting unknown arguments without changing either the
+TUI's displayed route or the agent's routing preference.
 
 Checks for this slice were:
 
-- `cargo test mouse_command --lib`
+- `cargo test route_command --lib`
 - `cargo test tui::tests --lib`
 - `git diff --check`
 - targeted rustfmt review of the touched `src/tui.rs` hunks
@@ -34,17 +33,18 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for this command slice: open the TUI, run `/mouse`, `/mouse on`,
-`/mouse off`, and `/mouse maybe`. Confirm the transcript text matches the mouse
-state, the bad argument reports usage, scrolling still works when capture is on,
-and the terminal owns mouse selection/wheel behavior again when capture is off.
+Manual testing for this command slice: open the TUI, run `/route`, `/route
+latency`, `/route price`, `/route auto`, and `/route maybe`. Confirm the
+transcript text matches the route state, the bad argument reports usage, and the
+selected route is used on the next OpenRouter turn if you do an integration pass.
 
 ## 1. Break command handling, one command family at a time.
 
 Move to the next `TUI_REFACTOR.md` R4 command family. Do not extract all of
 `handle_command` at once. `CommandContext` now exists and `/validate`, `/pair`,
-and `/mouse` are already out. A reasonable next family is `/route`, because it
-only touches `app.route`, `agent.set_route`, and transcript output.
+`/mouse`, and `/route` are already out. A reasonable next family is `/fast` plus
+`/think`, because they share `agent.thinking_mode()`, `app.think_label`, and
+transcript output.
 
 This is where the refactor gets riskier: slash commands touch session state,
 worker state, config, validation, hints, footer status, and transcript output.

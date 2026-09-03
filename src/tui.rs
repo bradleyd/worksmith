@@ -1922,40 +1922,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             }
         }
         "pair" => pair_command(app, agent, parts),
-        "route" => {
-            // Deliberately not folded into /fast. `sort` changes *which
-            // provider* serves the request, and OpenRouter endpoints differ in
-            // quantization and price. A speed button that silently swaps your
-            // backend is a surprise, not a feature.
-            let cur = app.route.clone();
-            match parts.next() {
-                None => app.push(
-                    Kind::Notice,
-                    match &cur {
-                        Some(s) => format!("routing: {s} (OpenRouter only)"),
-                        None => "routing: the provider's default (OpenRouter sorts on price)"
-                            .to_string(),
-                    },
-                ),
-                Some("auto") | Some("default") => {
-                    app.route = None;
-                    agent.set_route(None);
-                    app.push(Kind::Notice, "routing left to the provider".to_string());
-                }
-                Some(v @ ("throughput" | "latency" | "price")) => {
-                    app.route = Some(v.to_string());
-                    agent.set_route(Some(v.to_string()));
-                    app.push(
-                        Kind::Notice,
-                        format!("routing on {v} — takes effect on the next turn"),
-                    );
-                }
-                Some(other) => app.push(
-                    Kind::Error,
-                    format!("usage: /route [throughput|latency|price|auto] (got {other})"),
-                ),
-            }
-        }
+        "route" => route_command(app, agent, parts),
         "model" => {
             // A session-scoped switch: it retargets the running agent and the
             // footer's model/window/prices, but never writes config.toml. The
@@ -2052,6 +2019,41 @@ fn pair_status(on: bool) -> &'static str {
         "pairing on — the loop will stop at decisions worth your say. Spawned workers never will."
     } else {
         "pairing off — the checkpoint is no longer offered to the model"
+    }
+}
+
+fn route_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Item = &'a str>) {
+    // Deliberately not folded into /fast. `sort` changes *which provider*
+    // serves the request, and OpenRouter endpoints differ in quantization and
+    // price. A speed button that silently swaps your backend is a surprise, not
+    // a feature.
+    match parts.next() {
+        None => app.push(Kind::Notice, route_status(app.route.as_deref())),
+        Some("auto") | Some("default") => {
+            app.route = None;
+            agent.set_route(None);
+            app.push(Kind::Notice, "routing left to the provider".to_string());
+        }
+        Some(v @ ("throughput" | "latency" | "price")) => {
+            let route = v.to_string();
+            app.route = Some(route.clone());
+            agent.set_route(Some(route));
+            app.push(
+                Kind::Notice,
+                format!("routing on {v} — takes effect on the next turn"),
+            );
+        }
+        Some(other) => app.push(
+            Kind::Error,
+            format!("usage: /route [throughput|latency|price|auto] (got {other})"),
+        ),
+    }
+}
+
+fn route_status(route: Option<&str>) -> String {
+    match route {
+        Some(s) => format!("routing: {s} (OpenRouter only)"),
+        None => "routing: the provider's default (OpenRouter sorts on price)".to_string(),
     }
 }
 
@@ -3449,6 +3451,69 @@ mod tests {
         assert_eq!(
             a.transcript.items.last().unwrap().text,
             "usage: /pair [on|off] (got maybe)"
+        );
+    }
+
+    #[test]
+    fn route_command_reports_the_current_route() {
+        let mut a = app();
+        let agent = test_agent();
+
+        route_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "routing: the provider's default (OpenRouter sorts on price)"
+        );
+
+        a.route = Some("latency".to_string());
+        agent.set_route(Some("latency".to_string()));
+        route_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "routing: latency (OpenRouter only)"
+        );
+    }
+
+    #[test]
+    fn route_command_sets_and_clears_the_route() {
+        let mut a = app();
+        let agent = test_agent();
+
+        route_command(&mut a, &agent, ["throughput"].into_iter());
+        assert_eq!(a.route.as_deref(), Some("throughput"));
+        assert_eq!(agent.route_for_test().as_deref(), Some("throughput"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "routing on throughput — takes effect on the next turn"
+        );
+
+        route_command(&mut a, &agent, ["default"].into_iter());
+        assert!(a.route.is_none());
+        assert!(agent.route_for_test().is_none());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "routing left to the provider"
+        );
+    }
+
+    #[test]
+    fn route_command_rejects_unknown_args_without_changing_route() {
+        let mut a = app();
+        let agent = test_agent();
+        a.route = Some("price".to_string());
+        agent.set_route(Some("price".to_string()));
+
+        route_command(&mut a, &agent, ["maybe"].into_iter());
+
+        assert_eq!(a.route.as_deref(), Some("price"));
+        assert_eq!(agent.route_for_test().as_deref(), Some("price"));
+        assert!(matches!(
+            a.transcript.items.last().unwrap().kind,
+            Kind::Error
+        ));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "usage: /route [throughput|latency|price|auto] (got maybe)"
         );
     }
 
