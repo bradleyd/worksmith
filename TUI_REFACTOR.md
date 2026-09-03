@@ -226,8 +226,9 @@ matching.
 > and bad arguments. `/route` moved to `route_command`, with tests for reporting,
 > setting, clearing, and bad arguments. `/fast` and `/think` moved to
 > `fast_command` and `think_command`, with tests for fast toggles, thinking
-> modes, effort/budget parsing, and bad arguments. The next reasonable family is
-> probably `/trust`.
+> modes, effort/budget parsing, and bad arguments. `/trust` moved to
+> `trust_command`, with tests for no config, reporting, revocation, and bad
+> arguments. Stop and reassess before extracting more command arms mechanically.
 
 ### R5. ~~Replace the `PlannedFanOut` 5-tuple (54) with a named struct~~ ✅ DONE
 

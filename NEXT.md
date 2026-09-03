@@ -7,20 +7,21 @@ re-deriving it.
 
 ## Current stopping point
 
-The latest clean command-refactor commit before this note was `fcccdeb Extract
-route command handling`. The current local refactor checkpoint is
+The latest clean command-refactor commit before this note was `6365f5a Extract
+thinking command handling`. The current local refactor checkpoint is
 uncommitted.
 
 The TUI refactor has been moving one small behavior at a time out of the old
-monolithic input path. The latest local slice extracted `/fast` and `/think`
-into `fast_command` and `think_command`. Direct tests cover toggling fast mode,
-explicit fast modes, thinking on/off/auto, effort and token budget parsing, and
-rejecting unknown arguments without changing the current thinking mode.
+monolithic input path. The latest local slice extracted `/trust` into
+`trust_command`, with a `trust_command_with_store` seam so tests can exercise
+trust state without reading or writing the user's real trust store. Direct tests
+cover no project config, reporting undecided/trusted state, revoking an existing
+decision, revoking when no decision exists, and rejecting unknown arguments
+without revoking.
 
 Checks for this slice were:
 
-- `cargo test fast_command --lib`
-- `cargo test think_command --lib`
+- `cargo test trust_command --lib`
 - `cargo test tui::tests --lib`
 - `git diff --check`
 - targeted rustfmt review of the touched `src/tui.rs` hunks
@@ -34,24 +35,24 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for this command slice: open the TUI, run `/fast`, `/fast on`,
-`/fast off`, `/fast auto`, `/fast maybe`, `/think`, `/think off`, `/think auto`,
-`/think low`, `/think 1200`, and `/think maybe`. Confirm the transcript text and
-footer thinking label match the selected mode, and bad arguments report usage
-without changing the existing mode.
+Manual testing for this command slice: open the TUI, run `/trust`, `/trust
+revoke`, and `/trust maybe`. Confirm the command reports the project config
+state, revokes an existing decision when present, reports usage for bad
+arguments, and reports no project config when run outside a project with
+`.worksmith/config.toml`.
 
-## 1. Break command handling, one command family at a time.
+## 1. Stop and reassess command handling.
 
-Move to the next `TUI_REFACTOR.md` R4 command family. Do not extract all of
-`handle_command` at once. `CommandContext` now exists and `/validate`, `/pair`,
-`/mouse`, `/route`, `/fast`, and `/think` are already out. A reasonable next
-family is `/trust`, because it is still inline and self-contained around project
-trust reporting/revocation.
+Do not keep extracting command arms mechanically. `CommandContext` now exists and
+`/validate`, `/pair`, `/mouse`, `/route`, `/fast`, `/think`, and `/trust` are
+already out. The remaining inline families are either low payoff (`/help`) or
+more coupled (`/new`, `/compact`, `/spawn`, `/history`, `/model`).
 
 This is where the refactor gets riskier: slash commands touch session state,
 worker state, config, validation, hints, footer status, and transcript output.
-The checks can pass while user-visible command text or mid-turn behavior
-regresses, so review diffs closely and manually test each moved command.
+Before another command extraction, decide whether the real next move is a
+`commands` module boundary, a focused `/spawn` module, or the run-loop event
+dispatch work below.
 
 ## 2. Then revisit run-loop event dispatch.
 

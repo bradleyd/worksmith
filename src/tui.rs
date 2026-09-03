@@ -1806,55 +1806,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         "skill" | "skills" => skill_command(app, cwd, parts),
         "fast" | "lucky" => fast_command(app, agent, parts),
         "think" => think_command(app, agent, parts),
-        "trust" => {
-            use crate::trust::{Decision, TrustStore, prompt_for};
-            let mut store = TrustStore::load();
-            let Some(p) = prompt_for(cwd, &store) else {
-                app.push(Kind::Notice, "this project has no .worksmith/config.toml".to_string());
-                return Ok(true);
-            };
-            match parts.next() {
-                // Revoking is the point of having the command: a decision you
-                // cannot revisit is one you will make carelessly.
-                Some("revoke") | Some("forget") => {
-                    if store.revoke(cwd) {
-                        app.push(
-                            Kind::Notice,
-                            "forgot this project's trust decision — worksmith will ask again \
-                             next start"
-                                .to_string(),
-                        );
-                    } else {
-                        app.push(Kind::Notice, "(no decision recorded for this project)".to_string());
-                    }
-                }
-                Some(other) => app.push(
-                    Kind::Error,
-                    format!("usage: /trust [revoke] (got {other})"),
-                ),
-                None => {
-                    let state = match store.decision_for(cwd, &p.fingerprint) {
-                        Some(Decision::Trust) => "trusted — its config is in effect",
-                        Some(Decision::Ignore) => "ignored — running on your global config",
-                        None => "undecided — its config is NOT in effect",
-                    };
-                    app.push(Kind::Notice, format!("{}\n{state}", p.config_path.display()));
-                    for (key, value, why) in &p.settings {
-                        app.push(
-                            Kind::Notice,
-                            match why {
-                                Some(w) => format!("  ! {key} = {value}\n      {w}"),
-                                None => format!("    {key} = {value}"),
-                            },
-                        );
-                    }
-                    app.push(
-                        Kind::Notice,
-                        "/trust revoke to decide again on the next start".to_string(),
-                    );
-                }
-            }
-        }
+        "trust" => trust_command(app, cwd, parts),
         "pair" => pair_command(app, agent, parts),
         "route" => route_command(app, agent, parts),
         "model" => {
@@ -2069,6 +2021,77 @@ fn think_usage(got: &str) -> String {
          Efforts: minimal, low, medium, high, xhigh, max — though \
          servers differ on which they accept."
     )
+}
+
+fn trust_command<'a>(app: &mut App, cwd: &Path, parts: impl Iterator<Item = &'a str>) {
+    let mut store = crate::trust::TrustStore::load();
+    trust_command_with_store(app, cwd, &mut store, parts);
+}
+
+fn trust_command_with_store<'a>(
+    app: &mut App,
+    cwd: &Path,
+    store: &mut crate::trust::TrustStore,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
+    let Some(prompt) = crate::trust::prompt_for(cwd, store) else {
+        app.push(
+            Kind::Notice,
+            "this project has no .worksmith/config.toml".to_string(),
+        );
+        return;
+    };
+
+    match parts.next() {
+        // Revoking is the point of having the command: a decision you cannot
+        // revisit is one you will make carelessly.
+        Some("revoke") | Some("forget") => {
+            if store.revoke(cwd) {
+                app.push(
+                    Kind::Notice,
+                    "forgot this project's trust decision — worksmith will ask again next start"
+                        .to_string(),
+                );
+            } else {
+                app.push(
+                    Kind::Notice,
+                    "(no decision recorded for this project)".to_string(),
+                );
+            }
+        }
+        Some(other) => app.push(Kind::Error, format!("usage: /trust [revoke] (got {other})")),
+        None => {
+            app.push(
+                Kind::Notice,
+                format!(
+                    "{}\n{}",
+                    prompt.config_path.display(),
+                    trust_state(store.decision_for(cwd, &prompt.fingerprint)),
+                ),
+            );
+            for (key, value, why) in &prompt.settings {
+                app.push(
+                    Kind::Notice,
+                    match why {
+                        Some(w) => format!("  ! {key} = {value}\n      {w}"),
+                        None => format!("    {key} = {value}"),
+                    },
+                );
+            }
+            app.push(
+                Kind::Notice,
+                "/trust revoke to decide again on the next start".to_string(),
+            );
+        }
+    }
+}
+
+fn trust_state(decision: Option<crate::trust::Decision>) -> &'static str {
+    match decision {
+        Some(crate::trust::Decision::Trust) => "trusted — its config is in effect",
+        Some(crate::trust::Decision::Ignore) => "ignored — running on your global config",
+        None => "undecided — its config is NOT in effect",
+    }
 }
 
 fn mouse_command<'a>(
@@ -3306,6 +3329,13 @@ mod tests {
         App::new("m".into(), 1000, None)
     }
 
+    fn project_with_config(config: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".worksmith")).unwrap();
+        std::fs::write(dir.path().join(".worksmith/config.toml"), config).unwrap();
+        dir
+    }
+
     struct SilentClient;
 
     #[async_trait::async_trait]
@@ -3670,6 +3700,131 @@ mod tests {
         assert_eq!(
             a.transcript.items.last().unwrap().text,
             "usage: /think [on|off|auto|<effort>|<tokens>] (got maybe). Efforts: minimal, low, medium, high, xhigh, max — though servers differ on which they accept."
+        );
+    }
+
+    #[test]
+    fn trust_command_reports_no_project_config() {
+        let mut a = app();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::trust::TrustStore::default();
+
+        trust_command_with_store(&mut a, dir.path(), &mut store, std::iter::empty());
+
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "this project has no .worksmith/config.toml"
+        );
+    }
+
+    #[test]
+    fn trust_command_reports_the_project_trust_state() {
+        let mut a = app();
+        let dir = project_with_config("[agent]\nvalidate = \"cargo test\"\nmax-steps = 80\n");
+        let mut store = crate::trust::TrustStore::default();
+
+        trust_command_with_store(&mut a, dir.path(), &mut store, std::iter::empty());
+
+        assert!(
+            a.transcript.items[0]
+                .text
+                .contains(".worksmith/config.toml")
+        );
+        assert!(
+            a.transcript.items[0]
+                .text
+                .contains("undecided — its config is NOT in effect")
+        );
+        assert!(
+            a.transcript
+                .items
+                .iter()
+                .any(|item| item.text.contains("! agent.validate = cargo test"))
+        );
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "/trust revoke to decide again on the next start"
+        );
+
+        let prompt = crate::trust::prompt_for(dir.path(), &store).unwrap();
+        store.record(
+            dir.path(),
+            &prompt.fingerprint,
+            crate::trust::Decision::Trust,
+        );
+        trust_command_with_store(&mut a, dir.path(), &mut store, std::iter::empty());
+        assert!(
+            a.transcript
+                .items
+                .iter()
+                .rev()
+                .find(|item| item.text.contains(".worksmith/config.toml"))
+                .unwrap()
+                .text
+                .contains("trusted — its config is in effect")
+        );
+    }
+
+    #[test]
+    fn trust_command_revokes_an_existing_decision() {
+        let mut a = app();
+        let dir = project_with_config("[agent]\nmax-steps = 80\n");
+        let mut store = crate::trust::TrustStore::default();
+        let prompt = crate::trust::prompt_for(dir.path(), &store).unwrap();
+        store.record(
+            dir.path(),
+            &prompt.fingerprint,
+            crate::trust::Decision::Trust,
+        );
+
+        trust_command_with_store(&mut a, dir.path(), &mut store, ["revoke"].into_iter());
+
+        assert_eq!(store.decision_for(dir.path(), &prompt.fingerprint), None);
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "forgot this project's trust decision — worksmith will ask again next start"
+        );
+    }
+
+    #[test]
+    fn trust_command_reports_when_there_is_no_decision_to_revoke() {
+        let mut a = app();
+        let dir = project_with_config("[agent]\nmax-steps = 80\n");
+        let mut store = crate::trust::TrustStore::default();
+
+        trust_command_with_store(&mut a, dir.path(), &mut store, ["forget"].into_iter());
+
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "(no decision recorded for this project)"
+        );
+    }
+
+    #[test]
+    fn trust_command_rejects_unknown_args_without_revoking() {
+        let mut a = app();
+        let dir = project_with_config("[agent]\nmax-steps = 80\n");
+        let mut store = crate::trust::TrustStore::default();
+        let prompt = crate::trust::prompt_for(dir.path(), &store).unwrap();
+        store.record(
+            dir.path(),
+            &prompt.fingerprint,
+            crate::trust::Decision::Ignore,
+        );
+
+        trust_command_with_store(&mut a, dir.path(), &mut store, ["maybe"].into_iter());
+
+        assert_eq!(
+            store.decision_for(dir.path(), &prompt.fingerprint),
+            Some(crate::trust::Decision::Ignore)
+        );
+        assert!(matches!(
+            a.transcript.items.last().unwrap().kind,
+            Kind::Error
+        ));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "usage: /trust [revoke] (got maybe)"
         );
     }
 
