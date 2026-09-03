@@ -416,13 +416,15 @@ checkpoint now skips it; and checkpoint answers now share one TUI helper.
   before the supervisor grows any policy role, since enforcement lives in the
   tool layer and the supervisor only observes.
 
-- **`config check` accepts `--trust-project` and ignores it.** The flag is on
-  the subcommand's `--help`, but `run_config_check` never passes it:
-  `Check::run(cwd, probe)` consults only the trust store, so an untrusted
-  project config is reported `not trusted` and every key in it is silently
-  omitted from the report. Found while adding `[models."omlx/..."]` tables to
-  this repo's project config — they did not appear, and the natural reading is
-  that the tables are broken rather than that the report is. `main.rs:1479`.
+- **`config check` accepts `--trust-project` and ignores it.** *Fixed —
+  `Check::run` now takes the explicit trust flag and applies the project config
+  for that report.* Previously, the flag was on the subcommand's `--help`, but
+  `run_config_check` never passed it: `Check::run(cwd, probe)` consulted only
+  the trust store, so an untrusted project config was reported `not trusted` and
+  every key in it was silently omitted from the report. Found while adding
+  `[models."omlx/..."]` tables to this repo's project config — they did not
+  appear, and the natural reading was that the tables were broken rather than
+  that the report was. `main.rs:1479`.
 
 - **1,620 sessions in one flat directory, 89% of them junk, and the TUI never
   shows you which one you are in.** Reported from use: finding a particular

@@ -54,19 +54,21 @@ pub struct FileStatus {
     /// `missing`, `ok`, or `error: …`.
     pub state: String,
     /// The project file only: the standing trust decision, and whether the
-    /// file still has the content it was decided about.
+    /// file still has the content it was decided about. `--trust-project`
+    /// marks the file trusted for this report.
     pub trusted: Option<bool>,
     pub changed_since_trusted: bool,
 }
 
 impl Check {
-    /// Load the effective config (honouring the project trust decision, so the
-    /// report describes what a run would actually use) and check it. `probe`
-    /// opts in to the one network call (the `/v1/models` context check); a
-    /// CI job that runs `config check` unattended should not be blocked on a
-    /// server that may be a slow tunnel.
-    pub async fn run(cwd: &Path, probe: bool) -> anyhow::Result<Check> {
-        let mut check = Check::load(cwd)?;
+    /// Load the effective config and check it. `trust_project` mirrors the
+    /// global CLI flag: without it, the report describes what an ordinary run
+    /// would use; with it, the project config is applied for this report. `probe`
+    /// opts in to the one network call (the `/v1/models` context check); a CI
+    /// job that runs `config check` unattended should not be blocked on a server
+    /// that may be a slow tunnel.
+    pub async fn run(cwd: &Path, probe: bool, trust_project: bool) -> anyhow::Result<Check> {
+        let mut check = Check::load(cwd, trust_project)?;
         check.flag_model();
         check.flag_api_keys();
         check.flag_context(probe).await;
@@ -74,8 +76,12 @@ impl Check {
         Ok(check)
     }
 
-    fn load(cwd: &Path) -> anyhow::Result<Check> {
-        let config = Config::load(cwd)?;
+    fn load(cwd: &Path, trust_project: bool) -> anyhow::Result<Check> {
+        let config = if trust_project {
+            Config::load_trusted(cwd)?
+        } else {
+            Config::load(cwd)?
+        };
 
         // The file lines. The global path is the same one `Config::load`
         // reads; the project one is what the trust store decides about. A
@@ -97,8 +103,11 @@ impl Check {
         let (applied, trusted, changed) = {
             let store = TrustStore::load();
             if let Some(prompt) = crate::trust::prompt_for(cwd, &store) {
-                let trusted =
-                    matches!(store.decision_for(cwd, &prompt.fingerprint), Some(Decision::Trust));
+                let trusted = trust_project
+                    || matches!(
+                        store.decision_for(cwd, &prompt.fingerprint),
+                        Some(Decision::Trust)
+                    );
                 (trusted, Some(trusted), prompt.changed_since_trusted)
             } else {
                 // No project config to decide about.
@@ -668,6 +677,45 @@ mod tests {
         assert_eq!(
             display_key("models>openrouter/qwen/qwen3.8-27b>temperature"),
             "models.openrouter/qwen/qwen3.8-27b.temperature"
+        );
+    }
+
+    #[tokio::test]
+    async fn trust_project_applies_the_project_config_for_this_check() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".worksmith")).unwrap();
+        let project_config = dir.path().join(".worksmith/config.toml");
+        std::fs::write(
+            &project_config,
+            "model = \"trustbug/model\"\n[providers.trustbug]\nbase-url = \"http://localhost:8000/v1\"\n",
+        )
+        .unwrap();
+
+        let untrusted = Check::run(dir.path(), false, false).await.unwrap();
+        assert_eq!(untrusted.files[1].trusted, Some(false));
+        assert_ne!(
+            untrusted.sources["model"].from,
+            project_config.display().to_string()
+        );
+        assert!(
+            !untrusted
+                .sources
+                .contains_key("providers>trustbug>base-url")
+        );
+
+        let trusted = Check::run(dir.path(), false, true).await.unwrap();
+        assert_eq!(trusted.files[1].trusted, Some(true));
+        assert!(trusted.files[1].state == "ok");
+        assert_eq!(trusted.config.model.as_deref(), Some("trustbug/model"));
+        assert_eq!(
+            trusted.sources["model"].from,
+            project_config.display().to_string()
+        );
+        assert_eq!(
+            trusted.sources["providers>trustbug>base-url"]
+                .value
+                .as_deref(),
+            Some("http://localhost:8000/v1")
         );
     }
 }

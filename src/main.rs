@@ -179,13 +179,20 @@ async fn run(args: Args) -> Result<()> {
     // resolution, no HTTP client, no session. It must not inherit the
     // interactive trust prompt either — a `config check` in CI that stops to
     // ask "trust this project's config?" would hang. It reports the config as
-    // `Config::load` reads it, and the file line says whether the project one
+    // `Config::load` reads it unless `--trust-project` explicitly asks for the
+    // project file to be applied, and the file line says whether the project one
     // is applied.
     if let Some(Cmd::Config {
         sub: ConfigSub::Check { probe },
     }) = &args.cmd
     {
-        return run_config_check(&cwd, *probe, args.mode.as_deref() == Some("json")).await;
+        return run_config_check(
+            &cwd,
+            *probe,
+            args.trust_project,
+            args.mode.as_deref() == Some("json"),
+        )
+        .await;
     }
 
     let config = resolve_project_trust(Config::load(&cwd)?, &cwd, &args)?;
@@ -1480,11 +1487,15 @@ fn resolve_thinking(
 /// `worksmith config check`: report on the running config and exit non-zero if
 /// any flag fires. Runs before the agent machinery, so it needs no model and
 /// makes no network call except the opt-in `--probe`.
-async fn run_config_check(cwd: &Path, probe: bool, json: bool) -> Result<()> {
+async fn run_config_check(cwd: &Path, probe: bool, trust_project: bool, json: bool) -> Result<()> {
     use worksmith::check::{Check, render, render_json};
-    let check = Check::run(cwd, probe).await?;
+    let check = Check::run(cwd, probe, trust_project).await?;
     // `--mode json` is the global flag; a script can parse the same report.
-    let out = if json { render_json(&check) } else { render(&check) };
+    let out = if json {
+        render_json(&check)
+    } else {
+        render(&check)
+    };
     print!("{out}");
     if !check.flags.is_empty() {
         std::process::exit(1);

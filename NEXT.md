@@ -7,24 +7,20 @@ re-deriving it.
 
 ## Current stopping point
 
-The latest clean command-refactor commit before this note was `6365f5a Extract
-thinking command handling`. The current local refactor checkpoint is
-uncommitted.
+The TUI command-arm refactor stopped after `/trust`. The latest clean commit
+before this note was `618eb9e Extract trust command handling`.
 
-The TUI refactor has been moving one small behavior at a time out of the old
-monolithic input path. The latest local slice extracted `/trust` into
-`trust_command`, with a `trust_command_with_store` seam so tests can exercise
-trust state without reading or writing the user's real trust store. Direct tests
-cover no project config, reporting undecided/trusted state, revoking an existing
-decision, revoking when no decision exists, and rejecting unknown arguments
-without revoking.
+The current local slice fixes `config check --trust-project`: the CLI now passes
+the explicit trust flag into `Check::run`, and `Check::load` applies the project
+config for that report when the flag is set. A regression test covers the
+untrusted report omitting project writers and the trusted report including them.
 
 Checks for this slice were:
 
-- `cargo test trust_command --lib`
-- `cargo test tui::tests --lib`
+- `cargo test trust_project_applies_the_project_config_for_this_check --lib`
+- `cargo test check::tests --lib`
 - `git diff --check`
-- targeted rustfmt review of the touched `src/tui.rs` hunks
+- targeted rustfmt review of the touched `src/check.rs` and `src/main.rs` hunks
 - `cargo check`
 - `cargo clippy --all-targets`
 - `cargo test`
@@ -35,11 +31,13 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for this command slice: open the TUI, run `/trust`, `/trust
-revoke`, and `/trust maybe`. Confirm the command reports the project config
-state, revokes an existing decision when present, reports usage for bad
-arguments, and reports no project config when run outside a project with
-`.worksmith/config.toml`.
+Manual testing for this slice: in a temp project with `.worksmith/config.toml`,
+compare `worksmith config check` against `worksmith --trust-project config
+check`. Confirm the first reports the project file as not trusted and omits its
+writers, while the second reports it trusted and includes project-sourced keys.
+This smoke is still pending because the sandbox for this task blocked
+`cargo build`/`cargo run`; the Rust regression test covers the same behavior at
+the `Check::run` boundary.
 
 ## 1. Stop and reassess command handling.
 
@@ -54,7 +52,19 @@ Before another command extraction, decide whether the real next move is a
 `commands` module boundary, a focused `/spawn` module, or the run-loop event
 dispatch work below.
 
-## 2. Then revisit run-loop event dispatch.
+## 2. Next non-command bug candidates.
+
+The best next loose end is probably repeated identical validation failures:
+`Event::Validation { ok, detail }` already carries failed check output, and the
+supervisor already has repeat-counting machinery. The missing piece is a
+normalized failure key so three equivalent failures nudge/escalate differently
+from three distinct failures.
+
+After that, consider session visibility/store cleanup: test/eval junk is filling
+the real sessions directory, and the TUI still does not make the current session
+id visible enough for resume workflows.
+
+## 3. Then revisit run-loop event dispatch.
 
 Once input and command handling are less tangled, extract `run_loop`'s select
 branches into named handlers. This is another risk point because ordering is
@@ -64,7 +74,7 @@ checkpoints, mining results, and turn completion all race through the same loop.
 Do this only after command handling has smaller boundaries, and keep each
 handler extraction behavior-preserving.
 
-## 3. Supervisor escalation follow-up, if it reappears.
+## 4. Supervisor escalation follow-up, if it reappears.
 
 A worker was stopped with `still off track after 2 nudges` during a run where
 the only long gap was a 60s bash call, at `stuck-timeout = 20`. That is exactly
@@ -84,7 +94,7 @@ are blocked". Run any spawn, wait for an escalation, read `/agents tail`.
 
 Do this first because it is cheap and it has been guessed at twice, wrongly.
 
-## 4. Why TUI is still the right path.
+## 5. Why TUI is still the right path.
 
 `TUI_REFACTOR.md` §3 has the steps. R1 splits `App` into focused structs, R4
 breaks up `handle_command`. Each is independently checkable with `cargo test`.
@@ -109,7 +119,7 @@ short `timeout_secs`, watches it expire, and concludes the build is stuck.
 **Read every diff.** Four times on 2026-08-31 a worker passed its check with a
 change that was wrong in a way the check could not see.
 
-## 5. The fan-out shares one check.
+## 6. The fan-out shares one check.
 
 The larger job, and the last place the differentiator degrades into something
 meaningless. `/spawn -n 3 --until "..."` copies one command to every worker, so
@@ -118,7 +128,7 @@ worktrees per worker for coherent state (PLAN.md M11), and a per-task check
 emitted by the planner rather than one string copied to all. `TOOLCALL_PLAN.md`
 has the full argument at the end.
 
-## 6. Small things worth clearing while in the area.
+## 7. Small things worth clearing while in the area.
 
 - The finished-worker line prints an absolute path in `changed` where it should
   be repo-relative. The model passed an absolute path to `edit` and it is stored
