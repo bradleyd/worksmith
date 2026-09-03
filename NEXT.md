@@ -8,29 +8,12 @@ re-deriving it.
 ## Current stopping point
 
 The TUI command-arm refactor stopped after `/trust`. The latest clean commit
-before this note was `618eb9e Extract trust command handling`.
+before this note was `c1b3684 Tighten validation retries and cwd safety`.
 
-The current local work contains two related reliability/safety slices:
-
-- repeated identical validation failures: the agent now compares validation
-  failures by a normalized key, so temp paths and moving line numbers do not
-  hide that the same check is failing the same way. Different failure keys still
-  retry normally, because they can be progress.
-- cwd-boundary approval: direct read/search/document inputs now ask before
-  leaving the task cwd, and bash asks before running commands with visible
-  escaped paths such as `..`, `~/...`, `$HOME/...`, absolute sibling paths, or
-  `--manifest-path=/outside/...`.
-
-Checks for this slice were:
-
-- `cargo test checkpoint_tests --lib`
-- `cargo test --test safety`
-- `cargo test tools::policy::tests --lib`
-- `git diff --check`
-- targeted rustfmt review of the touched Rust hunks
-- `cargo check`
-- `cargo clippy --all-targets`
-- `cargo test`
+The current local work is the first session visibility cleanup: the TUI prints
+the current session id when it starts, and no longer drops `SessionStarted`
+events. This fixes the cheap half of the session-store complaint: the user can
+now see the id needed for `/history <session-id>` and for finding the JSONL file.
 
 `cargo fmt --check` is still not a useful narrow check: rustfmt wants broad
 pre-existing rewrites outside this slice. Bare `rustfmt --check src/tui.rs` is
@@ -38,14 +21,17 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for this slice: run a task with a deliberately failing
-validation check, then make the model repeat the same failure twice. Confirm the
-checkpoint subject says the check failed the same way, and that the injected
-directive says not to summarize success from a different command.
+Checks for this slice should be:
 
-Also test from a small temp project: `read`/`grep`/`ls` or `bash` against
-`~/.worksmith/config.toml` should ask in the TUI and be denied in unattended
-mode unless `--approve-all` is set.
+- `cargo test tui::tests::session_started_is_visible_in_the_transcript --lib`
+- `git diff --check`
+- targeted rustfmt review of the touched `src/tui.rs` hunk
+- `cargo check`
+- `cargo clippy --all-targets`
+- `cargo test`
+
+Manual testing for this slice: start `worksmith` in any project and confirm the
+first transcript line shows `session <id>`.
 
 ## 1. Stop and reassess command handling.
 
@@ -62,9 +48,9 @@ dispatch work below.
 
 ## 2. Next non-command bug candidates.
 
-Next, consider session visibility/store cleanup: test/eval junk is filling the
-real sessions directory, and the TUI still does not make the current session id
-visible enough for resume workflows.
+Next, continue session store cleanup: test/eval junk is filling the real
+sessions directory. The TUI now shows the current session id, but the flat
+session directory and `most_recent_for_cwd` crawl remain open.
 
 ## 3. Then revisit run-loop event dispatch.
 

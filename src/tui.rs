@@ -294,6 +294,10 @@ impl App {
         self.transcript.push(kind, text);
     }
 
+    fn show_session_id(&mut self, id: &str) {
+        self.push(Kind::Notice, format!("session {id}"));
+    }
+
     // ---- normal mode ----
 
     /// Handle a character against the `jj`-style escape. Returns true when the
@@ -499,7 +503,8 @@ impl App {
             }
             Event::Warning { message } => self.push(Kind::Notice, format!("⚠ {message}")),
             Event::Error { message } => self.push(Kind::Error, message),
-            Event::SessionStarted { .. } | Event::TurnComplete { .. } => {}
+            Event::SessionStarted { id } => self.show_session_id(&id),
+            Event::TurnComplete { .. } => {}
         }
     }
 }
@@ -636,7 +641,11 @@ async fn run_loop(
         );
 
     let mut app = App::new(model, context_limit, validate_cmd);
-    app.session_path = session.lock().await.path().to_path_buf();
+    {
+        let s = session.lock().await;
+        app.session_path = s.path().to_path_buf();
+        app.show_session_id(&s.id);
+    }
     app.insert_escape = config.insert_escape();
     app.prices = model_settings.clone();
     app.fanout_auto = fanout_auto;
@@ -3943,6 +3952,17 @@ mod tests {
         });
         assert_eq!(a.last_prompt_tokens, 600);
         assert_eq!(a.total_out_tokens, 50);
+    }
+
+    #[test]
+    fn session_started_is_visible_in_the_transcript() {
+        let mut a = app();
+
+        a.apply_event(Event::SessionStarted { id: "abc123".into() });
+
+        assert_eq!(a.transcript.items.len(), 1);
+        assert!(matches!(a.transcript.items[0].kind, Kind::Notice));
+        assert_eq!(a.transcript.items[0].text, "session abc123");
     }
 
     #[test]

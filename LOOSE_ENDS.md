@@ -433,9 +433,9 @@ checkpoint now skips it; and checkpoint answers now share one TUI helper.
   appear, and the natural reading was that the tables were broken rather than
   that the report was. `main.rs:1479`.
 
-- **1,620 sessions in one flat directory, 89% of them junk, and the TUI never
-  shows you which one you are in.** Reported from use: finding a particular
-  session is hard. Measured, and the naming is only half of it.
+- **1,620 sessions in one flat directory, 89% of them junk, and the session
+  store is slow to search.** Reported from use: finding a particular session is
+  hard. Measured, and the naming is only half of it.
 
   `~/.worksmith/sessions/<uuid>.jsonl`, one directory, no nesting. The filename
   carries no project, no date, and no indication whether it was a main session
@@ -455,14 +455,10 @@ checkpoint now skips it; and checkpoint answers now share one TUI helper.
   *every* file in the directory to find one whose `cwd` matches. That is the
   `--resume` path, and it gets slower with every test run.
 
-  **And the id is never visible.** `Event::SessionStarted { id }` is emitted and
-  the TUI's handler explicitly drops it (`tui.rs:890`,
-  `SessionStarted { .. } | TurnComplete { .. } => {}`). It is formatted at
-  `tui.rs:2765` for the one-line event summary, so the string exists and simply
-  never reaches the screen. There is no `/session` command and nothing in the
-  footer, so the id you would need in order to go find the file is the one thing
-  you cannot read off the session. `DOCS_PLAN.md` Phase 0.5 already wants it
-  printed on exit; showing it live is the cheaper half.
+  **The id visibility half is fixed.** The TUI now prints `session <id>` when it
+  starts, and `Event::SessionStarted { id }` is rendered instead of dropped.
+  `DOCS_PLAN.md` Phase 0.5 still wants it printed on exit too; showing it live
+  was the cheaper half.
 
   The meta line already carries `cwd` and `ts`, so a scheme like
   `sessions/<project-slug>/<date>-<short-id>.jsonl` needs no new data — only a
