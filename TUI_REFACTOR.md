@@ -224,8 +224,10 @@ matching.
 > `pair_command`, with tests for reporting, toggling, and bad arguments.
 > `/mouse` moved to `mouse_command`, with tests for toggling, explicit modes,
 > and bad arguments. `/route` moved to `route_command`, with tests for reporting,
-> setting, clearing, and bad arguments. The next reasonable family is probably
-> `/fast` plus `/think`.
+> setting, clearing, and bad arguments. `/fast` and `/think` moved to
+> `fast_command` and `think_command`, with tests for fast toggles, thinking
+> modes, effort/budget parsing, and bad arguments. The next reasonable family is
+> probably `/trust`.
 
 ### R5. ~~Replace the `PlannedFanOut` 5-tuple (54) with a named struct~~ ✅ DONE
 

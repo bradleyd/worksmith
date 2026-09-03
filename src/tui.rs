@@ -1804,74 +1804,8 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         }
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
         "skill" | "skills" => skill_command(app, cwd, parts),
-        "fast" | "lucky" => {
-            let mode = agent.thinking_mode();
-            let rest: Vec<&str> = parts.collect();
-            match rest.first().copied() {
-                Some("on") => mode.set(Some(Thinking::Off)),
-                Some("off") => mode.set(Some(Thinking::On)),
-                Some("auto") => mode.set(None),
-                Some(other) => {
-                    app.push(Kind::Error, format!("usage: /fast [on|off|auto] (got {other})"));
-                    return Ok(true);
-                }
-                None => {
-                    mode.toggle_fast();
-                }
-            }
-            app.think_label = mode.label();
-            let msg = match mode.get() {
-                Some(Thinking::Off) => "fast mode on — answering without thinking first".to_string(),
-                Some(Thinking::On) => "fast mode off — thinking before answering".to_string(),
-                Some(Thinking::Budget(n)) => format!("thinking capped at {n} tokens"),
-                Some(Thinking::Effort(e)) => format!("thinking effort: {}", e.as_str()),
-                None => "thinking left to the provider's default".to_string(),
-            };
-            app.push(Kind::Notice, msg);
-        }
-        "think" => {
-            let mode = agent.thinking_mode();
-            let rest: Vec<&str> = parts.collect();
-            // A budget is the setting between "as long as it likes" and "not at
-            // all": the reasoning gets its own cap, so it can't eat the whole
-            // output budget and leave nothing for an answer.
-            let set = match rest.first().copied() {
-                None | Some("on") => Some(Thinking::On),
-                Some("off") => Some(Thinking::Off),
-                Some("auto") => None,
-                Some(n) if crate::llm::Effort::parse(n).is_some() => {
-                    Some(Thinking::Effort(crate::llm::Effort::parse(n).unwrap()))
-                }
-                Some(n) => match parse_budget(n) {
-                    Some(n) => Some(Thinking::Budget(n)),
-                    None => {
-                        app.push(
-                            Kind::Error,
-                            format!(
-                                "usage: /think [on|off|auto|<effort>|<tokens>] (got {n}). \
-                                 Efforts: minimal, low, medium, high, xhigh, max — though \
-                                 servers differ on which they accept."
-                            ),
-                        );
-                        return Ok(true);
-                    }
-                },
-            };
-            mode.set(set);
-            app.think_label = mode.label();
-            let msg = match set {
-                Some(Thinking::Off) => "thinking off — answering directly".to_string(),
-                Some(Thinking::On) => "thinking on, uncapped".to_string(),
-                Some(Thinking::Budget(n)) => format!(
-                    "thinking capped at {n} tokens, leaving the rest of max-tokens for the answer"
-                ),
-                Some(Thinking::Effort(e)) => {
-                    format!("thinking effort: {} (the provider's own scale)", e.as_str())
-                }
-                None => "thinking left to the provider's default".to_string(),
-            };
-            app.push(Kind::Notice, msg);
-        }
+        "fast" | "lucky" => fast_command(app, agent, parts),
+        "think" => think_command(app, agent, parts),
         "trust" => {
             use crate::trust::{Decision, TrustStore, prompt_for};
             let mut store = TrustStore::load();
@@ -2055,6 +1989,86 @@ fn route_status(route: Option<&str>) -> String {
         Some(s) => format!("routing: {s} (OpenRouter only)"),
         None => "routing: the provider's default (OpenRouter sorts on price)".to_string(),
     }
+}
+
+fn fast_command<'a>(app: &mut App, agent: &Agent, parts: impl Iterator<Item = &'a str>) {
+    let mode = agent.thinking_mode();
+    let rest: Vec<&str> = parts.collect();
+    match rest.first().copied() {
+        Some("on") => mode.set(Some(Thinking::Off)),
+        Some("off") => mode.set(Some(Thinking::On)),
+        Some("auto") => mode.set(None),
+        Some(other) => {
+            app.push(
+                Kind::Error,
+                format!("usage: /fast [on|off|auto] (got {other})"),
+            );
+            return;
+        }
+        None => {
+            mode.toggle_fast();
+        }
+    }
+    app.think_label = mode.label();
+    app.push(Kind::Notice, fast_status(mode.get()));
+}
+
+fn fast_status(thinking: Option<Thinking>) -> String {
+    match thinking {
+        Some(Thinking::Off) => "fast mode on — answering without thinking first".to_string(),
+        Some(Thinking::On) => "fast mode off — thinking before answering".to_string(),
+        Some(Thinking::Budget(n)) => format!("thinking capped at {n} tokens"),
+        Some(Thinking::Effort(e)) => format!("thinking effort: {}", e.as_str()),
+        None => "thinking left to the provider's default".to_string(),
+    }
+}
+
+fn think_command<'a>(app: &mut App, agent: &Agent, parts: impl Iterator<Item = &'a str>) {
+    let mode = agent.thinking_mode();
+    let rest: Vec<&str> = parts.collect();
+    // A budget is the setting between "as long as it likes" and "not at all":
+    // the reasoning gets its own cap, so it can't eat the whole output budget
+    // and leave nothing for an answer.
+    let set = match rest.first().copied() {
+        None | Some("on") => Some(Thinking::On),
+        Some("off") => Some(Thinking::Off),
+        Some("auto") => None,
+        Some(n) => match crate::llm::Effort::parse(n) {
+            Some(e) => Some(Thinking::Effort(e)),
+            None => match parse_budget(n) {
+                Some(n) => Some(Thinking::Budget(n)),
+                None => {
+                    app.push(Kind::Error, think_usage(n));
+                    return;
+                }
+            },
+        },
+    };
+    mode.set(set);
+    app.think_label = mode.label();
+    app.push(Kind::Notice, think_status(set));
+}
+
+fn think_status(thinking: Option<Thinking>) -> String {
+    match thinking {
+        Some(Thinking::Off) => "thinking off — answering directly".to_string(),
+        Some(Thinking::On) => "thinking on, uncapped".to_string(),
+        Some(Thinking::Budget(n)) => {
+            format!("thinking capped at {n} tokens, leaving the rest of max-tokens for the answer")
+        }
+        Some(Thinking::Effort(e)) => {
+            format!("thinking effort: {} (the provider's own scale)", e.as_str())
+        }
+        None => "thinking left to the provider's default".to_string(),
+    }
+}
+
+fn think_usage(got: &str) -> String {
+    format!(
+        "usage: /think [on|off|auto|<effort>|<tokens>] (got {got}). \
+         Efforts: minimal, low, medium, high, xhigh, max — though \
+         servers differ on which they accept."
+    )
 }
 
 fn mouse_command<'a>(
@@ -3514,6 +3528,148 @@ mod tests {
         assert_eq!(
             a.transcript.items.last().unwrap().text,
             "usage: /route [throughput|latency|price|auto] (got maybe)"
+        );
+    }
+
+    #[test]
+    fn fast_command_toggles_fast_mode() {
+        let mut a = app();
+        let agent = test_agent();
+
+        fast_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::Off));
+        assert_eq!(a.think_label.as_deref(), Some("off"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "fast mode on — answering without thinking first"
+        );
+
+        fast_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::On));
+        assert_eq!(a.think_label.as_deref(), Some("on"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "fast mode off — thinking before answering"
+        );
+    }
+
+    #[test]
+    fn fast_command_sets_explicit_modes() {
+        let mut a = app();
+        let agent = test_agent().with_thinking(Some(Thinking::Budget(1200)));
+
+        fast_command(&mut a, &agent, ["off"].into_iter());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::On));
+        assert_eq!(a.think_label.as_deref(), Some("on"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "fast mode off — thinking before answering"
+        );
+
+        fast_command(&mut a, &agent, ["auto"].into_iter());
+        assert_eq!(agent.thinking_mode().get(), None);
+        assert!(a.think_label.is_none());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "thinking left to the provider's default"
+        );
+
+        fast_command(&mut a, &agent, ["on"].into_iter());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::Off));
+        assert_eq!(a.think_label.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn fast_command_rejects_unknown_args_without_changing_thinking() {
+        let mut a = app();
+        let agent = test_agent().with_thinking(Some(Thinking::Budget(1200)));
+
+        fast_command(&mut a, &agent, ["maybe"].into_iter());
+
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::Budget(1200)));
+        assert!(a.think_label.is_none());
+        assert!(matches!(
+            a.transcript.items.last().unwrap().kind,
+            Kind::Error
+        ));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "usage: /fast [on|off|auto] (got maybe)"
+        );
+    }
+
+    #[test]
+    fn think_command_sets_modes_effort_and_budget() {
+        let mut a = app();
+        let agent = test_agent();
+
+        think_command(&mut a, &agent, std::iter::empty());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::On));
+        assert_eq!(a.think_label.as_deref(), Some("on"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "thinking on, uncapped"
+        );
+
+        think_command(&mut a, &agent, ["off"].into_iter());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::Off));
+        assert_eq!(a.think_label.as_deref(), Some("off"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "thinking off — answering directly"
+        );
+
+        think_command(&mut a, &agent, ["low"].into_iter());
+        assert_eq!(
+            agent.thinking_mode().get(),
+            Some(Thinking::Effort(crate::llm::Effort::Low))
+        );
+        assert_eq!(a.think_label.as_deref(), Some("low"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "thinking effort: low (the provider's own scale)"
+        );
+
+        think_command(&mut a, &agent, ["1200"].into_iter());
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::Budget(1200)));
+        assert_eq!(a.think_label.as_deref(), Some("1k"));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "thinking capped at 1200 tokens, leaving the rest of max-tokens for the answer"
+        );
+    }
+
+    #[test]
+    fn think_command_clears_to_provider_default() {
+        let mut a = app();
+        let agent = test_agent().with_thinking(Some(Thinking::On));
+
+        think_command(&mut a, &agent, ["auto"].into_iter());
+
+        assert_eq!(agent.thinking_mode().get(), None);
+        assert!(a.think_label.is_none());
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "thinking left to the provider's default"
+        );
+    }
+
+    #[test]
+    fn think_command_rejects_unknown_args_without_changing_thinking() {
+        let mut a = app();
+        let agent = test_agent().with_thinking(Some(Thinking::Budget(1200)));
+
+        think_command(&mut a, &agent, ["maybe"].into_iter());
+
+        assert_eq!(agent.thinking_mode().get(), Some(Thinking::Budget(1200)));
+        assert!(a.think_label.is_none());
+        assert!(matches!(
+            a.transcript.items.last().unwrap().kind,
+            Kind::Error
+        ));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "usage: /think [on|off|auto|<effort>|<tokens>] (got maybe). Efforts: minimal, low, medium, high, xhigh, max — though servers differ on which they accept."
         );
     }
 

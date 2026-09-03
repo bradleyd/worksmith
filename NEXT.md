@@ -7,19 +7,20 @@ re-deriving it.
 
 ## Current stopping point
 
-The latest clean command-refactor commit before this note was `115c639 Extract
-mouse command handling`. The current local refactor checkpoint is
+The latest clean command-refactor commit before this note was `fcccdeb Extract
+route command handling`. The current local refactor checkpoint is
 uncommitted.
 
 The TUI refactor has been moving one small behavior at a time out of the old
-monolithic input path. The latest local slice extracted `/route` into
-`route_command`. Direct tests cover reporting the current route, setting and
-clearing the route, and rejecting unknown arguments without changing either the
-TUI's displayed route or the agent's routing preference.
+monolithic input path. The latest local slice extracted `/fast` and `/think`
+into `fast_command` and `think_command`. Direct tests cover toggling fast mode,
+explicit fast modes, thinking on/off/auto, effort and token budget parsing, and
+rejecting unknown arguments without changing the current thinking mode.
 
 Checks for this slice were:
 
-- `cargo test route_command --lib`
+- `cargo test fast_command --lib`
+- `cargo test think_command --lib`
 - `cargo test tui::tests --lib`
 - `git diff --check`
 - targeted rustfmt review of the touched `src/tui.rs` hunks
@@ -33,18 +34,19 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for this command slice: open the TUI, run `/route`, `/route
-latency`, `/route price`, `/route auto`, and `/route maybe`. Confirm the
-transcript text matches the route state, the bad argument reports usage, and the
-selected route is used on the next OpenRouter turn if you do an integration pass.
+Manual testing for this command slice: open the TUI, run `/fast`, `/fast on`,
+`/fast off`, `/fast auto`, `/fast maybe`, `/think`, `/think off`, `/think auto`,
+`/think low`, `/think 1200`, and `/think maybe`. Confirm the transcript text and
+footer thinking label match the selected mode, and bad arguments report usage
+without changing the existing mode.
 
 ## 1. Break command handling, one command family at a time.
 
 Move to the next `TUI_REFACTOR.md` R4 command family. Do not extract all of
 `handle_command` at once. `CommandContext` now exists and `/validate`, `/pair`,
-`/mouse`, and `/route` are already out. A reasonable next family is `/fast` plus
-`/think`, because they share `agent.thinking_mode()`, `app.think_label`, and
-transcript output.
+`/mouse`, `/route`, `/fast`, and `/think` are already out. A reasonable next
+family is `/trust`, because it is still inline and self-contained around project
+trust reporting/revocation.
 
 This is where the refactor gets riskier: slash commands touch session state,
 worker state, config, validation, hints, footer status, and transcript output.
