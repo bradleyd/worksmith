@@ -1998,42 +1998,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 Some(spec) => switch_model(app, agent, session, config, spec).await,
             }
         }
-        "mouse" => {
-            let want = match parts.next() {
-                Some("on") => true,
-                Some("off") => false,
-                None => !app.mouse,
-                Some(other) => {
-                    app.push(Kind::Error, format!("usage: /mouse [on|off] (got {other})"));
-                    return Ok(true);
-                }
-            };
-            let mut out = io::stdout();
-            let res = if want {
-                execute!(out, EnableMouseCapture)
-            } else {
-                execute!(out, DisableMouseCapture)
-            };
-            match res {
-                Ok(()) => {
-                    app.mouse = want;
-                    app.push(
-                        Kind::Notice,
-                        if want {
-                            "mouse capture on — the wheel scrolls the transcript. Shift+drag \
-                             still selects text to copy."
-                                .to_string()
-                        } else {
-                            "mouse capture off — the terminal owns the wheel again. In the \
-                             alternate screen that usually means it sends Up/Down, which walks \
-                             prompt history; PageUp/PageDown and Ctrl+U/Ctrl+D scroll."
-                                .to_string()
-                        },
-                    );
-                }
-                Err(e) => app.push(Kind::Error, format!("mouse: {e}")),
-            }
-        }
+        "mouse" => mouse_command(app, &mut io::stdout(), parts),
         "validate" => validate_command(app, parts),
         _ => {
             app.push(Kind::Error, format!("unknown command: /{head}"));
@@ -2087,6 +2052,43 @@ fn pair_status(on: bool) -> &'static str {
         "pairing on — the loop will stop at decisions worth your say. Spawned workers never will."
     } else {
         "pairing off — the checkpoint is no longer offered to the model"
+    }
+}
+
+fn mouse_command<'a>(
+    app: &mut App,
+    out: &mut impl io::Write,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
+    let want = match parts.next() {
+        Some("on") => true,
+        Some("off") => false,
+        None => !app.mouse,
+        Some(other) => {
+            app.push(Kind::Error, format!("usage: /mouse [on|off] (got {other})"));
+            return;
+        }
+    };
+
+    let res = if want {
+        execute!(out, EnableMouseCapture)
+    } else {
+        execute!(out, DisableMouseCapture)
+    };
+    match res {
+        Ok(()) => {
+            app.mouse = want;
+            app.push(Kind::Notice, mouse_status(want));
+        }
+        Err(e) => app.push(Kind::Error, format!("mouse: {e}")),
+    }
+}
+
+fn mouse_status(on: bool) -> &'static str {
+    if on {
+        "mouse capture on — the wheel scrolls the transcript. Shift+drag still selects text to copy."
+    } else {
+        "mouse capture off — the terminal owns the wheel again. In the alternate screen that usually means it sends Up/Down, which walks prompt history; PageUp/PageDown and Ctrl+U/Ctrl+D scroll."
     }
 }
 
@@ -3447,6 +3449,52 @@ mod tests {
         assert_eq!(
             a.transcript.items.last().unwrap().text,
             "usage: /pair [on|off] (got maybe)"
+        );
+    }
+
+    #[test]
+    fn mouse_command_toggles_the_current_mode() {
+        let mut a = app();
+        let mut out = Vec::new();
+        assert!(a.mouse);
+
+        mouse_command(&mut a, &mut out, std::iter::empty());
+
+        assert!(!a.mouse);
+        assert_eq!(a.transcript.items.last().unwrap().text, mouse_status(false));
+        assert!(!out.is_empty(), "the terminal mode command is written");
+    }
+
+    #[test]
+    fn mouse_command_sets_explicit_modes() {
+        let mut a = app();
+        let mut out = Vec::new();
+
+        mouse_command(&mut a, &mut out, ["off"].into_iter());
+        assert!(!a.mouse);
+        assert_eq!(a.transcript.items.last().unwrap().text, mouse_status(false));
+
+        mouse_command(&mut a, &mut out, ["on"].into_iter());
+        assert!(a.mouse);
+        assert_eq!(a.transcript.items.last().unwrap().text, mouse_status(true));
+    }
+
+    #[test]
+    fn mouse_command_rejects_unknown_args_without_changing_mode() {
+        let mut a = app();
+        let mut out = Vec::new();
+
+        mouse_command(&mut a, &mut out, ["maybe"].into_iter());
+
+        assert!(a.mouse);
+        assert!(out.is_empty(), "bad args do not write terminal escapes");
+        assert!(matches!(
+            a.transcript.items.last().unwrap().kind,
+            Kind::Error
+        ));
+        assert_eq!(
+            a.transcript.items.last().unwrap().text,
+            "usage: /mouse [on|off] (got maybe)"
         );
     }
 
