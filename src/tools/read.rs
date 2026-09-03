@@ -35,6 +35,9 @@ impl Tool for ReadTool {
             return ToolOutput::error("missing required argument: path");
         };
         let full = resolve_path(ctx, path);
+        if let Some(refusal) = super::approve_read_outside_cwd(ctx, &full).await {
+            return ToolOutput::error(refusal);
+        }
         let text = match std::fs::read_to_string(&full) {
             Ok(t) => t,
             Err(e) => return ToolOutput::error(format!("cannot read {}: {e}", full.display())),

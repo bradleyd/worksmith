@@ -278,8 +278,27 @@ impl Default for ToolRegistry {
 
 /// Resolve a possibly-relative path argument against the tool cwd.
 fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    if let Some(rest) = p.strip_prefix("$HOME/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    if let Some(rest) = p.strip_prefix("${HOME}/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
     let path = PathBuf::from(p);
-    if path.is_absolute() { path } else { ctx.cwd.join(path) }
+    if path.is_absolute() {
+        path
+    } else {
+        ctx.cwd.join(path)
+    }
 }
 
 /// Ask before writing outside the working directory. The user pointed the agent
@@ -303,15 +322,58 @@ pub(crate) async fn ask_approval(
 }
 
 async fn approve_write_outside_cwd(ctx: &ToolContext, full: &Path) -> Option<String> {
+    approve_path_outside_cwd(
+        ctx,
+        full,
+        "writes outside the working directory",
+        "writing",
+        "to",
+    )
+    .await
+}
+
+pub(crate) async fn approve_read_outside_cwd(ctx: &ToolContext, full: &Path) -> Option<String> {
+    approve_path_outside_cwd(
+        ctx,
+        full,
+        "reads outside the working directory",
+        "reading",
+        "from",
+    )
+    .await
+}
+
+pub(crate) async fn approve_command_outside_cwd(
+    ctx: &ToolContext,
+    command: &str,
+) -> Option<String> {
+    let path = policy::command_escape_path(command, &ctx.cwd)?;
+    let reason = "accesses paths outside the working directory";
+    match ask_approval(ctx, command, reason).await {
+        approval::Approval::Once | approval::Approval::AlwaysThisSession => None,
+        approval::Approval::Deny => Some(format!(
+            "the user did not approve accessing paths outside {} ({path}).\n\
+             Do not retry it. Work inside the project directory instead.",
+            ctx.cwd.display()
+        )),
+    }
+}
+
+async fn approve_path_outside_cwd(
+    ctx: &ToolContext,
+    full: &Path,
+    reason: &str,
+    gerund: &str,
+    preposition: &str,
+) -> Option<String> {
     if !policy::path_escapes_cwd(full, &ctx.cwd) {
         return None;
     }
-    let reason = "writes outside the working directory";
     let what = full.display().to_string();
     match ask_approval(ctx, &what, reason).await {
         approval::Approval::Once | approval::Approval::AlwaysThisSession => None,
         approval::Approval::Deny => Some(format!(
-            "the user did not approve writing outside {} (to {what}).\n\
+            "the user did not approve {gerund} outside {} ({preposition} {what}).\n\
              Do not retry it. Work inside the project directory instead.",
             ctx.cwd.display()
         )),

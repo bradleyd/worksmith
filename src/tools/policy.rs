@@ -210,6 +210,91 @@ pub fn path_escapes_cwd(path: &Path, cwd: &Path) -> bool {
     !canon(path).starts_with(&cwd)
 }
 
+/// Return the first shell path argument that leaves `cwd`, if one is visible.
+///
+/// This is still a heuristic, not a sandbox. Its job is to catch the ordinary
+/// ways a model wanders out of the project (`cd ..`, `rg … ~/other`, shell
+/// redirects to `/Users/me/.worksmith/config.toml`) and put them through the
+/// same approval channel as writes.
+pub fn command_escape_path(cmd: &str, cwd: &Path) -> Option<String> {
+    shell_words(cmd).into_iter().find_map(|word| {
+        let (shown, path) = command_path_candidate(&word, cwd)?;
+        path_escapes_cwd(&path, cwd).then_some(shown)
+    })
+}
+
+fn shell_words(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for c in cmd.chars() {
+        if escaped {
+            cur.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+            }
+            None => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+fn command_path_candidate(word: &str, cwd: &Path) -> Option<(String, std::path::PathBuf)> {
+    let mut s = word.trim();
+    if let Some((_, value)) = s.split_once('=')
+        && is_path_like(value)
+    {
+        s = value;
+    }
+    s = s.trim_matches(|c: char| matches!(c, ',' | ':' | '"' | '\''));
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return None;
+    }
+
+    let path = if let Some(rest) = s.strip_prefix("~/") {
+        dirs::home_dir()?.join(rest)
+    } else if let Some(rest) = s.strip_prefix("$HOME/") {
+        dirs::home_dir()?.join(rest)
+    } else if let Some(rest) = s.strip_prefix("${HOME}/") {
+        dirs::home_dir()?.join(rest)
+    } else if s == ".." || s.starts_with("../") || s.starts_with("./") || s.contains("/..") {
+        cwd.join(s)
+    } else if s.starts_with('/') {
+        std::path::PathBuf::from(s)
+    } else {
+        return None;
+    };
+    Some((s.to_string(), path))
+}
+
+fn is_path_like(s: &str) -> bool {
+    s.starts_with('/')
+        || s.starts_with("~/")
+        || s.starts_with("$HOME/")
+        || s.starts_with("${HOME}/")
+        || s == ".."
+        || s.starts_with("../")
+        || s.starts_with("./")
+        || s.contains("/..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +316,44 @@ mod tests {
         assert!(path_escapes_cwd(&tmp.path().join("out.txt"), &cwd));
         assert!(!path_escapes_cwd(&cwd.join("sub/ok.txt"), &cwd), "an ordinary new file is fine");
         assert!(!path_escapes_cwd(&cwd.join("a/../ok.txt"), &cwd), "a `..` that stays inside is fine");
+    }
+
+    #[test]
+    fn shell_paths_outside_the_project_are_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let inside = cwd.join("src/main.rs");
+        let outside = dir.path().join("other/config.toml");
+
+        assert_eq!(
+            command_escape_path("cd .. && rg Cargo", &cwd),
+            Some("..".to_string())
+        );
+        assert_eq!(
+            command_escape_path("sed -i '' s/a/b/ ~/.worksmith/config.toml", &cwd),
+            Some("~/.worksmith/config.toml".to_string())
+        );
+        assert_eq!(
+            command_escape_path(&format!("cat {}", outside.display()), &cwd),
+            Some(outside.display().to_string())
+        );
+        assert_eq!(
+            command_escape_path(
+                &format!("cargo test --manifest-path={}", outside.display()),
+                &cwd,
+            ),
+            Some(outside.display().to_string())
+        );
+        assert_eq!(
+            command_escape_path(&format!("cat {}", inside.display()), &cwd),
+            None
+        );
+        assert_eq!(command_escape_path("grep -rn needle src", &cwd), None);
+        assert_eq!(
+            command_escape_path("curl -s https://example.com/a/b", &cwd),
+            None
+        );
     }
 
     fn asks(cmd: &str) -> bool {

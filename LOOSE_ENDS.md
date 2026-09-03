@@ -320,10 +320,13 @@ checkpoint now skips it; and checkpoint answers now share one TUI helper.
   regardless: it reads as one value until you grep.
 
 - **A task can fail nine checks in a row and nothing notices it is going
-  nowhere.** `pa-reject` on Qwen3.5-4B, three isolated runs: 0/3, taking 327s,
-  900s (timed out) and 436s, burning 9,033 / 24,939 / 13,650 generated tokens.
-  In every run the model read the file, made valid `edit` calls, ran its check,
-  failed, and edited again.
+  nowhere.** *Fixed at the validation-loop boundary — repeated failures are now
+  compared by a normalized failure key, so volatile temp paths and line numbers
+  do not hide "same failure again", while genuinely different failures still
+  count as progress.* `pa-reject` on Qwen3.5-4B, three isolated runs: 0/3,
+  taking 327s, 900s (timed out) and 436s, burning 9,033 / 24,939 / 13,650
+  generated tokens. In every run the model read the file, made valid `edit`
+  calls, ran its check, failed, and edited again.
 
   **It is not a tool-choice problem.** Across those three runs: 32 `edit` calls,
   **zero** `edit` errors, and **zero** `write` calls. The model reaches for the
@@ -333,23 +336,16 @@ checkpoint now skips it; and checkpoint answers now share one TUI helper.
   survive them. Corrected rather than deleted, because the wrong version is in
   the git history.
 
-  What actually happens is a no-progress loop: valid edits, the same check
-  failing the same way, over and over. The harness cannot see it. The supervisor
-  keys its repeat detector on `format!("{name}::{arguments}")`
+  What actually happened was a no-progress loop: valid edits, the same check
+  failing the same way, over and over. The harness could not see it. The
+  supervisor keys its repeat detector on `format!("{name}::{arguments}")`
   (`supervisor.rs:159`), so it only catches literally identical calls — which is
   why what finally stopped two of these runs was noticing the same `bash`
   command five times, several minutes in, rather than the nine failed checks.
-  And `agent.rs:610` already counts consecutive validation failures, but counts
-  *any* failures: three different errors is a model working through a problem,
-  three identical ones is not, and it treats them alike.
-
-  **The fix is small and the plumbing exists.** `Event::Validation { ok, detail }`
-  (`event.rs:61`) is already emitted on every failed check with the check's
-  output as `detail`, and `Supervisor` already has the
-  `HashMap<String, u32>` + threshold + nudge-then-escalate shape. What is missing
-  is a match arm. Normalise the detail first: our own failures carry a temp path
-  and a `line 32` that moves every time the model edits above it, so a raw hash
-  changes precisely when the model is editing, which is when you need it not to.
+  `agent.rs` now keeps the repeat detector where the retry decision already
+  happens: two identical normalized failures ask the user, repeated same-failure
+  directives explicitly forbid summarizing success from a different command, and
+  different failure keys keep retrying normally.
 
   Not needed, having checked: search/replace (that is `edit`, already anchored
   and unique-match), a `write` nudge (never called), or a port from
@@ -415,6 +411,17 @@ checkpoint now skips it; and checkpoint answers now share one TUI helper.
   `RefuseWhenUnattended`. Worth checking which approver `worker.rs` hands out
   before the supervisor grows any policy role, since enforcement lives in the
   tool layer and the supervisor only observes.
+
+- **Read/search/bash could leave the task cwd without asking.** *Fixed — direct
+  `read`, `grep`, `find`, `ls`, and document input paths now share the same
+  outside-cwd approval gate as writes, and the bash tool asks before running
+  commands with visible escaped paths such as `..`, absolute sibling paths,
+  `~/...`, `$HOME/...`, or `--manifest-path=/outside/...`.* Found from live use
+  in `mud-test/`: a Python project failed a stale `cargo test` validation, and
+  the model responded by searching Rust repos and trying to edit
+  `~/.worksmith/config.toml` instead of staying inside the project. This is not
+  a sandbox; it is the ordinary tool-boundary guard. TUI runs ask, unattended
+  runs deny, and `--approve-all` still means exactly what it says.
 
 - **`config check` accepts `--trust-project` and ignores it.** *Fixed —
   `Check::run` now takes the explicit trust flag and applies the project config

@@ -74,6 +74,9 @@ async fn read(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
         return ToolOutput::error("missing required argument: path");
     };
     let full = resolve_path(ctx, path);
+    if let Some(refusal) = super::approve_read_outside_cwd(ctx, &full).await {
+        return ToolOutput::error(refusal);
+    }
     if !full.exists() {
         return ToolOutput::error(format!("no such file: {}", full.display()));
     }
@@ -155,6 +158,9 @@ async fn info(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
         return ToolOutput::error("missing required argument: path");
     };
     let full = resolve_path(ctx, path);
+    if let Some(refusal) = super::approve_read_outside_cwd(ctx, &full).await {
+        return ToolOutput::error(refusal);
+    }
     if !full.exists() {
         return ToolOutput::error(format!("no such file: {}", full.display()));
     }
@@ -181,6 +187,9 @@ async fn convert(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     };
     let full_in = resolve_path(ctx, path);
     let full_out = resolve_path(ctx, out);
+    if let Some(refusal) = super::approve_read_outside_cwd(ctx, &full_in).await {
+        return ToolOutput::error(refusal);
+    }
     // `convert` (and `create`, which is convert with a different name) writes a
     // file at a model-chosen path. Same rule as `write` and `edit`: leaving the
     // project is a different act than editing what you were pointed at.
@@ -248,6 +257,9 @@ async fn extract(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     };
     let full_in = resolve_path(ctx, path);
     let out_dir = resolve_path(ctx, out);
+    if let Some(refusal) = super::approve_read_outside_cwd(ctx, &full_in).await {
+        return ToolOutput::error(refusal);
+    }
     // `extract` writes N files into a directory, so the directory is the thing
     // to ask about.
     if let Some(refusal) = super::approve_write_outside_cwd(ctx, &out_dir).await {

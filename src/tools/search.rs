@@ -84,6 +84,9 @@ impl Tool for GrepTool {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),
         };
+        if let Some(refusal) = super::approve_read_outside_cwd(ctx, &root).await {
+            return ToolOutput::error(refusal);
+        }
 
         let mut files = Vec::new();
         if root.is_file() {
@@ -162,6 +165,9 @@ impl Tool for FindTool {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),
         };
+        if let Some(refusal) = super::approve_read_outside_cwd(ctx, &root).await {
+            return ToolOutput::error(refusal);
+        }
 
         let mut files = Vec::new();
         walk(&root, &mut files, 10_000);
@@ -216,6 +222,9 @@ impl Tool for LsTool {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),
         };
+        if let Some(refusal) = super::approve_read_outside_cwd(ctx, &root).await {
+            return ToolOutput::error(refusal);
+        }
         let entries = match std::fs::read_dir(&root) {
             Ok(e) => e,
             Err(e) => return ToolOutput::error(format!("cannot list {}: {e}", root.display())),

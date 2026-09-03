@@ -152,11 +152,32 @@ async fn writing_outside_the_project_needs_approval() {
     assert!(out.is_error, "should be refused: {}", out.content);
     assert!(!target.exists(), "the file must not have been written");
 
+    let out = reg
+        .run(
+            "write",
+            serde_json::json!({ "path": "~/.worksmith/config.toml", "content": "x" }),
+            &ctx,
+        )
+        .await;
+    assert!(
+        out.is_error,
+        "tilde paths leave the project too: {}",
+        out.content
+    );
+
     // Inside the project, no prompt and no obstruction.
     let out = reg
-        .run("write", serde_json::json!({ "path": "inside.txt", "content": "x" }), &ctx)
+        .run(
+            "write",
+            serde_json::json!({ "path": "inside.txt", "content": "x" }),
+            &ctx,
+        )
         .await;
-    assert!(!out.is_error, "writing inside the project must not prompt: {}", out.content);
+    assert!(
+        !out.is_error,
+        "writing inside the project must not prompt: {}",
+        out.content
+    );
     assert!(dir.path().join("inside.txt").exists());
 }
 
@@ -208,4 +229,112 @@ async fn doc_writes_outside_the_project_need_approval() {
         )
         .await;
     assert!(out.is_error, "should be refused: {}", out.content);
+}
+
+#[tokio::test]
+async fn reading_and_searching_outside_the_project_need_approval() {
+    use std::sync::Arc;
+    use worksmith::tools::approval::RefuseWhenUnattended;
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("secret.txt");
+    std::fs::write(&outside_file, "needle\n").unwrap();
+    std::fs::write(dir.path().join("inside.txt"), "needle\n").unwrap();
+
+    let reg = ToolRegistry::with_builtins();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        approver: Arc::new(RefuseWhenUnattended),
+        ..Default::default()
+    };
+
+    for (tool, args) in [
+        (
+            "read",
+            serde_json::json!({ "path": outside_file.display().to_string() }),
+        ),
+        (
+            "grep",
+            serde_json::json!({ "pattern": "needle", "path": outside.path().display().to_string() }),
+        ),
+        (
+            "find",
+            serde_json::json!({ "name": "secret", "path": outside.path().display().to_string() }),
+        ),
+        (
+            "ls",
+            serde_json::json!({ "path": outside.path().display().to_string() }),
+        ),
+    ] {
+        let out = reg.run(tool, args, &ctx).await;
+        assert!(out.is_error, "{tool} should be refused: {}", out.content);
+        assert!(
+            out.content.contains("did not approve"),
+            "{tool}: {}",
+            out.content
+        );
+    }
+
+    let out = reg
+        .run("read", serde_json::json!({ "path": "inside.txt" }), &ctx)
+        .await;
+    assert!(
+        !out.is_error,
+        "inside reads must still work: {}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn bash_paths_outside_the_project_need_approval() {
+    use std::sync::Arc;
+    use worksmith::tools::approval::RefuseWhenUnattended;
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("escaped.txt");
+
+    let reg = ToolRegistry::with_builtins();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        approver: Arc::new(RefuseWhenUnattended),
+        ..Default::default()
+    };
+
+    let out = reg
+        .run(
+            "bash",
+            serde_json::json!({ "command": format!("echo x > {}", target.display()) }),
+            &ctx,
+        )
+        .await;
+    assert!(
+        out.is_error,
+        "outside shell path should be refused: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("did not approve"),
+        "says why: {}",
+        out.content
+    );
+    assert!(!target.exists(), "the shell command must not have run");
+
+    let out = reg
+        .run(
+            "bash",
+            serde_json::json!({ "command": "echo ok > inside.txt" }),
+            &ctx,
+        )
+        .await;
+    assert!(
+        !out.is_error,
+        "inside shell writes must still work: {}",
+        out.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("inside.txt")).unwrap(),
+        "ok\n"
+    );
 }

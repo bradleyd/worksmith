@@ -543,9 +543,12 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
         session.append_message(Message::user(user_input))?;
-        self.emit(session, Event::UserMessage {
-            text: user_input.to_string(),
-        });
+        self.emit(
+            session,
+            Event::UserMessage {
+                text: user_input.to_string(),
+            },
+        );
         // Checkpoints are budgeted per turn, so the budget refills here. A
         // running total would let one long turn spend the whole session's.
         self.tool_ctx
@@ -554,7 +557,7 @@ impl Agent {
 
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;
-        let mut failures = 0usize;
+        let mut validation_failures = ValidationFailureTracker::default();
         // Whether the turn has actually changed anything. Fifty steps and no
         // edits is the harness knowing the loop is not working, with nothing
         // to judge — the sharpest mechanical signal of the three.
@@ -574,7 +577,14 @@ impl Agent {
 
         let outcome = loop {
             let idle = self
-                .run_until_idle(session, system_prompt, &mut final_text, &cancel, &active, &edits)
+                .run_until_idle(
+                    session,
+                    system_prompt,
+                    &mut final_text,
+                    &cancel,
+                    &active,
+                    &edits,
+                )
                 .await?;
 
             match idle {
@@ -679,31 +689,38 @@ impl Agent {
 
                     match v.validate().await {
                         Ok(()) => {
-                            self.emit(session, Event::Validation {
-                                ok: true,
-                                detail: v.describe(),
-                            });
+                            self.emit(
+                                session,
+                                Event::Validation {
+                                    ok: true,
+                                    detail: v.describe(),
+                                },
+                            );
                             break TurnOutcome::Done;
                         }
                         Err(reason) => {
-                            self.emit(session, Event::Validation {
-                                ok: false,
-                                detail: reason.clone(),
-                            });
+                            self.emit(
+                                session,
+                                Event::Validation {
+                                    ok: false,
+                                    detail: reason.clone(),
+                                },
+                            );
                             if retries_left == 0 {
                                 break TurnOutcome::ValidationFailed(reason);
                             }
                             retries_left -= 1;
-                            failures += 1;
+                            let same_failure_count = validation_failures.record(&reason);
                             // One failure is the loop working — that is the
-                            // whole differentiator. Two in a row is the loop
-                            // not converging, and a second identical re-plan
-                            // directive is unlikely to be the thing that turns
-                            // it around. Ask once, here, and only here.
-                            let steer = if failures == 2 {
+                            // whole differentiator. Two different failures can
+                            // still be progress. The same failure twice means
+                            // the re-plan did not move the check at all, and a
+                            // second identical directive is unlikely to be what
+                            // turns it around. Ask once, here, and only here.
+                            let steer = if same_failure_count == 2 {
                                 self.harness_checkpoint(
                                     session,
-                                    &format!("`{}` has failed twice", v.describe()),
+                                    &format!("`{}` has failed twice the same way", v.describe()),
                                     &format!(
                                         "The check keeps failing:\n\n{}\n\nRe-planning has not \
                                          moved it. What should it do differently? (Enter to \
@@ -716,25 +733,52 @@ impl Agent {
                                 None
                             };
                             let directive = match steer {
-                                Some(a) => format!(
-                                    "The validation check {} did not pass:\n\n{}\n\nThe user \
-                                     was asked what to do differently and said:\n\n{}\n\nFollow \
-                                     that.",
-                                    v.describe(),
-                                    reason,
-                                    a
-                                ),
-                                None => format!(
-                                    "The validation check {} did not pass:\n\n{}\n\nRevise your \
-                                     approach and fix the underlying problem, then finish.",
-                                    v.describe(),
-                                    reason
-                                ),
+                                Some(a) => {
+                                    format!(
+                                        "The validation check {} failed twice with the same \
+                                         normalized failure:\n\n{}\n\nThe user was asked what \
+                                         to do differently and said:\n\n{}\n\nFollow that. Do \
+                                         not summarize success from a different command; make \
+                                         this required check pass.",
+                                        v.describe(),
+                                        reason,
+                                        a
+                                    )
+                                }
+                                None if same_failure_count > 1 => {
+                                    format!(
+                                        "The validation check {} failed again with the same \
+                                         normalized failure ({} times):\n\n{}\n\nDo not \
+                                         summarize success from a different command. Inspect why \
+                                         this required check is still failing, fix the underlying \
+                                         problem, then make this required check pass.",
+                                        v.describe(),
+                                        same_failure_count,
+                                        reason
+                                    )
+                                }
+                                None => {
+                                    format!(
+                                        "The validation check {} did not pass:\n\n{}\n\nRevise \
+                                         your approach and fix the underlying problem, then \
+                                         finish.",
+                                        v.describe(),
+                                        reason
+                                    )
+                                }
                             };
                             self.emit(session, Event::Nudge {
-                                reason: format!(
-                                    "validation failed; re-planning ({retries_left} retries left)"
-                                ),
+                                reason: if same_failure_count > 1 {
+                                    format!(
+                                        "validation failed the same way; re-planning \
+                                         ({retries_left} retries left)"
+                                    )
+                                } else {
+                                    format!(
+                                        "validation failed; re-planning ({retries_left} retries \
+                                         left)"
+                                    )
+                                },
                             });
                             session.append_message(Message::user(directive))?;
                         }
@@ -1577,6 +1621,98 @@ fn truncate_reason(r: &str) -> String {
     format!("{head}\n[…]")
 }
 
+#[derive(Default)]
+struct ValidationFailureTracker {
+    last_key: Option<String>,
+    same_count: usize,
+}
+
+impl ValidationFailureTracker {
+    fn record(&mut self, reason: &str) -> usize {
+        let key = validation_failure_key(reason);
+        if self.last_key.as_deref() == Some(key.as_str()) {
+            self.same_count += 1;
+        } else {
+            self.last_key = Some(key);
+            self.same_count = 1;
+        }
+        self.same_count
+    }
+}
+
+/// Compare validation failures by their useful shape, not by volatile trivia.
+/// Compiler and shell output often includes temp paths, line numbers, and
+/// timing. Those are exactly the fields that change while the model edits near
+/// the bug, so they make "same failure again" invisible if compared raw.
+fn validation_failure_key(reason: &str) -> String {
+    let mut key = String::new();
+    for line in reason
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let normalized = normalize_validation_line(line);
+        if normalized.starts_with("finished ") && normalized.contains(" in ") {
+            continue;
+        }
+        if !key.is_empty() {
+            key.push('\n');
+        }
+        key.push_str(&normalized);
+    }
+    if key.is_empty() {
+        "<empty>".to_string()
+    } else {
+        key
+    }
+}
+
+fn normalize_validation_line(line: &str) -> String {
+    let chars: Vec<char> = line.to_ascii_lowercase().chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    let mut space = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            space = !out.is_empty();
+            i += 1;
+            continue;
+        }
+        if space {
+            out.push(' ');
+            space = false;
+        }
+        if c == '/' {
+            out.push_str("<path>");
+            i += 1;
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            continue;
+        }
+        if c == ':' && chars.get(i + 1).is_some_and(|next| next.is_ascii_digit()) {
+            out.push_str(":<n>");
+            i += 2;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            continue;
+        }
+        if c.is_ascii_digit() && (out.ends_with("line ") || out.ends_with("line:")) {
+            out.push_str("<n>");
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out.trim().to_string()
+}
+
 fn compaction_trigger(context_limit: usize) -> usize {
     context_limit * 3 / 4
 }
@@ -2091,7 +2227,29 @@ mod checkpoint_tests {
         }
     }
 
-    type AgentTestResult = (Agent, Arc<Mutex<Vec<(String, String)>>>, Session, tempfile::TempDir);
+    struct FailsInOrder(Mutex<Vec<&'static str>>);
+
+    #[async_trait]
+    impl Validator for FailsInOrder {
+        async fn validate(&self) -> Result<(), String> {
+            let mut failures = self.0.lock().unwrap();
+            if failures.len() > 1 {
+                Err(failures.remove(0).to_string())
+            } else {
+                Err(failures[0].to_string())
+            }
+        }
+        fn describe(&self) -> String {
+            "check".to_string()
+        }
+    }
+
+    type AgentTestResult = (
+        Agent,
+        Arc<Mutex<Vec<(String, String)>>>,
+        Session,
+        tempfile::TempDir,
+    );
 
     fn agent_with(
         replies: Vec<crate::llm::Completion>,
@@ -2106,8 +2264,7 @@ mod checkpoint_tests {
             asker,
             ..Default::default()
         };
-        let session =
-            Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+        let session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
         let agent = Agent::new(
             Arc::new(ScriptedClient::new(replies)),
             Arc::new(ToolRegistry::new()),
@@ -2139,14 +2296,103 @@ mod checkpoint_tests {
         );
         let v = AlwaysFails("AssertionError: nope");
         let _ = agent
-            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
         let asked = asked.lock().unwrap();
-        assert_eq!(asked.len(), 1, "exactly once, not once per retry: {asked:?}");
+        assert_eq!(
+            asked.len(),
+            1,
+            "exactly once, not once per retry: {asked:?}"
+        );
         assert!(asked[0].0.contains("failed twice"), "{:?}", asked[0].0);
-        assert!(asked[0].1.contains("AssertionError: nope"), "the question carries the failure");
+        assert!(
+            asked[0].1.contains("AssertionError: nope"),
+            "the question carries the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_failing_differently_does_not_ask_the_user() {
+        let (agent, asked, mut session, _d) =
+            agent_with(vec![ScriptedClient::done("finished")], vec![], 50);
+        let v = FailsInOrder(Mutex::new(vec![
+            "exit code 1\nassertion failed: wrote bad",
+            "exit code 1\nassertion failed: file missing",
+            "exit code 1\nassertion failed: wrong permissions",
+        ]));
+        let out = agent
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "different failures are still progress"
+        );
+        assert!(
+            matches!(out.outcome, TurnOutcome::ValidationFailed(_)),
+            "the retry budget still bounds the turn: {:?}",
+            out.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_failing_with_only_volatile_changes_counts_as_the_same_failure() {
+        let (agent, asked, mut session, _d) =
+            agent_with(vec![ScriptedClient::done("finished")], vec![], 50);
+        let v = FailsInOrder(Mutex::new(vec![
+            "exit code 1\n/tmp/a/test.rs:12:9: assertion failed: value was false\nline 44",
+            "exit code 1\n/private/tmp/b/test.rs:88:2: assertion failed: value was false\nline 91",
+            "exit code 1\n/private/tmp/c/test.rs:90:2: assertion failed: value was false\nline 92",
+        ]));
+        let _ = agent
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let asked = asked.lock().unwrap();
+        assert_eq!(
+            asked.len(),
+            1,
+            "volatile paths and line numbers should not hide a repeat"
+        );
+        assert!(asked[0].0.contains("same way"), "{:?}", asked[0].0);
+    }
+
+    #[test]
+    fn validation_failure_keys_ignore_paths_and_line_numbers() {
+        let first = validation_failure_key(
+            "exit code 1\n/tmp/a/test.rs:12:9: assertion failed: value was false\nline 44",
+        );
+        let second = validation_failure_key(
+            "exit code 1\n/private/tmp/b/test.rs:88:2: assertion failed: value was false\nline 91",
+        );
+        let different = validation_failure_key(
+            "exit code 1\n/private/tmp/b/test.rs:88:2: assertion failed: value was true\nline 91",
+        );
+
+        assert_eq!(first, second);
+        assert_ne!(first, different);
     }
 
     /// A rescued tool call is recorded, not just displayed.

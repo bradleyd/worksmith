@@ -10,17 +10,24 @@ re-deriving it.
 The TUI command-arm refactor stopped after `/trust`. The latest clean commit
 before this note was `618eb9e Extract trust command handling`.
 
-The current local slice fixes `config check --trust-project`: the CLI now passes
-the explicit trust flag into `Check::run`, and `Check::load` applies the project
-config for that report when the flag is set. A regression test covers the
-untrusted report omitting project writers and the trusted report including them.
+The current local work contains two related reliability/safety slices:
+
+- repeated identical validation failures: the agent now compares validation
+  failures by a normalized key, so temp paths and moving line numbers do not
+  hide that the same check is failing the same way. Different failure keys still
+  retry normally, because they can be progress.
+- cwd-boundary approval: direct read/search/document inputs now ask before
+  leaving the task cwd, and bash asks before running commands with visible
+  escaped paths such as `..`, `~/...`, `$HOME/...`, absolute sibling paths, or
+  `--manifest-path=/outside/...`.
 
 Checks for this slice were:
 
-- `cargo test trust_project_applies_the_project_config_for_this_check --lib`
-- `cargo test check::tests --lib`
+- `cargo test checkpoint_tests --lib`
+- `cargo test --test safety`
+- `cargo test tools::policy::tests --lib`
 - `git diff --check`
-- targeted rustfmt review of the touched `src/check.rs` and `src/main.rs` hunks
+- targeted rustfmt review of the touched Rust hunks
 - `cargo check`
 - `cargo clippy --all-targets`
 - `cargo test`
@@ -31,13 +38,14 @@ also noisy because it follows `mod` children and reports older formatting in the
 split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 `git diff --check`, compile, clippy, and tests as the gates.
 
-Manual testing for this slice: in a temp project with `.worksmith/config.toml`,
-compare `worksmith config check` against `worksmith --trust-project config
-check`. Confirm the first reports the project file as not trusted and omits its
-writers, while the second reports it trusted and includes project-sourced keys.
-This smoke is still pending because the sandbox for this task blocked
-`cargo build`/`cargo run`; the Rust regression test covers the same behavior at
-the `Check::run` boundary.
+Manual testing for this slice: run a task with a deliberately failing
+validation check, then make the model repeat the same failure twice. Confirm the
+checkpoint subject says the check failed the same way, and that the injected
+directive says not to summarize success from a different command.
+
+Also test from a small temp project: `read`/`grep`/`ls` or `bash` against
+`~/.worksmith/config.toml` should ask in the TUI and be denied in unattended
+mode unless `--approve-all` is set.
 
 ## 1. Stop and reassess command handling.
 
@@ -54,15 +62,9 @@ dispatch work below.
 
 ## 2. Next non-command bug candidates.
 
-The best next loose end is probably repeated identical validation failures:
-`Event::Validation { ok, detail }` already carries failed check output, and the
-supervisor already has repeat-counting machinery. The missing piece is a
-normalized failure key so three equivalent failures nudge/escalate differently
-from three distinct failures.
-
-After that, consider session visibility/store cleanup: test/eval junk is filling
-the real sessions directory, and the TUI still does not make the current session
-id visible enough for resume workflows.
+Next, consider session visibility/store cleanup: test/eval junk is filling the
+real sessions directory, and the TUI still does not make the current session id
+visible enough for resume workflows.
 
 ## 3. Then revisit run-loop event dispatch.
 

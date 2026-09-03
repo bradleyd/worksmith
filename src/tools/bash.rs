@@ -77,6 +77,10 @@ impl Tool for BashTool {
             }
         }
 
+        if let Some(refusal) = super::approve_command_outside_cwd(ctx, command).await {
+            return ToolOutput::error(refusal);
+        }
+
         let timeout = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
