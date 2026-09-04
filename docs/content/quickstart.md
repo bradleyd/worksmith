@@ -76,6 +76,13 @@ Copy the example to `config.toml` and set two things: `model`, and the
 cp ~/.worksmith/config.example.toml ~/.worksmith/config.toml
 ```
 
+`--model` overrides the configured model, but it does not create a provider.
+For example, `--model openrouter/qwen/qwen3.5-9b` still needs
+`[providers.openrouter]` in the active config. This matters when you set
+`WORKSMITH_HOME` for a throwaway run: that relocated home has its own config,
+sessions, and global memory, so copy a known-good `config.toml` into it or fill
+in the generated example there.
+
 The whole file you need to start looks like this. One model, one provider:
 
 ```toml

@@ -174,7 +174,8 @@ cd worksmith
 ```sh
 # First run creates ~/.worksmith and leaves an annotated config.example.toml
 # there. Copy it to config.toml, then set `model` and its [providers.*] section.
-# If it starts unconfigured, worksmith prints both paths.
+# If it starts unconfigured, worksmith prints both paths. Passing --model still
+# needs the provider section, because the model prefix names which provider to use.
 worksmith                                  # full-screen TUI
 
 # The point of the thing. Work until a check passes.
@@ -502,6 +503,10 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
   `WORKSMITH_HOME` relocates the whole global directory (config, sessions,
   global memory), which is useful for throwaway runs and used by the test suite.
+  A relocated home starts with no providers configured: either copy a known-good
+  `config.toml` into it or create the provider section from
+  `config.example.toml`. `--model openrouter/...` selects the provider named
+  `openrouter`; it does not create that provider.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /
   `CLAUDE.md` discovery.
 - **Memory** (global + project SQLite, supersede semantics): FTS5 search ranked
@@ -509,7 +514,9 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   The agent reaches it through the `memory` tool (`search` / `remember`), with
   write-time dedup so restatements don't grow the store. Workers *propose*
   rather than write, and `/memory pending` and `/memory approve <id|all>` review
-  them. Ids accept any unique prefix (git-style) and Tab completes them.
+  them. If a proposal corrects an existing memory, `/memory supersede <new> <old>`
+  accepts the proposal and marks the old row superseded instead of keeping both
+  active. Ids accept any unique prefix (git-style) and Tab completes them.
   `/memory extract` distills the current session into at most a few candidates
   using a classifier biased toward saving nothing.
 - **Memory mining** (`/memory mine [n]`): reads *past* sessions of the current
@@ -572,7 +579,7 @@ The line REPL has the same commands as the TUI:
 /compact                  summarize the session now
 /memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
 /memory search <query> | /memory extract | /memory mine [n]
-/memory pending | /memory approve <id|all>
+/memory pending | /memory approve <id|all> | /memory supersede <new> <old>
 /mouse [on|off]           wheel scrolling vs. selecting text to copy
 /knowledge [index|search <query>|status]
 /spawn [-n N | --each-files <regex>] <task>
