@@ -1659,6 +1659,7 @@ MEMORY
   /memory mine [n]                    mine past sessions of this project
   /memory pending                     review proposals
   /memory approve <id|all>            accept one, or all of them
+  /memory supersede <new> <old>       accept a correction
   /memory forget <id>                 delete one
   /memory show <id>                   show one in full
   /memory add <scope> <kind> <subject> <content...>
@@ -2313,13 +2314,14 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                 app.pending_mine = Some(limit);
             }
         }
-        "pending" | "proposed" => match mem.pending() {
+        "pending" | "proposed" => match mem.pending_review() {
             Ok(rows) if rows.is_empty() => {
                 app.push(Kind::Notice, "(nothing pending)".to_string())
             }
             Ok(rows) => {
                 let n = rows.len();
-                for r in rows {
+                for review in rows {
+                    let r = &review.proposal;
                     app.push(
                         Kind::Notice,
                         format!(
@@ -2327,6 +2329,24 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                             short_id(&r.id), r.scope, r.kind, r.subject, r.content
                         ),
                     );
+                    for old in &review.existing {
+                        app.push(
+                            Kind::Notice,
+                            format!(
+                                "  replaces? {}: {}",
+                                short_id(&old.id),
+                                old.content
+                            ),
+                        );
+                        app.push(
+                            Kind::Notice,
+                            format!(
+                                "  /memory supersede {} {}",
+                                short_id(&r.id),
+                                short_id(&old.id)
+                            ),
+                        );
+                    }
                 }
                 // One hint for the batch. Repeating two full uuids per row made
                 // the list unreadable and still left the id to be retyped.
@@ -2334,7 +2354,8 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                     Kind::Notice,
                     format!(
                         "{n} pending — /memory approve <id> (Tab completes) · \
-                         /memory approve all · /memory forget <id>"
+                         /memory approve all · /memory supersede <new> <old> · \
+                         /memory forget <id>"
                     ),
                 );
             }
@@ -2372,6 +2393,43 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
             }
             None => app.push(Kind::Notice, "usage: /memory approve <id|all>".to_string()),
         },
+        "supersede" | "replace" => {
+            let Some(proposal) = parts.next() else {
+                app.push(
+                    Kind::Notice,
+                    "usage: /memory supersede <proposal-id> <active-id>".to_string(),
+                );
+                return;
+            };
+            let Some(existing) = parts.next() else {
+                app.push(
+                    Kind::Notice,
+                    "usage: /memory supersede <proposal-id> <active-id>".to_string(),
+                );
+                return;
+            };
+            let Some(proposal) = resolve_memory_id(app, mem, proposal) else {
+                return;
+            };
+            let Some(existing) = resolve_memory_id(app, mem, existing) else {
+                return;
+            };
+            match mem.approve_superseding(&proposal, &existing) {
+                Ok(true) => app.push(
+                    Kind::Notice,
+                    format!(
+                        "approved {} as superseding {}",
+                        short_id(&proposal),
+                        short_id(&existing)
+                    ),
+                ),
+                Ok(false) => app.push(
+                    Kind::Notice,
+                    format!("(no pending proposal {})", short_id(&proposal)),
+                ),
+                Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
+            }
+        }
         "add" => {
             let scope = parts.next().and_then(Scope::parse);
             let kind = parts.next().map(str::to_string);
@@ -2401,6 +2459,7 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
   /memory mine [n]                    mine past sessions of this project
   /memory pending                     review proposals
   /memory approve <id|all>            accept one, or all of them
+  /memory supersede <new> <old>       accept a correction
   /memory forget <id>                 delete one
   /memory show <id>                   show one in full
   /memory add <scope> <kind> <subject> <content...>
@@ -5236,18 +5295,127 @@ mod tests {
         assert_eq!(c, vec!["kill ".to_string()]);
 
         // /memory subcommands, then add's scope + kind
-        let (_, c) = compute_completions("/memory ", Path::new("."), &probe_store(), &Config::default()).unwrap();
-        assert!(c.contains(&"forget ".to_string()) && c.contains(&"add ".to_string()), "{c:?}");
-        let (_, c) = compute_completions("/memory add ", Path::new("."), &probe_store(), &Config::default()).unwrap();
+        let (_, c) = compute_completions(
+            "/memory ",
+            Path::new("."),
+            &probe_store(),
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(
+            c.contains(&"forget ".to_string())
+                && c.contains(&"supersede ".to_string())
+                && c.contains(&"add ".to_string()),
+            "{c:?}"
+        );
+        let (_, c) = compute_completions(
+            "/memory add ",
+            Path::new("."),
+            &probe_store(),
+            &Config::default(),
+        )
+        .unwrap();
         assert_eq!(c, vec!["global ".to_string(), "project ".to_string()]);
-        let (_, c) = compute_completions("/memory add project ", Path::new("."), &probe_store(), &Config::default()).unwrap();
-        assert!(c.contains(&"decision ".to_string()) && c.contains(&"lesson ".to_string()), "{c:?}");
+        let (_, c) = compute_completions(
+            "/memory add project ",
+            Path::new("."),
+            &probe_store(),
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(
+            c.contains(&"decision ".to_string()) && c.contains(&"lesson ".to_string()),
+            "{c:?}"
+        );
 
         // /help has one subcommand: footer.
         let (_, c) = compute_completions("/help ", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(c, vec!["footer ".to_string()]);
         let (_, c) = compute_completions("/help f", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(c, vec!["footer ".to_string()]);
+    }
+
+    #[test]
+    fn memory_pending_shows_supersede_hint_for_matching_active_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = crate::memory::MemoryStore::open(Some(dir.path())).unwrap();
+        let active = mem
+            .remember(
+                Scope::Project,
+                "decision",
+                "docs.location",
+                "Docs are generated by a Python script.",
+                70,
+            )
+            .unwrap();
+        let (proposal, _) = mem
+            .propose(
+                Scope::Project,
+                "decision",
+                "docs.location",
+                "Docs are built with Zola.",
+                80,
+            )
+            .unwrap();
+        let mut a = app();
+
+        memory_command(&mut a, &mem, ["pending"].into_iter());
+
+        let text = a
+            .transcript
+            .items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(short_id(&proposal.id)), "{text}");
+        assert!(text.contains("replaces?"), "{text}");
+        assert!(text.contains(short_id(&active.id)), "{text}");
+        assert!(text.contains("/memory supersede"), "{text}");
+    }
+
+    #[test]
+    fn memory_supersede_approves_the_proposal_and_marks_the_old_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = crate::memory::MemoryStore::open(Some(dir.path())).unwrap();
+        let active = mem
+            .remember(
+                Scope::Project,
+                "decision",
+                "docs.location",
+                "Docs are generated by a Python script.",
+                70,
+            )
+            .unwrap();
+        let (proposal, _) = mem
+            .propose(
+                Scope::Project,
+                "decision",
+                "docs.location",
+                "Docs are built with Zola.",
+                80,
+            )
+            .unwrap();
+        let mut a = app();
+
+        memory_command(
+            &mut a,
+            &mem,
+            ["supersede", short_id(&proposal.id), short_id(&active.id)].into_iter(),
+        );
+
+        let old = mem.get(&active.id).unwrap().unwrap();
+        let new = mem.get(&proposal.id).unwrap().unwrap();
+        assert_eq!(old.status, "superseded");
+        assert_eq!(new.status, "active");
+        assert_eq!(new.supersedes_id.as_deref(), Some(active.id.as_str()));
+        assert!(
+            a.transcript
+                .items
+                .iter()
+                .any(|item| item.text.contains("approved")),
+            "approval should be visible"
+        );
     }
 
     #[test]

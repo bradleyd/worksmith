@@ -171,6 +171,13 @@ pub struct MemoryContext {
     pub ids: Vec<String>,
 }
 
+/// A proposed memory plus active rows it may replace.
+#[derive(Debug, Clone)]
+pub struct ProposalReview {
+    pub proposal: MemoryRow,
+    pub existing: Vec<MemoryRow>,
+}
+
 /// Collapse whitespace/case so near-identical writes compare equal (§20).
 fn normalize(s: &str) -> String {
     s.split_whitespace()
@@ -583,6 +590,21 @@ impl MemoryStore {
         Ok(rows)
     }
 
+    /// Proposals with exact same-scope/kind/subject active rows called out.
+    pub fn pending_review(&self) -> Result<Vec<ProposalReview>> {
+        self.pending()?
+            .into_iter()
+            .map(|proposal| {
+                let scope = Scope::parse(&proposal.scope)
+                    .with_context(|| format!("invalid memory scope `{}`", proposal.scope))?;
+                let conn = self.conn(scope)?;
+                let existing =
+                    query_same_subject_kind(conn, &proposal.subject, &proposal.kind, "active")?;
+                Ok(ProposalReview { proposal, existing })
+            })
+            .collect()
+    }
+
     /// Approve (`active`) or reject (delete) a proposal. False if no such id.
     pub fn approve(&self, id: &str) -> Result<bool> {
         for conn in self.conns() {
@@ -594,6 +616,63 @@ impl MemoryStore {
             if n > 0 {
                 return Ok(true);
             }
+        }
+        Ok(false)
+    }
+
+    /// Approve a proposal and mark the active memory it corrects as superseded.
+    pub fn approve_superseding(&self, proposal_id: &str, old_id: &str) -> Result<bool> {
+        for conn in self.conns() {
+            let Some(proposal) = query_one(conn, proposal_id)? else {
+                continue;
+            };
+            if proposal.status != "proposed" {
+                bail!(
+                    "{} is {}, not proposed",
+                    short_id(proposal_id),
+                    proposal.status
+                );
+            }
+            let old = query_one(conn, old_id)?.with_context(|| {
+                format!("no active memory {} in the same scope", short_id(old_id))
+            })?;
+            if old.status != "active" {
+                bail!("{} is {}, not active", short_id(old_id), old.status);
+            }
+            if old.scope != proposal.scope
+                || old.kind != proposal.kind
+                || old.subject != proposal.subject
+            {
+                bail!(
+                    "supersede requires the same scope, kind, and subject; proposal is [{}/{}] {}, existing is [{}/{}] {}",
+                    proposal.scope,
+                    proposal.kind,
+                    proposal.subject,
+                    old.scope,
+                    old.kind,
+                    old.subject
+                );
+            }
+
+            let ts = now();
+            conn.execute("BEGIN IMMEDIATE", [])?;
+            let result = (|| -> Result<()> {
+                conn.execute(
+                    "UPDATE memories SET status = 'superseded', updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![ts, old_id],
+                )?;
+                conn.execute(
+                    "UPDATE memories SET status = 'active', supersedes_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![old_id, ts, proposal_id],
+                )?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                conn.execute("ROLLBACK", []).ok();
+                return Err(e);
+            }
+            conn.execute("COMMIT", [])?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -903,6 +982,22 @@ fn query_by_subject(conn: &Connection, subject: &str) -> Result<Vec<MemoryRow>> 
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([subject], row_from)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn query_same_subject_kind(
+    conn: &Connection,
+    subject: &str,
+    kind: &str,
+    status: &str,
+) -> Result<Vec<MemoryRow>> {
+    let sql = format!(
+        "SELECT {COLS} FROM memories \
+         WHERE subject = ?1 AND kind = ?2 AND status = ?3 \
+         ORDER BY importance DESC, updated_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params![subject, kind, status], row_from)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
