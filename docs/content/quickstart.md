@@ -70,7 +70,10 @@ paths — the directory and the example — so you know where to look.
 ```
 
 Copy the example to `config.toml` and set two things: `model`, and the
-`[providers.<name>]` section that serves it.
+`[providers.<name>]` section that serves it. For a hosted first run, there is
+one shortcut: `--model openrouter/...` and `--model openai/...` use built-in
+provider defaults, so an empty `WORKSMITH_HOME` is enough when the matching API
+key env var is exported.
 
 ```sh
 cp ~/.worksmith/config.example.toml ~/.worksmith/config.toml
