@@ -916,6 +916,7 @@ async fn handle_command(
                  /memory extract          distill this session into memories\n  \
                  /memory mine [n]         mine past sessions of this project\n  \
                  /memory pending | /memory approve <id>   review proposals\n  \
+                 /memory supersede <new> <old>  accept a correction\n  \
                  /knowledge [index|search <query>|status]  the project's own text\n  \
                  /skill [name]            list skills, or load one\n  \
                  /spawn [-n N | --each-files <regex>] <task>   background worker(s)\n  \
@@ -1281,14 +1282,19 @@ async fn handle_memory<'a>(
                 Err(e) => eprintln!("memory error: {e}"),
             }
         }
-        "pending" | "proposed" => match mem.pending() {
+        "pending" | "proposed" => match mem.pending_review() {
             Ok(rows) if rows.is_empty() => println!("(no proposals from workers)"),
             Ok(rows) => {
-                for r in rows {
+                for review in rows {
+                    let r = &review.proposal;
                     println!(
                         "{}  [{}/{}] {}: {}  (/memory approve {} | /memory forget {})",
                         r.id, r.scope, r.kind, r.subject, r.content, r.id, r.id
                     );
+                    for old in &review.existing {
+                        println!("    replaces? {}  {}", old.id, old.content);
+                        println!("    /memory supersede {} {}", r.id, old.id);
+                    }
                 }
             }
             Err(e) => eprintln!("memory error: {e}"),
@@ -1317,6 +1323,34 @@ async fn handle_memory<'a>(
             }
             None => println!("usage: /memory approve <id|all>"),
         },
+        "supersede" | "replace" => {
+            let Some(proposal) = parts.next() else {
+                println!("usage: /memory supersede <proposal-id> <active-id>");
+                return;
+            };
+            let Some(existing) = parts.next() else {
+                println!("usage: /memory supersede <proposal-id> <active-id>");
+                return;
+            };
+            let Some(proposal) = resolve_memory_id(mem, proposal) else {
+                return;
+            };
+            let Some(existing) = resolve_memory_id(mem, existing) else {
+                return;
+            };
+            match mem.approve_superseding(&proposal, &existing) {
+                Ok(true) => println!(
+                    "approved {} as superseding {}",
+                    worksmith::memory::short_id(&proposal),
+                    worksmith::memory::short_id(&existing)
+                ),
+                Ok(false) => println!(
+                    "(no pending proposal {})",
+                    worksmith::memory::short_id(&proposal)
+                ),
+                Err(e) => eprintln!("memory error: {e}"),
+            }
+        }
         "extract" | "distill" => {
             let transcript = render_recent(session, 40);
             if transcript.trim().is_empty() {

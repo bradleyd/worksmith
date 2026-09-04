@@ -359,8 +359,20 @@ fn arg_completions(
         "validate" if prev == 1 => &["off"],
         "memory" | "mem" => match prev {
             1 => &[
-                "list", "global", "project", "search", "show", "pending", "approve",
-                "extract", "mine", "forget", "add", "help",
+                "list",
+                "global",
+                "project",
+                "search",
+                "show",
+                "pending",
+                "approve",
+                "supersede",
+                "replace",
+                "extract",
+                "mine",
+                "forget",
+                "add",
+                "help",
             ],
             // Ids are UUIDs. Completing them is the difference between the
             // review loop being usable and the user retyping 36 characters from
@@ -373,6 +385,12 @@ fn arg_completions(
                 return Some(out);
             }
             2 if matches!(tokens.get(1), Some(&"forget") | Some(&"show")) => {
+                return Some(memory_id_candidates(mem, token, false));
+            }
+            2 if matches!(tokens.get(1), Some(&"supersede") | Some(&"replace")) => {
+                return Some(memory_id_candidates(mem, token, true));
+            }
+            3 if matches!(tokens.get(1), Some(&"supersede") | Some(&"replace")) => {
                 return Some(memory_id_candidates(mem, token, false));
             }
             2 if tokens.get(1) == Some(&"add") => &["global", "project"],
