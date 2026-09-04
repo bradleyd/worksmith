@@ -585,6 +585,23 @@ struct RecordingClient {
     prompt_tokens: u32,
 }
 
+struct MessageRecordingClient {
+    seen: Arc<Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait]
+impl LlmClient for MessageRecordingClient {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+        _sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        self.seen.lock().unwrap().push(req.messages);
+        Ok(done("ok"))
+    }
+}
+
 #[async_trait]
 impl LlmClient for RecordingClient {
     async fn stream(
@@ -630,6 +647,59 @@ async fn helper_calls_never_inherit_the_session_thinking_budget() {
         seen.lock().unwrap().first().map(|(t, _)| *t),
         Some(Some(worksmith::llm::Thinking::Off)),
         "helper calls are format-following, not reasoning"
+    );
+}
+
+#[tokio::test]
+async fn turn_memory_is_a_dynamic_message_after_the_stable_system_prompt() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let agent = build_agent_with_client(
+        Arc::new(MessageRecordingClient { seen: seen.clone() }),
+        dir.path(),
+        3,
+    );
+    let memory = worksmith::memory::MemoryContext {
+        text: "Relevant memory for this turn:\n\
+               - [project/preference/abc12345] formatting: Use targeted rustfmt."
+            .into(),
+        ids: vec!["abc12345-0000-0000-0000-000000000000".into()],
+    };
+
+    agent
+        .run_turn_with_context(
+            &mut session,
+            "make a rust change",
+            "stable system",
+            Some(memory),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let calls = seen.lock().unwrap();
+    let messages = calls.first().expect("one model request");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].content.as_deref(), Some("stable system"));
+    assert_eq!(
+        messages[1].content.as_deref(),
+        Some(
+            "Relevant memory for this turn:\n\
+             - [project/preference/abc12345] formatting: Use targeted rustfmt."
+        )
+    );
+    assert_eq!(messages[2].content.as_deref(), Some("make a rust change"));
+
+    let events = worksmith::session::events(session.path()).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|entry| matches!(&entry.event, worksmith::event::Event::MemoryUsed { ids }
+                if ids == &vec!["abc12345-0000-0000-0000-000000000000".to_string()])),
+        "the injected memory ids should be inspectable in the session log"
     );
 }
 

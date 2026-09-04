@@ -7,6 +7,7 @@
 //! need approval (§8), and a compact `<MEMORY>` section for prompt injection.
 //! Semantic/vector retrieval is deliberately deferred (§30 stage 4).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -62,6 +63,7 @@ pub struct MemoryRow {
 pub struct MemoryStore {
     global: Connection,
     project: Option<Connection>,
+    project_terms: Vec<String>,
 }
 
 fn now() -> i64 {
@@ -142,21 +144,155 @@ pub struct Hit {
     pub score: f64,
 }
 
+/// Hard-bounded memory budget for one model request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryCaps {
+    pub max_items: usize,
+    pub max_chars: usize,
+    pub max_item_chars: usize,
+}
+
+impl MemoryCaps {
+    pub fn for_context(context_window: usize) -> Self {
+        Self {
+            max_items: (context_window / 16_000).clamp(2, 8),
+            max_chars: (context_window / 32).clamp(600, 2_400),
+            max_item_chars: 320,
+        }
+    }
+}
+
+const TURN_MEMORY_MIN_SCORE: f64 = 0.20;
+
+/// Dynamic memory injected for one turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryContext {
+    pub text: String,
+    pub ids: Vec<String>,
+}
+
 /// Collapse whitespace/case so near-identical writes compare equal (§20).
 fn normalize(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// FTS5 treats bare punctuation as syntax; quote each term so arbitrary user
 /// text is a safe query.
 fn fts_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|w| !w.is_empty())
+    fts_query_with_filter(query, |_| false)
+}
+
+fn turn_fts_query(query: &str, project_terms: &[String]) -> String {
+    fts_query_with_filter(query, |word| is_turn_query_noise(word, project_terms))
+}
+
+fn fts_query_with_filter(query: &str, is_noise: impl Fn(&str) -> bool) -> String {
+    query_terms_with_filter(query, is_noise)
+        .into_iter()
         .map(|w| format!("\"{w}\""))
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+fn query_terms_with_filter(query: &str, is_noise: impl Fn(&str) -> bool) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && !is_noise(w))
+        .map(|w| w.to_ascii_lowercase())
+        .collect()
+}
+
+fn turn_query_terms(query: &str, project_terms: &[String]) -> Vec<String> {
+    query_terms_with_filter(query, |word| is_turn_query_noise(word, project_terms))
+}
+
+fn row_contains_any_exact_term(row: &MemoryRow, terms: &[String]) -> bool {
+    row_exact_term_count(row, terms) > 0
+}
+
+fn signal_overlap(row: &MemoryRow, terms: &[String]) -> f64 {
+    if terms.is_empty() {
+        return 0.0;
+    }
+    row_exact_term_count(row, terms) as f64 / terms.len() as f64
+}
+
+fn row_exact_term_count(row: &MemoryRow, terms: &[String]) -> usize {
+    let text = format!("{} {} {}", row.kind, row.subject, row.content);
+    let row_terms = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    terms.iter().filter(|term| row_terms.contains(*term)).count()
+}
+
+fn is_turn_query_noise(word: &str, project_terms: &[String]) -> bool {
+    let word = word.to_ascii_lowercase();
+    project_terms.iter().any(|term| term == &word) || is_query_noise(&word)
+}
+
+fn is_query_noise(word: &str) -> bool {
+    matches!(
+        word,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "be"
+            | "but"
+            | "change"
+            | "check"
+            | "do"
+            | "does"
+            | "file"
+            | "for"
+            | "i"
+            | "in"
+            | "is"
+            | "it"
+            | "make"
+            | "me"
+            | "memory"
+            | "rs"
+            | "my"
+            | "of"
+            | "on"
+            | "or"
+            | "run"
+            | "small"
+            | "src"
+            | "test"
+            | "testing"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "we"
+            | "with"
+    )
+}
+
+fn project_dir_from_memory_path(path: &Path) -> Option<&Path> {
+    let worksmith_dir = path.parent()?;
+    if worksmith_dir.file_name()? != ".worksmith" {
+        return None;
+    }
+    worksmith_dir.parent()
+}
+
+fn project_terms_from_dir(dir: &Path) -> Option<Vec<String>> {
+    let name = dir.file_name()?.to_string_lossy();
+    let terms = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then_some(terms)
 }
 
 impl MemoryStore {
@@ -166,17 +302,39 @@ impl MemoryStore {
             .context("cannot locate home directory")?
             .join("memory.db");
         let project_path = project_dir.map(|dir| dir.join(".worksmith").join("memory.db"));
-        Self::open_paths(&global_path, project_path.as_deref())
+        Self::open_paths_with_project_name(
+            &global_path,
+            project_path.as_deref(),
+            project_dir.and_then(project_terms_from_dir),
+        )
     }
 
     /// Open at explicit paths (used by tests to avoid touching real home).
     pub fn open_paths(global_path: &Path, project_path: Option<&Path>) -> Result<MemoryStore> {
+        Self::open_paths_with_project_name(
+            global_path,
+            project_path,
+            project_path
+                .and_then(project_dir_from_memory_path)
+                .and_then(project_terms_from_dir),
+        )
+    }
+
+    pub fn open_paths_with_project_name(
+        global_path: &Path,
+        project_path: Option<&Path>,
+        project_terms: Option<Vec<String>>,
+    ) -> Result<MemoryStore> {
         let global = open_db(global_path)?;
         let project = match project_path {
             Some(p) => Some(open_db(p)?),
             None => None,
         };
-        Ok(MemoryStore { global, project })
+        Ok(MemoryStore {
+            global,
+            project,
+            project_terms: project_terms.unwrap_or_default(),
+        })
     }
 
     fn conn(&self, scope: Scope) -> Result<&Connection> {
@@ -452,32 +610,121 @@ impl MemoryStore {
     /// FTS/BM25, weighted by importance and recency, with a boost for project
     /// memories since they're the more specific context.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        self.search_with_options(query, limit, false)
+    }
+
+    fn search_with_options(
+        &self,
+        query: &str,
+        limit: usize,
+        for_turn_context: bool,
+    ) -> Result<Vec<Hit>> {
         let mut hits: Vec<Hit> = Vec::new();
         let now_ts = now();
+        let signal_terms = turn_query_terms(query, &self.project_terms);
 
-        for (conn, is_project) in self
-            .conns()
-            .into_iter()
-            .zip([false, true])
-        {
-            for (row, text_score) in fts_rows(conn, query)? {
-                let exact = if normalize(&row.subject) == normalize(query) { 1.0 } else { 0.0 };
+        for (conn, is_project) in self.conns().into_iter().zip([false, true]) {
+            for (row, text_score) in fts_rows(
+                conn,
+                query,
+                for_turn_context,
+                &self.project_terms,
+            )? {
+                let exact = if normalize(&row.subject) == normalize(query) {
+                    1.0
+                } else {
+                    0.0
+                };
                 // Age in days, decayed so a year-old memory keeps ~half weight.
                 let age_days = ((now_ts - row.updated_at).max(0) as f64) / 86_400.0;
                 let recency = 1.0 / (1.0 + age_days / 180.0);
                 let importance = (row.importance.clamp(0, 100) as f64) / 100.0;
-                let score = 0.35 * text_score
+                let signal = signal_overlap(&row, &signal_terms);
+                let score = 0.25 * text_score
                     + 0.25 * exact
-                    + 0.20 * importance
-                    + 0.10 * recency
+                    + 0.35 * signal
+                    + 0.10 * importance
+                    + 0.05 * recency
                     + if is_project { 0.10 } else { 0.0 };
                 hits.push(Hit { row, score });
             }
         }
 
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// Build a small, relevant memory block for this turn. It is intentionally
+    /// separate from the stable system prompt so provider prefix caching can
+    /// still reuse the base prompt, skills catalog, and project instructions.
+    pub fn turn_context(
+        &self,
+        query: &str,
+        context_window: usize,
+    ) -> Result<Option<MemoryContext>> {
+        self.turn_context_with_caps(query, MemoryCaps::for_context(context_window))
+    }
+
+    pub fn turn_context_with_caps(
+        &self,
+        query: &str,
+        caps: MemoryCaps,
+    ) -> Result<Option<MemoryContext>> {
+        let exact_terms = turn_query_terms(query, &self.project_terms);
+        let mut hits = self.search_with_options(
+            query,
+            caps.max_items.saturating_mul(3).max(caps.max_items),
+            true,
+        )?;
+        hits.retain(|hit| {
+            hit.score >= TURN_MEMORY_MIN_SCORE
+                && row_contains_any_exact_term(&hit.row, &exact_terms)
+        });
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (b.row.scope == "project").cmp(&(a.row.scope == "project")))
+                .then_with(|| b.row.importance.cmp(&a.row.importance))
+                .then_with(|| b.row.updated_at.cmp(&a.row.updated_at))
+                .then_with(|| a.row.id.cmp(&b.row.id))
+        });
+
+        let mut ids = Vec::new();
+        let mut lines = Vec::new();
+        let mut used = "Relevant memory for this turn:\n".len();
+        for hit in hits.into_iter().take(caps.max_items) {
+            let row = hit.row;
+            let body = compact_text(&row.content, caps.max_item_chars);
+            let line = format!(
+                "- [{}/{}/{}] {}: {}",
+                row.scope,
+                row.kind,
+                short_id(&row.id),
+                compact_text(&row.subject, 80),
+                body
+            );
+            let line_len = line.len() + 1;
+            if used + line_len > caps.max_chars {
+                break;
+            }
+            used += line_len;
+            ids.push(row.id);
+            lines.push(line);
+        }
+
+        if lines.is_empty() {
+            return Ok(None);
+        }
+
+        let mut text = String::from("Relevant memory for this turn:\n");
+        text.push_str(&lines.join("\n"));
+        Ok(Some(MemoryContext { text, ids }))
     }
 
     /// Build a compact `<MEMORY>` block for the system prompt: active memories,
@@ -559,6 +806,16 @@ pub const SHORT_ID: usize = 8;
 /// The displayable short form of an id.
 pub fn short_id(id: &str) -> &str {
     &id[..id.len().min(SHORT_ID)]
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut out: String = compact.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// A memory the extractor proposed, before it's written anywhere.
@@ -669,8 +926,17 @@ fn query_status(conn: &Connection, status: &str) -> Result<Vec<MemoryRow>> {
 
 /// Active rows matching `query`, each with a 0..1 text score from BM25 (lower
 /// bm25 is better, so it's inverted).
-fn fts_rows(conn: &Connection, query: &str) -> Result<Vec<(MemoryRow, f64)>> {
-    let q = fts_query(query);
+fn fts_rows(
+    conn: &Connection,
+    query: &str,
+    for_turn_context: bool,
+    project_terms: &[String],
+) -> Result<Vec<(MemoryRow, f64)>> {
+    let q = if for_turn_context {
+        turn_fts_query(query, project_terms)
+    } else {
+        fts_query(query)
+    };
     if q.is_empty() {
         return Ok(Vec::new());
     }

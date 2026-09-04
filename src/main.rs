@@ -223,9 +223,17 @@ async fn run(args: Args) -> Result<()> {
         // The renderer has to exist before the work starts, or `--mode json`
         // reports a silent, tokenless run — which is exactly what it did.
         let renderer = spawn_renderer(bus.subscribe(), mode);
-        let outcome =
-            run_spawn(&args, &config, &resolved, client, registry, bus.clone(), session, &cwd)
-                .await;
+        let outcome = run_spawn(
+            &args,
+            &config,
+            &resolved,
+            client,
+            registry,
+            bus.clone(),
+            session,
+            &cwd,
+        )
+        .await;
         drop(bus);
         let _ = renderer.await;
         return outcome;
@@ -238,9 +246,17 @@ async fn run(args: Args) -> Result<()> {
             (Arc::new(worksmith::tools::approval::AutoApprove), None)
         } else if mode == OutputMode::Tui {
             let (a, rx) = worksmith::tools::approval::ChannelApprover::new();
-            (Arc::new(worksmith::tools::approval::RememberingApprover::new(Arc::new(a))), Some(rx))
+            (
+                Arc::new(worksmith::tools::approval::RememberingApprover::new(
+                    Arc::new(a),
+                )),
+                Some(rx),
+            )
         } else {
-            (Arc::new(worksmith::tools::approval::RefuseWhenUnattended), None)
+            (
+                Arc::new(worksmith::tools::approval::RefuseWhenUnattended),
+                None,
+            )
         };
 
     // Checkpoints only exist where somebody is watching. Unattended, `NoOneToAsk`
@@ -277,7 +293,10 @@ async fn run(args: Args) -> Result<()> {
         config.max_steps(),
         config.max_retries(),
         config.stuck_threshold(),
-        resolved.settings.context.unwrap_or_else(|| config.context_limit()),
+        resolved
+            .settings
+            .context
+            .unwrap_or_else(|| config.context_limit()),
         config.keep_recent_turns(),
         tool_ctx,
     )
@@ -291,7 +310,10 @@ async fn run(args: Args) -> Result<()> {
     .with_token_budget(config.agent.token_budget);
 
     // Validation command: --until overrides the configured default.
-    let validate_cmd = args.until.clone().or_else(|| config.validate_command().map(String::from));
+    let validate_cmd = args
+        .until
+        .clone()
+        .or_else(|| config.validate_command().map(String::from));
     let bash_timeout = Duration::from_secs(config.bash_timeout_secs());
 
     // TUI owns its own rendering (it subscribes to the bus directly) and takes
@@ -305,7 +327,10 @@ async fn run(args: Args) -> Result<()> {
         let bus = bus.clone();
         let base = resolved.provider.base_url.trim_end_matches('/').to_string();
         let model = resolved.model.clone();
-        let configured = resolved.settings.context.unwrap_or_else(|| config.context_limit());
+        let configured = resolved
+            .settings
+            .context
+            .unwrap_or_else(|| config.context_limit());
         tokio::spawn(async move {
             if let Some(w) =
                 worksmith::llm::warn_on_context_mismatch(&http, &base, &model, configured).await
@@ -330,7 +355,10 @@ async fn run(args: Args) -> Result<()> {
             // footer was showing the wrong one: a 64k session read as 128k, so
             // the gauge said 11% when the truth was 22% and compaction arrived
             // at what looked like a third of the way in.
-            resolved.settings.context.unwrap_or_else(|| config.context_limit()),
+            resolved
+                .settings
+                .context
+                .unwrap_or_else(|| config.context_limit()),
             config.agents_max(),
             config.supervisor(),
             config.fanout_auto(),
@@ -346,19 +374,30 @@ async fn run(args: Args) -> Result<()> {
     // Workers need a shared handle to the agent; the TUI path already owns it.
     let agent = Arc::new(agent);
     let renderer = spawn_renderer(bus.subscribe(), mode);
-    bus.emit(Event::SessionStarted { id: session.id.clone() });
+    bus.emit(Event::SessionStarted {
+        id: session.id.clone(),
+    });
 
     let one_shot = args.prompt.is_some() && matches!(mode, OutputMode::Print | OutputMode::Json);
 
     let outcome: Result<()> = if one_shot {
         let prompt = args.prompt.clone().unwrap();
-        let system = build_system_prompt(&cwd, &project_store(&cwd));
+        let mem = project_store(&cwd);
+        let system = build_system_prompt(&cwd, &mem);
+        let memory_context = turn_memory_context(&mem, &prompt, agent.context_limit());
         let cancel = CancellationToken::new();
         let validator = validate_cmd
             .as_ref()
             .map(|c| CommandValidator::new(c.clone(), cwd.clone(), bash_timeout));
         agent
-            .run_turn(&mut session, &prompt, &system, validator.as_ref().map(|v| v as _), cancel)
+            .run_turn_with_context(
+                &mut session,
+                &prompt,
+                &system,
+                memory_context,
+                validator.as_ref().map(|v| v as _),
+                cancel,
+            )
             .await
             .map(|result| {
                 if mode == OutputMode::Print {
@@ -408,8 +447,13 @@ async fn run_spawn(
     use worksmith::llm::ModelOverride;
     use worksmith::worker::WorkerManager;
 
-    let Some(Cmd::Spawn { count, each_files, worker_model: model, no_synthesis, task }) =
-        &args.cmd
+    let Some(Cmd::Spawn {
+        count,
+        each_files,
+        worker_model: model,
+        no_synthesis,
+        task,
+    }) = &args.cmd
     else {
         unreachable!("run_spawn is only called for the spawn subcommand");
     };
@@ -422,26 +466,31 @@ async fn run_spawn(
         is_worker: false,
         ..Default::default()
     };
-    let agent = Arc::new(Agent::new(
-        client,
-        registry,
-        bus.clone(),
-        resolved.model.clone(),
-        config.temperature,
-        config.max_tokens,
-        config.max_steps(),
-        config.max_retries(),
-        config.stuck_threshold(),
-        resolved.settings.context.unwrap_or_else(|| config.context_limit()),
-        config.keep_recent_turns(),
-        tool_ctx,
-    )
-    .with_sampling(
-        resolved.settings.temperature,
-        resolved.settings.top_p,
-        resolved.settings.top_k,
-    )
-    .with_thinking(resolve_thinking(args, config)?));
+    let agent = Arc::new(
+        Agent::new(
+            client,
+            registry,
+            bus.clone(),
+            resolved.model.clone(),
+            config.temperature,
+            config.max_tokens,
+            config.max_steps(),
+            config.max_retries(),
+            config.stuck_threshold(),
+            resolved
+                .settings
+                .context
+                .unwrap_or_else(|| config.context_limit()),
+            config.keep_recent_turns(),
+            tool_ctx,
+        )
+        .with_sampling(
+            resolved.settings.temperature,
+            resolved.settings.top_p,
+            resolved.settings.top_k,
+        )
+        .with_thinking(resolve_thinking(args, config)?),
+    );
 
     let mem = project_store(cwd);
     let system = build_worker_prompt(cwd, &mem);
@@ -487,7 +536,9 @@ async fn run_spawn(
     // "done" with the differentiator switched off and nothing saying so.
     let mut workers = WorkerManager::new(agent.clone(), cwd.to_path_buf(), config.agents_max())
         .with_default_validate(
-            args.until.clone().or_else(|| config.agents_validate().map(str::to_string)),
+            args.until
+                .clone()
+                .or_else(|| config.agents_validate().map(str::to_string)),
             Duration::from_secs(config.bash_timeout_secs()),
         )
         .with_supervisor(config.supervisor());
@@ -541,7 +592,11 @@ async fn run_spawn(
     // tries to do the whole job itself, for up to max-steps. That reads as a
     // hang and costs real tokens. Observed with three workers 401ing against a
     // local endpoint.
-    let succeeded = group.done.iter().filter(|w| w.status == WorkerStatus::Done).count();
+    let succeeded = group
+        .done
+        .iter()
+        .filter(|w| w.status == WorkerStatus::Done)
+        .count();
     if succeeded == 0 {
         let _ = writeln!(stdout(), "{body}");
         // Name the reasons here rather than pointing at output above: worker
@@ -582,8 +637,7 @@ async fn run_spawn(
          one answer to the original request: {}\n\n\
          This runs non-interactively and your answer is printed as the final output. \
          Do not ask follow-up questions or offer to do more work; give the finished answer.",
-        succeeded,
-        group.request
+        succeeded, group.request
     );
     let sys = build_system_prompt(cwd, &mem);
     let result = agent
@@ -616,6 +670,20 @@ fn project_store(cwd: &Path) -> MemoryStore {
         eprintln!("(memory unavailable: {e})");
         MemoryStore::open(None).expect("global memory")
     })
+}
+
+fn turn_memory_context(
+    mem: &MemoryStore,
+    prompt: &str,
+    context_limit: usize,
+) -> Option<worksmith::memory::MemoryContext> {
+    match mem.turn_context(prompt, context_limit) {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("(memory search failed: {e})");
+            None
+        }
+    }
 }
 
 // ---- REPL -----------------------------------------------------------------
@@ -727,6 +795,7 @@ async fn repl(
 
         let message = expand_file_mentions(trimmed, cwd);
         let system = build_system_prompt(cwd, &mem);
+        let memory_context = turn_memory_context(&mem, &message, agent.context_limit());
         let validator = validate_cmd
             .as_ref()
             .map(|c| CommandValidator::new(c.clone(), cwd.to_path_buf(), bash_timeout));
@@ -734,7 +803,14 @@ async fn repl(
         // Ctrl+C aborts the current turn (not the program).
         let cancel = CancellationToken::new();
         let result = tokio::select! {
-            r = agent.run_turn(session, &message, &system, validator.as_ref().map(|v| v as _), cancel.clone()) => r,
+            r = agent.run_turn_with_context(
+                session,
+                &message,
+                &system,
+                memory_context,
+                validator.as_ref().map(|v| v as _),
+                cancel.clone(),
+            ) => r,
             _ = tokio::signal::ctrl_c() => {
                 cancel.cancel();
                 println!("\n(aborted)");
@@ -925,7 +1001,10 @@ async fn handle_spawn(
                 return;
             }
             Ok(files) => (
-                files.iter().map(|f| assign(&req.task, f)).collect::<Vec<_>>(),
+                files
+                    .iter()
+                    .map(|f| assign(&req.task, f))
+                    .collect::<Vec<_>>(),
                 req.task.clone(),
             ),
             Err(e) => {
@@ -942,8 +1021,13 @@ async fn handle_spawn(
         }
         FanOut::Count(n) => {
             println!("(planning fan-out…)");
-            let plan =
-                plan_fanout(agent.clone(), req.task.clone(), Some(n), config.agents_max()).await;
+            let plan = plan_fanout(
+                agent.clone(),
+                req.task.clone(),
+                Some(n),
+                config.agents_max(),
+            )
+            .await;
             println!("{}", plan.note);
             (plan.tasks, req.task.clone())
         }
@@ -972,9 +1056,16 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
                 println!("(no agents)");
             }
             for w in list {
-                let nudges =
-                    if w.nudges > 0 { format!(" · {} nudges", w.nudges) } else { String::new() };
-                let on = w.model.as_deref().map(|m| format!(" · on {m}")).unwrap_or_default();
+                let nudges = if w.nudges > 0 {
+                    format!(" · {} nudges", w.nudges)
+                } else {
+                    String::new()
+                };
+                let on = w
+                    .model
+                    .as_deref()
+                    .map(|m| format!(" · on {m}"))
+                    .unwrap_or_default();
                 println!(
                     "{} [{}] {} tools · {} changed{}{} — {}",
                     w.id,
@@ -999,7 +1090,14 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
                 if !w.changed.is_empty() {
                     println!("changed: {}", w.changed.join(", "));
                 }
-                println!("{}", if w.result.is_empty() { &w.last } else { &w.result });
+                println!(
+                    "{}",
+                    if w.result.is_empty() {
+                        &w.last
+                    } else {
+                        &w.result
+                    }
+                );
             }
             None => println!("usage: /agents show <id>"),
         },
@@ -1012,12 +1110,10 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
             let id = parts.next().map(str::to_string);
             let msg = parts.collect::<Vec<_>>().join(" ");
             match id {
-                Some(id) if !msg.trim().is_empty() => {
-                    match workers.nudge(&id, &msg) {
-                        Ok(()) => println!("nudged {id}"),
-                        Err(why) => println!("not nudged: {why}"),
-                    }
-                }
+                Some(id) if !msg.trim().is_empty() => match workers.nudge(&id, &msg) {
+                    Ok(()) => println!("nudged {id}"),
+                    Err(why) => println!("not nudged: {why}"),
+                },
                 _ => println!("usage: /agents nudge <id> <message>"),
             }
         }
@@ -1046,7 +1142,12 @@ fn handle_skill<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
         Some(name) => match catalog.get(name) {
             Some(skill) => match skill.body() {
                 Ok(body) => {
-                    println!("skill `{}` ({})\n\n{}", skill.name, skill.dir.display(), body.trim())
+                    println!(
+                        "skill `{}` ({})\n\n{}",
+                        skill.name,
+                        skill.dir.display(),
+                        body.trim()
+                    )
                 }
                 Err(e) => eprintln!("could not read `{name}`: {e}"),
             },
@@ -1130,7 +1231,10 @@ async fn handle_memory<'a>(
     let sub = parts.next().unwrap_or("list");
     match sub {
         "mine" => {
-            let limit = parts.next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(10);
+            let limit = parts
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(10);
             let cwd = Path::new(session.cwd());
             let plan = match worksmith::mining::plan(mem, cwd, limit) {
                 Ok(p) => p,
@@ -1165,7 +1269,12 @@ async fn handle_memory<'a>(
                     for h in hits {
                         println!(
                             "{:.2}  {}  [{}/{}] {}: {}",
-                            h.score, h.row.id, h.row.scope, h.row.kind, h.row.subject, h.row.content
+                            h.score,
+                            h.row.id,
+                            h.row.scope,
+                            h.row.kind,
+                            h.row.subject,
+                            h.row.content
                         );
                     }
                 }
@@ -1188,13 +1297,18 @@ async fn handle_memory<'a>(
             Some("all") => match mem.pending_ids() {
                 Ok(ids) if ids.is_empty() => println!("(nothing pending)"),
                 Ok(ids) => {
-                    let n = ids.iter().filter(|id| mem.approve(id).unwrap_or(false)).count();
+                    let n = ids
+                        .iter()
+                        .filter(|id| mem.approve(id).unwrap_or(false))
+                        .count();
                     println!("approved {n} proposals");
                 }
                 Err(e) => eprintln!("memory error: {e}"),
             },
             Some(t) => {
-                let Some(id) = resolve_memory_id(mem, t) else { return };
+                let Some(id) = resolve_memory_id(mem, t) else {
+                    return;
+                };
                 match mem.approve(&id) {
                     Ok(true) => println!("approved {}", worksmith::memory::short_id(&id)),
                     Ok(false) => println!("(no pending proposal {t})"),
@@ -1245,7 +1359,9 @@ async fn handle_memory<'a>(
                 eprintln!("usage: /memory show <id>");
                 return;
             };
-            let Some(id) = resolve_memory_id(mem, id) else { return };
+            let Some(id) = resolve_memory_id(mem, id) else {
+                return;
+            };
             match mem.get(&id) {
                 Ok(Some(r)) => println!(
                     "[{}] {} ({}) importance={} status={}\n{}",
@@ -1260,7 +1376,9 @@ async fn handle_memory<'a>(
                 eprintln!("usage: /memory forget <id>");
                 return;
             };
-            let Some(id) = resolve_memory_id(mem, id) else { return };
+            let Some(id) = resolve_memory_id(mem, id) else {
+                return;
+            };
             match mem.forget(&id) {
                 Ok(true) => println!("(forgot {})", worksmith::memory::short_id(&id)),
                 Ok(false) => println!("(no memory {id})"),
@@ -1380,7 +1498,9 @@ fn render_activity(ev: &Event, print_mode: bool) {
                 let _ = out.flush();
             }
         }
-        Event::ToolCall { name, arguments, .. } => {
+        Event::ToolCall {
+            name, arguments, ..
+        } => {
             let args = truncate(arguments, 160);
             let line = format!("\n\x1b[2m⚙ {name} {args}\x1b[0m");
             emit_line(&line, print_mode);
@@ -1389,12 +1509,33 @@ fn render_activity(ev: &Event, print_mode: bool) {
             let status = if *ok { "ok" } else { "error" };
             let first = output.lines().next().unwrap_or("");
             let extra = output.lines().count().saturating_sub(1);
-            let suffix = if extra > 0 { format!(" (+{extra} more lines)") } else { String::new() };
-            let line = format!("\x1b[2m  → {status}: {}{}\x1b[0m", truncate(first, 160), suffix);
+            let suffix = if extra > 0 {
+                format!(" (+{extra} more lines)")
+            } else {
+                String::new()
+            };
+            let line = format!(
+                "\x1b[2m  → {status}: {}{}\x1b[0m",
+                truncate(first, 160),
+                suffix
+            );
             emit_line(&line, print_mode);
         }
         Event::Nudge { reason } => {
             let line = format!("\x1b[33m↻ {reason}\x1b[0m");
+            emit_line(&line, print_mode);
+        }
+        Event::MemoryUsed { ids } => {
+            let shown = ids
+                .iter()
+                .map(|id| worksmith::memory::short_id(id))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let line = if shown.is_empty() {
+                "\x1b[2mmemory: using 0 item(s)\x1b[0m".to_string()
+            } else {
+                format!("\x1b[2mmemory: using {} item(s): {shown}\x1b[0m", ids.len())
+            };
             emit_line(&line, print_mode);
         }
         Event::Compaction {
@@ -1410,9 +1551,15 @@ fn render_activity(ev: &Event, print_mode: bool) {
         }
         Event::Validation { ok, detail } => {
             let line = if *ok {
-                format!("\x1b[32m✓ validation passed: {}\x1b[0m", truncate(detail, 120))
+                format!(
+                    "\x1b[32m✓ validation passed: {}\x1b[0m",
+                    truncate(detail, 120)
+                )
             } else {
-                format!("\x1b[31m✗ validation failed: {}\x1b[0m", truncate(detail, 200))
+                format!(
+                    "\x1b[31m✗ validation failed: {}\x1b[0m",
+                    truncate(detail, 200)
+                )
             };
             emit_line(&line, print_mode);
         }
@@ -1570,7 +1717,10 @@ fn resolve_project_trust(config: Config, cwd: &Path, args: &Args) -> Result<Conf
                 return Ok(config);
             }
             "v" | "view" => match std::fs::read_to_string(&prompt.config_path) {
-                Ok(body) => println!("\n----- {} -----\n{body}-----", prompt.config_path.display()),
+                Ok(body) => println!(
+                    "\n----- {} -----\n{body}-----",
+                    prompt.config_path.display()
+                ),
                 Err(e) => println!("(could not read it: {e})"),
             },
             other => println!("(didn't understand `{other}`)"),

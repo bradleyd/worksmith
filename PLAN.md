@@ -706,11 +706,12 @@ deployment and long unattended runs viable. Cost per *completed* task is the
 number to publish, so this depends on M9's accounting to prove anything.
 
 Known spend, roughly in order of waste:
-- **The `<MEMORY>` block is injected every turn** regardless of relevance —
-  currently the top 20 rows by importance. Now that `memory.search()` does
-  hybrid retrieval, frugal mode should inject only what matches the turn (or
-  nothing, and let the model call the `memory` tool). Note the tension with
-  prompt caching below.
+- **Memory must stay turn-relevant and capped.** The first fix is in progress:
+  the stable system prompt no longer embeds the top 20 memories by importance;
+  relevant memories are searched per turn, capped by the model context window,
+  and sent as a separate dynamic message with ids logged. The remaining question
+  is measurement: whether this improves small-model convention-following without
+  distracting larger models.
 - **Tool results dominate.** `MAX_TOOL_RESULT_BYTES` is 24k; frugal should cut
   it hard, prefer `grep` hits over whole-file `read`s, and return smaller
   knowledge chunks.
@@ -719,12 +720,12 @@ Known spend, roughly in order of waste:
   the whole history, validation retries re-run the loop, and a finished fan-out
   group triggers an extra synthesis turn. Frugal should cap `max-steps` and
   `max-retries`, and default `agents.synthesize = false`.
-- **The system prompt** itself (base + AGENTS.md + memory) is re-sent every
-  step; a terser base prompt is free savings.
+- **The system prompt** itself (base + AGENTS.md + skill catalog) is re-sent
+  every step; a terser base prompt is free savings.
 
-Caching cuts the other way: a per-turn memory block breaks the stable prefix
-that makes server-side prefix caching work, so measure both — a cache hit is
-cheaper than a token not sent. Get the numbers before choosing.
+Caching cuts the other way: memory belongs after the stable prefix as a small
+dynamic message. Measure both — a cache hit is cheaper than a token not sent.
+Get the numbers before tuning the caps.
 
 **M11 — Sandbox each worker** *(future; now evidence-backed)*: every worker
 edits the user's real working tree, and a fan-out of N workers edits it
@@ -1040,8 +1041,9 @@ Open, in rough order of value:
   cannot report dollars per solved task. That number is what makes the +34
   result publishable rather than a token count.
 - **Memory and knowledge are still unmeasured.** The store now fills (mining
-  works, ids are usable), but nothing shows whether injecting memory improves
-  anything. Needs the paired teach/test eval task type.
+  works, ids are usable), and turn-start memory injection is being tried, but
+  nothing yet shows whether it improves small or large model outcomes. Needs
+  the paired teach/test eval task type.
 - **Open decision #9** (what a check *is*) still blocks workflows (§8a).
 - **v0.2.2**: 17 commits since the tag, including three fixes to bugs v0.2.1
   shipped.

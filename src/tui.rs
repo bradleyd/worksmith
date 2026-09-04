@@ -474,6 +474,9 @@ impl App {
                     self.push(Kind::Error, format!("✗ validation failed: {detail}"));
                 }
             }
+            Event::MemoryUsed { ids } => {
+                self.push(Kind::Notice, memory_used_summary(&ids));
+            }
             Event::Compaction {
                 messages_before,
                 messages_after,
@@ -2464,6 +2467,12 @@ fn start_turn(
     cancel: &mut CancellationToken,
 ) {
     let sys = build_system_prompt(cwd, mem);
+    let memory_context = mem
+        .turn_context(&message, app.context_limit)
+        .unwrap_or_else(|e| {
+            app.push(Kind::Error, format!("memory search failed: {e}"));
+            None
+        });
     *cancel = CancellationToken::new();
     let a = agent.clone();
     let s = session.clone();
@@ -2478,7 +2487,15 @@ fn start_turn(
     *turn = Some(tokio::spawn(async move {
         let validator = cmd.map(|c| CommandValidator::new(c, cwd2.clone(), bash_timeout));
         let mut sess = s.lock().await;
-        a.run_turn(&mut sess, &message, &sys, validator.as_ref().map(|v| v as _), tok).await
+        a.run_turn_with_context(
+            &mut sess,
+            &message,
+            &sys,
+            memory_context,
+            validator.as_ref().map(|v| v as _),
+            tok,
+        )
+        .await
     }));
 }
 
@@ -2557,6 +2574,7 @@ fn describe(ev: &Event) -> String {
         Event::Validation { ok, detail } => {
             format!("{} validation: {detail}", if *ok { "✓" } else { "✗" })
         }
+        Event::MemoryUsed { ids } => memory_used_summary(ids),
         Event::Compaction { tokens_before, tokens_after, .. } => {
             format!("⟲ compacted ~{tokens_before} → ~{tokens_after} tokens")
         }
@@ -2565,6 +2583,15 @@ fn describe(ev: &Event) -> String {
         Event::TurnComplete { outcome } => format!("turn complete: {outcome}"),
         Event::SessionStarted { id } => format!("session {id}"),
         Event::MessageDelta { .. } | Event::Thinking { .. } => String::new(),
+    }
+}
+
+fn memory_used_summary(ids: &[String]) -> String {
+    let shown = ids.iter().map(|id| short_id(id)).collect::<Vec<_>>().join(" ");
+    if shown.is_empty() {
+        "memory: using 0 item(s)".to_string()
+    } else {
+        format!("memory: using {} item(s): {shown}", ids.len())
     }
 }
 

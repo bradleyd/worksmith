@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, EventBus};
 use crate::llm::{ChatRequest, LlmClient, Message, ModelOverride, StreamEvent, Thinking};
+use crate::memory::MemoryContext;
 use crate::session::Session;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::validation::Validator;
@@ -427,6 +428,10 @@ impl Agent {
         self.pairing.load(Ordering::Relaxed)
     }
 
+    pub fn context_limit(&self) -> usize {
+        self.current().context_limit
+    }
+
     pub fn thinking_mode(&self) -> ThinkingMode {
         self.thinking.clone()
     }
@@ -542,6 +547,19 @@ impl Agent {
         validator: Option<&dyn Validator>,
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
+        self.run_turn_with_context(session, user_input, system_prompt, None, validator, cancel)
+            .await
+    }
+
+    pub async fn run_turn_with_context(
+        &self,
+        session: &mut Session,
+        user_input: &str,
+        system_prompt: &str,
+        memory_context: Option<MemoryContext>,
+        validator: Option<&dyn Validator>,
+        cancel: CancellationToken,
+    ) -> Result<TurnResult> {
         session.append_message(Message::user(user_input))?;
         self.emit(
             session,
@@ -549,6 +567,14 @@ impl Agent {
                 text: user_input.to_string(),
             },
         );
+        if let Some(memory) = &memory_context {
+            self.emit(
+                session,
+                Event::MemoryUsed {
+                    ids: memory.ids.clone(),
+                },
+            );
+        }
         // Checkpoints are budgeted per turn, so the budget refills here. A
         // running total would let one long turn spend the whole session's.
         self.tool_ctx
@@ -580,6 +606,7 @@ impl Agent {
                 .run_until_idle(
                     session,
                     system_prompt,
+                    memory_context.as_ref(),
                     &mut final_text,
                     &cancel,
                     &active,
@@ -803,6 +830,7 @@ impl Agent {
         &self,
         session: &mut Session,
         system_prompt: &str,
+        memory_context: Option<&MemoryContext>,
         final_text: &mut String,
         cancel: &CancellationToken,
         active: &ActiveModel,
@@ -853,16 +881,12 @@ impl Agent {
                 }
             }
 
-            let mut messages = Vec::with_capacity(session.messages().len() + 1);
-            // Skills are pinned above the compaction line. Their text is
-            // standing instruction — the conventions the work has to follow —
-            // and treating it as ordinary conversation meant compaction ate it
-            // and the model reloaded the same pack again and again.
-            messages.push(Message::system(with_loaded_skills(
+            let mut messages = request_messages(
                 system_prompt,
                 &self.tool_ctx,
-            )));
-            messages.extend(session.messages().iter().cloned());
+                memory_context,
+                session,
+            );
 
             // Never ask for more output than the window can hold. The server
             // adds prompt and max_tokens and rejects the sum, so a request can
@@ -934,8 +958,12 @@ impl Agent {
                         });
                         break Err(e);
                     }
-                    messages.truncate(1);
-                    messages.extend(session.messages().iter().cloned());
+                    messages = request_messages(
+                        system_prompt,
+                        &self.tool_ctx,
+                        memory_context,
+                        session,
+                    );
                     let room = active
                         .context_limit
                         .saturating_sub(self.working_tokens(session))
@@ -1563,6 +1591,30 @@ fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> String {
     }
     out.push_str("</SKILLS-LOADED>\n");
     out
+}
+
+fn request_messages(
+    system_prompt: &str,
+    ctx: &ToolContext,
+    memory_context: Option<&MemoryContext>,
+    session: &Session,
+) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(session.messages().len() + 2);
+    // Skills are pinned above the compaction line. Their text is standing
+    // instruction — the conventions the work has to follow — and treating it
+    // as ordinary conversation meant compaction ate it and the model reloaded
+    // the same pack again and again.
+    messages.push(Message::system(with_loaded_skills(system_prompt, ctx)));
+    // Turn memory is deliberately a separate dynamic prefix. The stable system
+    // prompt can still be provider-cached, while this small block can vary by
+    // request without poisoning that prefix.
+    if let Some(memory) = memory_context
+        && !memory.text.trim().is_empty()
+    {
+        messages.push(Message::system(memory.text.clone()));
+    }
+    messages.extend(session.messages().iter().cloned());
+    messages
 }
 
 /// The first line of an error chain, short enough for one notice.

@@ -337,4 +337,19 @@ async fn bash_paths_outside_the_project_need_approval() {
         std::fs::read_to_string(dir.path().join("inside.txt")).unwrap(),
         "ok\n"
     );
+
+    let out = reg
+        .run(
+            "bash",
+            serde_json::json!({
+                "command": r#"find . -maxdepth 2 -name "pyproject.toml" 2>/dev/null | head"#,
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(
+        !out.is_error,
+        "redirecting stderr to /dev/null must not need outside-cwd approval: {}",
+        out.content
+    );
 }

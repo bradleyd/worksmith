@@ -8,12 +8,14 @@ re-deriving it.
 ## Current stopping point
 
 The TUI command-arm refactor stopped after `/trust`. The latest clean commit
-before this note was `c1b3684 Tighten validation retries and cwd safety`.
+before this note was `70a02e5 Show the current session id in the TUI`.
 
-The current local work is the first session visibility cleanup: the TUI prints
-the current session id when it starts, and no longer drops `SessionStarted`
-events. This fixes the cheap half of the session-store complaint: the user can
-now see the id needed for `/history <session-id>` and for finding the JSONL file.
+The current local work is on branch `memory-turn-context`: use relevant durable
+memory automatically at turn start without bloating the stable system prompt.
+The old prompt path injected the top 20 memories by importance into
+`build_system_prompt`, which was both irrelevant on many turns and bad for
+provider prefix caching. The new shape is a capped dynamic memory message after
+the stable system prompt, with ids logged as `MemoryUsed`.
 
 `cargo fmt --check` is still not a useful narrow check: rustfmt wants broad
 pre-existing rewrites outside this slice. Bare `rustfmt --check src/tui.rs` is
@@ -23,15 +25,19 @@ split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
 
 Checks for this slice should be:
 
-- `cargo test tui::tests::session_started_is_visible_in_the_transcript --lib`
+- `cargo test --test memory_search`
+- `cargo test turn_memory_is_a_dynamic_message_after_the_stable_system_prompt --test agent_loop`
 - `git diff --check`
-- targeted rustfmt review of the touched `src/tui.rs` hunk
+- targeted rustfmt review of touched Rust hunks
 - `cargo check`
 - `cargo clippy --all-targets`
 - `cargo test`
 
-Manual testing for this slice: start `worksmith` in any project and confirm the
-first transcript line shows `session <id>`.
+Manual testing for this slice: add a project memory such as "Use targeted
+rustfmt, not broad cargo fmt"; start a fresh small-model session and ask for a
+Rust change. Expected: the transcript shows `memory: using ...`, the request
+uses that convention without `/memory search`, and an unrelated Python project
+does not pull the Rust memory into the turn.
 
 ## 1. Stop and reassess command handling.
 

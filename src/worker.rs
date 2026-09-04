@@ -547,11 +547,15 @@ impl WorkerManager {
         let handle = tokio::spawn(async move {
             let mut session = session;
             let agent = agent;
+            let memory_context = crate::memory::MemoryStore::open(Some(&cwd))
+                .ok()
+                .and_then(|mem| mem.turn_context(&task_run, agent.context_limit()).ok().flatten());
             let turn =
-                agent.run_turn(
+                agent.run_turn_with_context(
                     &mut session,
                     &task_run,
                     &system,
+                    memory_context,
                     validator.as_ref().map(|v| v as &dyn crate::validation::Validator),
                     cancel_task,
                 );

@@ -59,6 +59,9 @@ pub enum Event {
     },
     /// Result of running the task's validation check.
     Validation { ok: bool, detail: String },
+    /// Which durable memories were injected into the current turn's dynamic
+    /// request context.
+    MemoryUsed { ids: Vec<String> },
     /// A setting was not honored, or something is off but not fatal.
     Warning { message: String },
     Error { message: String },

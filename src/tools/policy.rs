@@ -277,11 +277,23 @@ fn command_path_candidate(word: &str, cwd: &Path) -> Option<(String, std::path::
     } else if s == ".." || s.starts_with("../") || s.starts_with("./") || s.contains("/..") {
         cwd.join(s)
     } else if s.starts_with('/') {
+        if is_standard_device_path(s) {
+            return None;
+        }
         std::path::PathBuf::from(s)
     } else {
         return None;
     };
     Some((s.to_string(), path))
+}
+
+fn is_standard_device_path(s: &str) -> bool {
+    matches!(
+        s,
+        "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+    ) || s
+        .strip_prefix("/dev/fd/")
+        .is_some_and(|fd| matches!(fd, "0" | "1" | "2"))
 }
 
 fn is_path_like(s: &str) -> bool {
@@ -347,6 +359,13 @@ mod tests {
         );
         assert_eq!(
             command_escape_path(&format!("cat {}", inside.display()), &cwd),
+            None
+        );
+        assert_eq!(
+            command_escape_path(
+                r#"find . -maxdepth 2 -name "pyproject.toml" 2>/dev/null | head"#,
+                &cwd,
+            ),
             None
         );
         assert_eq!(command_escape_path("grep -rn needle src", &cwd), None);

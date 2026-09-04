@@ -1,5 +1,5 @@
 //! System-prompt assembly: base instructions + project `AGENTS.md`/`CLAUDE.md`
-//! + the injected `<MEMORY>` section. Shared by the REPL and the TUI.
+//! + the skill catalog. Shared by the REPL and the TUI.
 
 use std::path::Path;
 
@@ -40,21 +40,16 @@ pub fn build_worker_prompt(cwd: &Path, mem: &MemoryStore) -> String {
     format!("{}\n\n{}", build_system_prompt(cwd, mem), WORKER_PREAMBLE)
 }
 
-/// Build the full system prompt for a turn: base + project instructions +
-/// currently-relevant memory.
-pub fn build_system_prompt(cwd: &Path, mem: &MemoryStore) -> String {
+/// Build the stable system prompt for a turn: base + project instructions +
+/// skill catalog. Per-turn memory is a separate dynamic message so this prefix
+/// can still be provider-cached.
+pub fn build_system_prompt(cwd: &Path, _mem: &MemoryStore) -> String {
     let mut s = String::from(BASE_SYSTEM_PROMPT);
 
     let instructions = config::load_project_instructions(cwd);
     if !instructions.trim().is_empty() {
         s.push_str("\n\n");
         s.push_str(&instructions);
-    }
-
-    let memory = mem.memory_section(20).unwrap_or_default();
-    if !memory.trim().is_empty() {
-        s.push_str("\n\n");
-        s.push_str(&memory);
     }
 
     // Only the catalog — name and description — rides in the prompt. The body
