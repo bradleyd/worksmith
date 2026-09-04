@@ -318,6 +318,31 @@ impl ProviderConfig {
 }
 
 impl Config {
+    /// Built-in provider defaults for hosted services with stable OpenAI-compatible endpoints.
+    pub fn provider_preset(name: &str) -> Option<ProviderConfig> {
+        match name {
+            "openrouter" => Some(ProviderConfig {
+                kind: default_provider_kind(),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+                thinking_param: None,
+                reasoning_budget_param: None,
+                stream_idle_timeout: None,
+                sort: None,
+            }),
+            "openai" => Some(ProviderConfig {
+                kind: default_provider_kind(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                thinking_param: None,
+                reasoning_budget_param: None,
+                stream_idle_timeout: None,
+                sort: None,
+            }),
+            _ => None,
+        }
+    }
+
     /// Load `~/.worksmith/config.toml`, then overlay `<project>/.worksmith/config.toml`.
     pub fn load(project_dir: &Path) -> Result<Config> {
         // First run: there is no ~/.worksmith yet, and every error downstream
@@ -630,10 +655,10 @@ impl Config {
             }
         };
 
-        let provider = self
-            .providers
-            .get(&provider_name)
-            .with_context(|| {
+        let provider = match self.providers.get(&provider_name) {
+            Some(provider) => provider.clone(),
+            None if let Some(preset) = Self::provider_preset(&provider_name) => preset,
+            None => {
                 let known: Vec<&str> = self.providers.keys().map(String::as_str).collect();
                 let path = global_config_path()
                     .map(|p| p.display().to_string())
@@ -641,7 +666,7 @@ impl Config {
                 if known.is_empty() {
                     // The first-run case: naming the section to write beats
                     // reporting the absence of something they never wrote.
-                    format!(
+                    bail!(
                         "provider `{provider_name}` not found — no providers are configured. \
                          Add a [providers.{provider_name}] section to {path} (see \
                          {} for a worked example)",
@@ -650,13 +675,13 @@ impl Config {
                             .unwrap_or_default()
                     )
                 } else {
-                    format!(
+                    bail!(
                         "provider `{provider_name}` not found in {path} (configured: {})",
                         known.join(", ")
                     )
                 }
-            })?
-            .clone();
+            }
+        };
 
         // A named-but-unset variable is almost always a mistake, and swallowing
         // it sends the request with no Authorization header at all. The server
@@ -681,8 +706,18 @@ impl Config {
             .as_ref()
             .and_then(|env| std::env::var(env).ok());
 
-        let settings = self.models.get(&format!("{provider_name}/{model}")).cloned().unwrap_or_default();
-        Ok(ResolvedModel { provider, model, api_key, missing_key_env, settings })
+        let settings = self
+            .models
+            .get(&format!("{provider_name}/{model}"))
+            .cloned()
+            .unwrap_or_default();
+        Ok(ResolvedModel {
+            provider,
+            model,
+            api_key,
+            missing_key_env,
+            settings,
+        })
     }
 }
 

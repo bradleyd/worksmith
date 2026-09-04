@@ -219,9 +219,14 @@ impl Check {
             }
             None => return,
         };
-        if !self.config.providers.contains_key(&name) {
+        if !self.config.providers.contains_key(&name) && Config::provider_preset(&name).is_none()
+        {
             let known: Vec<&str> = self.config.providers.keys().map(String::as_str).collect();
-            let known = if known.is_empty() { "none" } else { &known.join(", ") };
+            let known = if known.is_empty() {
+                "none"
+            } else {
+                &known.join(", ")
+            };
             self.flags.push(format!(
                 "`model` is `{spec}`, but provider `{name}` is not configured (configured: {known})"
             ));
@@ -666,6 +671,22 @@ mod tests {
 
         assert_eq!(check.flags.len(), 1, "{:?}", check.flags);
         assert!(check.flags[0].contains("absent from the effective config"));
+    }
+
+    #[test]
+    fn flag_model_accepts_a_builtin_provider_preset() {
+        let config: Config = toml::from_str("model = \"openrouter/qwen/qwen3.5-9b\"\n").unwrap();
+        let mut check = Check {
+            config,
+            sources: BTreeMap::new(),
+            writers: BTreeMap::new(),
+            files: Vec::new(),
+            flags: Vec::new(),
+        };
+
+        check.flag_model();
+
+        assert!(check.flags.is_empty(), "{:?}", check.flags);
     }
 
     /// `display_key` turns the internal `>`-joined path into the usual `.` form

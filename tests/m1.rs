@@ -205,6 +205,57 @@ base-url = "http://localhost:8000/v1"
 }
 
 #[test]
+fn known_provider_prefixes_resolve_without_configured_providers() {
+    common::isolate_home();
+    let cfg = Config::default();
+
+    let resolved = cfg
+        .resolve_model(Some("openrouter/qwen/qwen3.5-9b"))
+        .unwrap();
+
+    assert_eq!(resolved.model, "qwen/qwen3.5-9b");
+    assert_eq!(resolved.provider.base_url, "https://openrouter.ai/api/v1");
+    assert_eq!(
+        resolved.provider.api_key_env.as_deref(),
+        Some("OPENROUTER_API_KEY")
+    );
+}
+
+#[test]
+fn configured_provider_wins_over_a_builtin_preset() {
+    common::isolate_home();
+    let cfg: Config = toml::from_str(
+        r#"
+        [providers.openrouter]
+        base-url = "http://127.0.0.1:9000/v1"
+        api-key-env = "CUSTOM_OPENROUTER_KEY"
+        "#,
+    )
+    .unwrap();
+
+    let resolved = cfg
+        .resolve_model(Some("openrouter/qwen/qwen3.5-9b"))
+        .unwrap();
+
+    assert_eq!(resolved.provider.base_url, "http://127.0.0.1:9000/v1");
+    assert_eq!(
+        resolved.provider.api_key_env.as_deref(),
+        Some("CUSTOM_OPENROUTER_KEY")
+    );
+}
+
+#[test]
+fn unknown_provider_prefixes_still_require_configuration() {
+    common::isolate_home();
+    let cfg = Config::default();
+
+    let err = format!("{:#}", cfg.resolve_model(Some("runpod/model")).unwrap_err());
+
+    assert!(err.contains("provider `runpod` not found"), "{err}");
+    assert!(err.contains("[providers.runpod]"), "{err}");
+}
+
+#[test]
 fn session_round_trip() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();

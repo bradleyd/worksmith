@@ -174,8 +174,9 @@ cd worksmith
 ```sh
 # First run creates ~/.worksmith and leaves an annotated config.example.toml
 # there. Copy it to config.toml, then set `model` and its [providers.*] section.
-# If it starts unconfigured, worksmith prints both paths. Passing --model still
-# needs the provider section, because the model prefix names which provider to use.
+
+# Passing --model openrouter/... or openai/... works from an empty home if the
+# matching API key env var is set; local/custom providers still need config.
 worksmith                                  # full-screen TUI
 
 # The point of the thing. Work until a check passes.
@@ -254,16 +255,23 @@ not bless whatever it becomes after the next `git pull`. See `/trust`.
 [`config.example.toml`](config.example.toml) is the annotated version of this
 table and is written to `~/.worksmith/` on first run.
 
+For hosted first runs, `--model openrouter/...` and `--model openai/...` use
+built-in provider defaults (`OPENROUTER_API_KEY` and `OPENAI_API_KEY`). Other
+prefixes, including local servers such as `vllm/...`, need a
+`[providers.<name>]` section because Worksmith cannot guess their URL.
+
 ### Top level
 
 | key | default | what it does |
 | --- | --- | --- |
-| `model` | none | `provider/model`, or a bare name when one provider is configured. `--model` overrides per run. |
+| `model` | none | `provider/model`, or a bare name when one provider is configured. `--model` overrides per run. `openrouter/...` and `openai/...` can use built-in provider defaults. |
 | `temperature` | server's | Fallback sampling temperature. A model's own `[models."…"]` entry wins. |
 | `max-tokens` | none | Output cap per request. Keep it generous: it also has to cover reasoning, and whole-file writes ride in tool-call arguments. |
 | `decisions-dir` | `.worksmith/decisions` | Where `/pair` files decision records. Must be a path git tracks. |
 
 ### `[providers.<name>]`
+
+Explicit provider config wins over any built-in default with the same name.
 
 | key | default | what it does |
 | --- | --- | --- |
