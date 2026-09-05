@@ -3357,6 +3357,10 @@ const REFERENCE_CONTENT_PADDING: usize = 4;
 const REFERENCE_LABEL_MAX_WIDTH: usize = 20;
 const REFERENCE_MIN_WIDTH: usize = 20;
 const REFERENCE_MAX_ROWS: u16 = 24;
+const COMPACTION_HORIZONTAL_MARGIN: u16 = 8;
+const COMPACTION_MIN_WIDTH: u16 = 38;
+const COMPACTION_MAX_WIDTH: u16 = 62;
+const COMPACTION_HEIGHT: u16 = 7;
 
 fn ui(f: &mut Frame, app: &App) {
     // The composer grows with its content (up to MAX_INPUT_ROWS), + borders.
@@ -3381,6 +3385,10 @@ fn ui(f: &mut Frame, app: &App) {
     // already looking, rather than in the middle of the screen.
     if let Some(hint) = &app.composer.hint {
         render_hint(f, chunks[1], hint);
+    }
+
+    if app.compacting {
+        render_compaction_overlay(f, f.area(), app);
     }
 
     // Last, so it composites over everything else.
@@ -3614,6 +3622,37 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     } else {
         lines
     };
+    f.render_widget(Paragraph::new(body), inner);
+}
+
+fn render_compaction_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let max_width = area.width.saturating_sub(COMPACTION_HORIZONTAL_MARGIN);
+    if max_width < COMPACTION_MIN_WIDTH || area.height < COMPACTION_HEIGHT {
+        return;
+    }
+    let width = max_width.clamp(COMPACTION_MIN_WIDTH, COMPACTION_MAX_WIDTH);
+    let height = COMPACTION_HEIGHT;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / OVERLAY_VERTICAL_ANCHOR_DIVISOR;
+    let rect = Rect { x, y, width, height };
+
+    f.render_widget(ratatui::widgets::Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" compacting history ")
+        .title_bottom(" scroll works · wait to send ");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let elapsed = app.compact_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    let body = vec![
+        Line::from("working: summarizing older turns"),
+        Line::from(format!("elapsed {elapsed}s")),
+        Line::from("input is paused until compaction finishes"),
+        Line::from("PageUp/PageDown scroll the transcript"),
+        Line::from("normal mode can search while it runs"),
+    ];
     f.render_widget(Paragraph::new(body), inner);
 }
 
@@ -4748,6 +4787,49 @@ mod tests {
             status.contains("compacting history"),
             "footer status names the work: {status}"
         );
+    }
+
+    #[test]
+    fn manual_compaction_draws_a_progress_overlay() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut a = app();
+        a.push(Kind::Assistant, "previous output ".repeat(20));
+        a.compacting = true;
+        a.compact_start = Some(Instant::now() - Duration::from_secs(7));
+        a.status = "compacting history…".into();
+        a.spinner = 1;
+        a.ensure_rows(80);
+
+        let mut term = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        term.draw(|f| ui(f, &a)).unwrap();
+        let rendered: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(rendered.contains("compacting history"), "the blocking work is named");
+        assert!(
+            rendered.contains("summarizing older turns"),
+            "the overlay says what is happening"
+        );
+        assert!(
+            rendered.contains("PageUp/PageDown"),
+            "the overlay points at the still-live scroll keys"
+        );
+        assert!(
+            rendered.contains("normal mode can search"),
+            "the overlay does not imply Esc closes it"
+        );
+        assert!(
+            !rendered.contains("Enter pick"),
+            "manual compaction is not a picker"
+        );
+        assert!(!rendered.contains("Esc close"), "there is no modal to close");
     }
 
     #[test]
