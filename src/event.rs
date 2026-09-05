@@ -20,6 +20,17 @@ pub enum Event {
     /// sharing one local server is enough to trip a 20s timeout on prefill.
     ModelCallStarted,
     ModelCallFinished,
+    /// Worksmith's view of one completed model request. These timings bracket
+    /// the client call, so they include local server queueing and prefill.
+    ModelMetrics {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        reasoning_tokens: u32,
+        total_ms: u64,
+        first_output_ms: Option<u64>,
+        prompt_tokens_per_second: f64,
+        completion_tokens_per_second: f64,
+    },
     /// The session's active model changed mid-run. The session log is the only
     /// place the switch is visible afterwards — the transcript alone cannot say
     /// which model answered which part of the turn.

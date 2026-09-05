@@ -1003,6 +1003,57 @@ async fn the_session_records_what_the_loop_did() {
     assert_eq!(reopened.messages().len(), session.messages().len());
 }
 
+#[tokio::test]
+async fn the_session_records_model_request_metrics() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+
+    let agent = build_agent(
+        MockClient::new(vec![Completion {
+            content: Some("all set".into()),
+            usage: worksmith::llm::Usage {
+                prompt_tokens: 1234,
+                completion_tokens: 56,
+                total_tokens: 1290,
+                reasoning_tokens: 7,
+            },
+            finish_reason: Some("stop".into()),
+            ..Default::default()
+        }]),
+        dir.path(),
+        3,
+    );
+    agent
+        .run_turn(&mut session, "measure this", "system", None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let events = worksmith::session::events(&path).unwrap();
+    let metrics = events
+        .iter()
+        .find(|entry| matches!(entry.event, worksmith::event::Event::ModelMetrics { .. }))
+        .expect("model metrics should be persisted");
+
+    let worksmith::event::Event::ModelMetrics {
+        prompt_tokens,
+        completion_tokens,
+        reasoning_tokens,
+        total_ms,
+        first_output_ms,
+        ..
+    } = &metrics.event
+    else {
+        unreachable!("filtered to model metrics");
+    };
+    assert_eq!(*prompt_tokens, 1234);
+    assert_eq!(*completion_tokens, 56);
+    assert_eq!(*reasoning_tokens, 7);
+    assert!(*total_ms > 0, "total latency should be recorded");
+    assert_eq!(*first_output_ms, None, "the scripted client does not stream deltas");
+}
+
 /// A model switch recorded in the session must read back after the process
 /// that wrote it has exited. `Event` is `Deserialize` as well as `Serialize`
 /// for exactly this: old sessions stay readable as the enum grows, and a

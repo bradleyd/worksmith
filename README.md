@@ -469,6 +469,10 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   happened. Diagnosing a worker that died otherwise meant reading the model
   server's own logs and correlating timestamps by hand. Per-token deltas are
   left out; they would multiply the file by the length of every answer.
+- **Model-call metrics** (`/metrics`, `/metrics <session-id>`): summarizes the
+  recorded request timings, context size, output and reasoning tokens, first
+  output latency, total latency, token rates, and compaction count for a
+  session.
 - **Watching a worker** (`/agents tail <id>`): a worker's events go to its own
   bus and never reach the parent's transcript, so `/agents` could report status
   but never what a worker was doing. Each worker now keeps a bounded log of its
@@ -573,8 +577,9 @@ repeat to cycle) · `Esc` abort a running turn (or clear input) · `Ctrl+C` quit
 `Ctrl+O` expand/collapse long tool output & diffs · `Ctrl+T` show/hide thinking
 · scroll with the mouse wheel,
 `PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `↑`/`↓`, `Home`/`End`. Commands: `/new`
-`/compact` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to include a
-file. (Model cycling, vim keybindings, and themes are planned follow-ups.)
+`/compact` `/metrics` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to
+include a file. (Model cycling, vim keybindings, and themes are planned
+follow-ups.)
 
 ## Plain REPL commands (`--plain`)
 
@@ -585,6 +590,7 @@ The line REPL has the same commands as the TUI:
 /quit                     exit
 /new                      start a new session
 /compact                  summarize the session now
+/metrics [session-id]     latency, token rates, and context trend
 /memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
 /memory search <query> | /memory extract | /memory mine [n]
 /memory pending | /memory approve <id|all> | /memory supersede <new> <old>

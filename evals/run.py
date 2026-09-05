@@ -176,6 +176,7 @@ def setup_workdir(task: dict, seed_memory: bool = False) -> Path:
 
 def parse_events(stdout: str) -> dict:
     model_calls = tool_calls = gen_tokens = ctx_peak = reasoning_tokens = 0
+    model_ms = first_output_ms = prompt_tps = decode_tps = metrics_calls = first_outputs = 0
     outcome = None
     memory_ids: list[str] = []
     by_tool: dict[str, int] = {}
@@ -196,6 +197,15 @@ def parse_events(stdout: str) -> dict:
             # tells you whether a thinking level cost anything.
             reasoning_tokens += e.get("reasoning_tokens", 0)
             ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
+        elif t == "model_metrics":
+            metrics_calls += 1
+            model_ms += e.get("total_ms", 0)
+            prompt_tps += e.get("prompt_tokens_per_second", 0.0)
+            decode_tps += e.get("completion_tokens_per_second", 0.0)
+            ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
+            if e.get("first_output_ms") is not None:
+                first_outputs += 1
+                first_output_ms += e["first_output_ms"]
         elif t == "tool_call":
             tool_calls += 1
             # By name, because "which tool" is the question behind the
@@ -210,9 +220,14 @@ def parse_events(stdout: str) -> dict:
             memory_ids.extend(e.get("ids") or [])
         elif t == "turn_complete":
             outcome = e.get("outcome")
+    avg_first = round(first_output_ms / first_outputs) if first_outputs else 0
+    avg_prompt_tps = round(prompt_tps / metrics_calls, 1) if metrics_calls else 0.0
+    avg_decode_tps = round(decode_tps / metrics_calls, 1) if metrics_calls else 0.0
     return {"model_calls": model_calls, "tool_calls": tool_calls,
             "gen_tokens": gen_tokens, "reasoning_tokens": reasoning_tokens,
-            "ctx_peak": ctx_peak, "outcome": outcome,
+            "ctx_peak": ctx_peak, "model_ms": model_ms,
+            "first_output_ms": avg_first, "prompt_tps": avg_prompt_tps,
+            "decode_tps": avg_decode_tps, "outcome": outcome,
             "memory_ids": memory_ids, "memory_used": bool(memory_ids),
             "by_tool": by_tool, "tool_errors": tool_errors}
 
@@ -256,6 +271,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
     row = {"task": task["name"], "mode": mode, "fast": fast, "thinking": thinking,
            "passed": False, "model_calls": 0, "tool_calls": 0, "gen_tokens": 0,
            "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None,
+           "ctx_peak": 0, "model_ms": 0, "first_output_ms": 0,
+           "prompt_tps": 0.0, "decode_tps": 0.0,
            "memory_used": False, "memory_ids": []}
     t0 = time.time()
     try:
@@ -377,7 +394,8 @@ def main() -> int:
                           if row["reasoning_tokens"] else "")
                 memory = " memory=used" if row.get("memory_used") else ""
                 print(f"  {mark}  {row['elapsed']}s calls={row['tool_calls']} "
-                      f"gen_tok={row['gen_tokens']}{reason} "
+                      f"gen_tok={row['gen_tokens']}{reason} ctx={row['ctx_peak']} "
+                      f"decode/s={row['decode_tps']} "
                       f"outcome={row['outcome']}{memory}{extra}",
                       file=sys.stderr)
                 # Write partial results after each run so a killed run isn't lost.

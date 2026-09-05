@@ -127,6 +127,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/spawn", "run a task in background workers"),
     ("/agents", "list workers, or tail one live"),
     ("/validate", "the check a turn must pass"),
+    ("/metrics", "model latency, token rates, and context trend"),
     ("/fast", "answer without thinking first"),
     ("/think", "how hard to think: a level or a token budget"),
     ("/route", "which provider serves you (OpenRouter)"),
@@ -437,8 +438,8 @@ impl App {
                 };
                 self.touch(at);
             }
-            // Bookkeeping for the supervisor's idle rule; nothing to draw.
-            Event::ModelCallStarted | Event::ModelCallFinished => {}
+            // Bookkeeping for the supervisor and /metrics; nothing to draw.
+            Event::ModelCallStarted | Event::ModelCallFinished | Event::ModelMetrics { .. } => {}
             Event::ModelChanged { from, to } => {
                 self.push(Kind::Notice, format!("model changed: {from} → {to}"));
             }
@@ -1673,6 +1674,7 @@ NORMAL MODE (Esc on an empty composer, or `jj`)
 SESSION
   /new                                start a fresh session
   /compact                            summarize the history now
+  /metrics [session-id]               latency, token rates, and context trend
   /validate <cmd|off>                 command that must pass before a turn is done
   /quit
 
@@ -1861,6 +1863,31 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     );
                 }
                 Err(e) => app.push(Kind::Error, format!("history: {e}")),
+            }
+        }
+        "metrics" => {
+            let id = parts.next().map(str::to_string);
+            if let Some(extra) = parts.next() {
+                app.push(Kind::Error, format!("usage: /metrics [session-id] (got {extra})"));
+                return Ok(true);
+            }
+            // Same reason as /history: read the append-only file, never the
+            // session lock, so this remains usable while work is running.
+            let path = match &id {
+                Some(id) => crate::session::Session::path_for_id(id).ok(),
+                None => Some(app.session_path.clone()),
+            };
+            let Some(path) = path else {
+                app.push(Kind::Error, "no such session".to_string());
+                return Ok(true);
+            };
+            match crate::session::events(&path) {
+                Ok(evs) => {
+                    for line in metrics_report(&evs) {
+                        app.push(Kind::Notice, line);
+                    }
+                }
+                Err(e) => app.push(Kind::Error, format!("metrics: {e}")),
             }
         }
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
@@ -2660,8 +2687,153 @@ fn render_recent(session: &Session, max_messages: usize) -> String {
     out
 }
 
-/// `/skill [name]` — list installed skills, or load one into the transcript so
-/// it applies to the rest of the session without waiting for the model to ask.
+/// Summarize model-request timings recorded in the append-only session log.
+fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
+    #[derive(Clone, Copy)]
+    struct Sample {
+        idx: usize,
+        ts: u64,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        reasoning_tokens: u32,
+        total_ms: u64,
+        first_output_ms: Option<u64>,
+        prompt_tokens_per_second: f64,
+        completion_tokens_per_second: f64,
+    }
+
+    let start = evs.first().map(|e| e.ts).unwrap_or(0);
+    let mut samples = Vec::new();
+    let mut compactions = Vec::new();
+    for ev in evs {
+        match &ev.event {
+            Event::ModelMetrics {
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                total_ms,
+                first_output_ms,
+                prompt_tokens_per_second,
+                completion_tokens_per_second,
+            } => samples.push(Sample {
+                idx: samples.len() + 1,
+                ts: ev.ts,
+                prompt_tokens: *prompt_tokens,
+                completion_tokens: *completion_tokens,
+                reasoning_tokens: *reasoning_tokens,
+                total_ms: *total_ms,
+                first_output_ms: *first_output_ms,
+                prompt_tokens_per_second: *prompt_tokens_per_second,
+                completion_tokens_per_second: *completion_tokens_per_second,
+            }),
+            Event::Compaction {
+                tokens_before,
+                tokens_after,
+                ..
+            } => compactions.push((*tokens_before, *tokens_after)),
+            _ => {}
+        }
+    }
+    if samples.is_empty() {
+        return vec!["metrics: no model metrics recorded yet".to_string()];
+    }
+
+    let last = *samples.last().expect("checked non-empty");
+    let peak = samples
+        .iter()
+        .max_by_key(|s| s.prompt_tokens)
+        .copied()
+        .expect("checked non-empty");
+    let avg_first = average_ms(samples.iter().filter_map(|s| s.first_output_ms));
+    let avg_total = average_ms(samples.iter().map(|s| s.total_ms));
+    let avg_decode = average_f64(samples.iter().map(|s| s.completion_tokens_per_second));
+    let avg_prompt = average_f64(samples.iter().map(|s| s.prompt_tokens_per_second));
+
+    let mut lines = vec![
+        format!(
+            "metrics: {} model call(s), {} compaction(s)",
+            samples.len(),
+            compactions.len()
+        ),
+        format!(
+            "latest: ctx={} out={} reason={} first={} total={} prompt/s={:.1} decode/s={:.1}",
+            compact_count(last.prompt_tokens as u64),
+            last.completion_tokens,
+            last.reasoning_tokens,
+            fmt_ms_opt(last.first_output_ms),
+            fmt_ms(last.total_ms),
+            last.prompt_tokens_per_second,
+            last.completion_tokens_per_second
+        ),
+        format!(
+            "peak ctx: call #{} at {} tokens; avg first={} avg total={} avg prompt/s={:.1} avg decode/s={:.1}",
+            peak.idx,
+            compact_count(peak.prompt_tokens as u64),
+            fmt_ms(avg_first),
+            fmt_ms(avg_total),
+            avg_prompt,
+            avg_decode
+        ),
+    ];
+    if let Some((before, after)) = compactions.last() {
+        lines.push(format!("last compact: ~{before} → ~{after} tokens"));
+    }
+    lines.push("recent model calls:".to_string());
+    let first = samples.len().saturating_sub(8);
+    for s in &samples[first..] {
+        lines.push(format!(
+            "  #{:<3} +{:>4}s  ctx={:<7} first={:<7} total={:<7} decode/s={:.1}",
+            s.idx,
+            s.ts.saturating_sub(start),
+            compact_count(s.prompt_tokens as u64),
+            fmt_ms_opt(s.first_output_ms),
+            fmt_ms(s.total_ms),
+            s.completion_tokens_per_second
+        ));
+    }
+    lines
+}
+
+fn average_ms(values: impl Iterator<Item = u64>) -> u64 {
+    let mut n = 0u64;
+    let mut sum = 0u64;
+    for v in values {
+        n += 1;
+        sum = sum.saturating_add(v);
+    }
+    sum.checked_div(n).unwrap_or(0)
+}
+
+fn average_f64(values: impl Iterator<Item = f64>) -> f64 {
+    let mut n = 0.0;
+    let mut sum = 0.0;
+    for v in values {
+        n += 1.0;
+        sum += v;
+    }
+    if n == 0.0 { 0.0 } else { sum / n }
+}
+
+fn fmt_ms(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn fmt_ms_opt(ms: Option<u64>) -> String {
+    ms.map(fmt_ms).unwrap_or_else(|| "n/a".to_string())
+}
+
+fn compact_count(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// One line for a recorded event: what happened, not how it was rendered.
 fn describe(ev: &Event) -> String {
     match ev {
@@ -2677,6 +2849,21 @@ fn describe(ev: &Event) -> String {
         ),
         Event::ModelCallStarted => "model call →".to_string(),
         Event::ModelCallFinished => "model call ←".to_string(),
+        Event::ModelMetrics {
+            prompt_tokens,
+            completion_tokens,
+            total_ms,
+            first_output_ms,
+            completion_tokens_per_second,
+            ..
+        } => format!(
+            "metrics: ctx={} out={} first={} total={} out/s={:.1}",
+            compact_count(*prompt_tokens as u64),
+            completion_tokens,
+            fmt_ms_opt(*first_output_ms),
+            fmt_ms(*total_ms),
+            completion_tokens_per_second
+        ),
         Event::ModelChanged { from, to } => format!("model changed: {from} → {to}"),
         Event::Usage { completion_tokens, reasoning_tokens, finish_reason, .. } => format!(
             "usage: {completion_tokens} tok ({reasoning_tokens} reasoning), finish={}",
@@ -2710,6 +2897,8 @@ fn memory_used_summary(ids: &[String]) -> String {
     }
 }
 
+/// `/skill [name]` — list installed skills, or load one into the transcript so
+/// it applies to the rest of the session without waiting for the model to ask.
 fn skill_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = &'a str>) {
     let catalog = crate::skill::SkillCatalog::discover(cwd);
     match parts.next() {
@@ -3480,6 +3669,53 @@ mod tests {
 
     fn app() -> App {
         App::new("m".into(), 1000, None)
+    }
+
+    #[test]
+    fn metrics_report_summarizes_model_calls() {
+        let evs = vec![
+            crate::session::TimedEvent {
+                ts: 10,
+                event: Event::ModelMetrics {
+                    prompt_tokens: 1500,
+                    completion_tokens: 40,
+                    reasoning_tokens: 5,
+                    total_ms: 1500,
+                    first_output_ms: Some(500),
+                    prompt_tokens_per_second: 3000.0,
+                    completion_tokens_per_second: 40.0,
+                },
+            },
+            crate::session::TimedEvent {
+                ts: 12,
+                event: Event::Compaction {
+                    messages_before: 24,
+                    messages_after: 12,
+                    tokens_before: 1800,
+                    tokens_after: 700,
+                },
+            },
+            crate::session::TimedEvent {
+                ts: 15,
+                event: Event::ModelMetrics {
+                    prompt_tokens: 2000,
+                    completion_tokens: 100,
+                    reasoning_tokens: 10,
+                    total_ms: 2000,
+                    first_output_ms: Some(750),
+                    prompt_tokens_per_second: 2666.7,
+                    completion_tokens_per_second: 80.0,
+                },
+            },
+        ];
+
+        let report = metrics_report(&evs).join("\n");
+
+        assert!(report.contains("metrics: 2 model call(s), 1 compaction(s)"));
+        assert!(report.contains("latest: ctx=2.0k out=100 reason=10 first=750ms total=2.0s"));
+        assert!(report.contains("peak ctx: call #2 at 2.0k"));
+        assert!(report.contains("last compact: ~1800 → ~700 tokens"));
+        assert!(report.contains("#2   +   5s  ctx=2.0k"));
     }
 
     fn project_with_config(config: &str) -> tempfile::TempDir {
@@ -5016,7 +5252,7 @@ mod tests {
         a.composer.refresh_hint();
         let got: Vec<String> =
             a.composer.hint.as_ref().unwrap().matches().iter().map(|(_, i)| i.label.clone()).collect();
-        assert_eq!(got, vec!["/memory"]);
+        assert_eq!(got, vec!["/memory", "/metrics"]);
 
         // Once the command is complete and arguments start, this is the wrong
         // list to be showing — argument completion is a different thing.
@@ -5203,7 +5439,7 @@ mod tests {
         let mut a = app();
         a.composer.set_input("/m".into());
         a.composer.refresh_hint();
-        a.composer.hint.as_mut().unwrap().move_by(1); // highlight /model
+        a.composer.hint.as_mut().unwrap().move_by(2); // highlight /model
         assert_eq!(a.composer.hint.as_ref().unwrap().chosen().as_deref(), Some("/model"));
 
         // One more character narrows the list; the selection must stay valid
@@ -5372,7 +5608,7 @@ mod tests {
     fn completes_slash_commands() {
         let (start, c) = compute_completions("/me", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(start, 0);
-        assert_eq!(c, vec!["/memory ".to_string()]);
+        assert_eq!(c, vec!["/memory ".to_string(), "/metrics ".to_string()]);
 
         let (_, all) = compute_completions("/", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert!(all.len() >= 5);

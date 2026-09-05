@@ -9,9 +9,9 @@
 //!   by `max_retries`. Terminate on a *passing check*, not on "I'm done".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -1334,16 +1334,26 @@ impl Agent {
             // print the answer twice, so a failure mid-stream is final.
             let streamed = Arc::new(AtomicBool::new(false));
             let saw_output = streamed.clone();
+            let first_output_ms = Arc::new(AtomicU64::new(0));
+            let first_output_seen = first_output_ms.clone();
+            let started = Instant::now();
             let forwarder = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
                     match ev {
                         StreamEvent::TextDelta(t) => {
                             saw_output.store(true, Ordering::Relaxed);
+                            record_first_output(&first_output_seen, started);
                             bus.emit(Event::MessageDelta { text: t });
                         }
                         StreamEvent::ReasoningDelta(t) => {
                             saw_output.store(true, Ordering::Relaxed);
+                            record_first_output(&first_output_seen, started);
                             bus.emit(Event::Thinking { text: t });
+                        }
+                        StreamEvent::ToolCallStarted { .. }
+                        | StreamEvent::ToolCallArgsDelta { .. } => {
+                            saw_output.store(true, Ordering::Relaxed);
+                            record_first_output(&first_output_seen, started);
                         }
                         StreamEvent::Warning(message) => bus.emit(Event::Warning { message }),
                         _ => {}
@@ -1354,10 +1364,18 @@ impl Agent {
             self.emit(session, Event::ModelCallStarted);
             let completion = client.stream(req.clone(), tx, cancel.clone()).await;
             let _ = forwarder.await;
+            let total_ms = (started.elapsed().as_millis() as u64).max(1);
             self.emit(session, Event::ModelCallFinished);
 
             let err = match completion {
                 Ok(c) => {
+                    emit_model_metrics(
+                        session,
+                        &self.bus,
+                        &c.usage,
+                        total_ms,
+                        first_output_ms.load(Ordering::Relaxed),
+                    );
                     // Said here, through `emit`, so it reaches the session file
                     // as well as the screen. The client cannot do this: the
                     // stream sink goes to the display and nothing else, so the
@@ -1558,6 +1576,52 @@ impl Agent {
         }
         Ok(())
     }
+}
+
+fn emit_model_metrics(
+    session: &mut Session,
+    bus: &EventBus,
+    usage: &crate::llm::Usage,
+    total_ms: u64,
+    first_output_ms: u64,
+) {
+    let first_output = (first_output_ms > 0).then_some(first_output_ms);
+    let prompt_tokens_per_second = first_output
+        .map(|ms| tokens_per_second(usage.prompt_tokens, ms))
+        .unwrap_or(0.0);
+    let completion_ms = first_output
+        .map(|ms| total_ms.saturating_sub(ms).max(1))
+        .unwrap_or(total_ms.max(1));
+    let completion_tokens_per_second = tokens_per_second(usage.completion_tokens, completion_ms);
+    let ev = Event::ModelMetrics {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        total_ms,
+        first_output_ms: first_output,
+        prompt_tokens_per_second,
+        completion_tokens_per_second,
+    };
+    let _ = session.append_event(&ev);
+    bus.emit(ev);
+}
+
+fn record_first_output(first_output_ms: &AtomicU64, started: Instant) {
+    first_output_ms
+        .compare_exchange(
+            0,
+            (started.elapsed().as_millis() as u64).max(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .ok();
+}
+
+fn tokens_per_second(tokens: u32, ms: u64) -> f64 {
+    if tokens == 0 || ms == 0 {
+        return 0.0;
+    }
+    tokens as f64 / (ms as f64 / 1000.0)
 }
 
 /// The system prompt plus any skills loaded this session.
