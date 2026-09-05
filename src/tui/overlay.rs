@@ -8,8 +8,8 @@ pub(super) struct Overlay {
     matched: Vec<usize>,
     pub(super) selected: usize,
     /// A picker lets you select a row (Enter puts it in the composer). A
-    /// reference — like the footer legend — has nothing to pick: Enter just
-    /// closes, and the footer bar says so.
+    /// reference — like the footer legend — has nothing to pick, so Enter is
+    /// ignored.
     pub(super) picking: bool,
 }
 
@@ -33,8 +33,7 @@ impl Overlay {
     }
 
     /// A read-only list: rows can be scrolled and filtered, but there is
-    /// nothing to select. Enter closes rather than putting a row in the
-    /// composer, which would be nonsense for a legend.
+    /// nothing to select. Esc is the explicit close action.
     pub(super) fn reference(title: impl Into<String>, items: Vec<OverlayItem>) -> Self {
         let matched = (0..items.len()).collect();
         Self {

@@ -1198,6 +1198,31 @@ fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow>
 }
 
 fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
+    if app.overlay.as_ref().is_some_and(|ov| !ov.picking) {
+        match key.code {
+            KeyCode::PageUp => {
+                app.scroll_up(10);
+                app.transcript.dirty = true;
+                return Some(Flow::Continue);
+            }
+            KeyCode::PageDown => {
+                app.scroll_down(10);
+                app.transcript.dirty = true;
+                return Some(Flow::Continue);
+            }
+            KeyCode::Char('u') if ctrl => {
+                app.scroll_up(10);
+                app.transcript.dirty = true;
+                return Some(Flow::Continue);
+            }
+            KeyCode::Char('d') if ctrl => {
+                app.scroll_down(10);
+                app.transcript.dirty = true;
+                return Some(Flow::Continue);
+            }
+            _ => {}
+        }
+    }
     let mut close_overlay = false;
     let mut chosen_label = None;
     {
@@ -1210,14 +1235,11 @@ fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> 
             KeyCode::Char('n') if ctrl => ov.move_by(1),
             KeyCode::Char('c') if ctrl => return Some(Flow::Quit),
             KeyCode::Backspace => ov.pop_filter(),
-            KeyCode::Enter => {
-                let (chosen, picking) = (ov.chosen(), ov.picking);
+            KeyCode::Enter if ov.picking => {
+                chosen_label = ov.chosen();
                 close_overlay = true;
-                // A reference has nothing to pick, so Enter just closes.
-                if picking {
-                    chosen_label = chosen;
-                }
             }
+            KeyCode::Enter => {}
             KeyCode::Char(c) if !ctrl => ov.push_filter(c),
             _ => {}
         }
@@ -1871,24 +1893,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 app.push(Kind::Error, format!("usage: /metrics [session-id] (got {extra})"));
                 return Ok(true);
             }
-            // Same reason as /history: read the append-only file, never the
-            // session lock, so this remains usable while work is running.
-            let path = match &id {
-                Some(id) => crate::session::Session::path_for_id(id).ok(),
-                None => Some(app.session_path.clone()),
-            };
-            let Some(path) = path else {
-                app.push(Kind::Error, "no such session".to_string());
-                return Ok(true);
-            };
-            match crate::session::events(&path) {
-                Ok(evs) => {
-                    for line in metrics_report(&evs) {
-                        app.push(Kind::Notice, line);
-                    }
-                }
-                Err(e) => app.push(Kind::Error, format!("metrics: {e}")),
-            }
+            show_metrics_overlay(app, id);
         }
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
         "skill" | "skills" => skill_command(app, cwd, parts),
@@ -2688,6 +2693,30 @@ fn render_recent(session: &Session, max_messages: usize) -> String {
 }
 
 /// Summarize model-request timings recorded in the append-only session log.
+fn show_metrics_overlay(app: &mut App, id: Option<String>) {
+    // Same reason as /history: read the append-only file, never the session
+    // lock, so this remains usable while work is running.
+    let path = match &id {
+        Some(id) => crate::session::Session::path_for_id(id).ok(),
+        None => Some(app.session_path.clone()),
+    };
+    let Some(path) = path else {
+        app.push(Kind::Error, "no such session".to_string());
+        return;
+    };
+    match crate::session::events(&path) {
+        Ok(evs) => {
+            let items = metrics_report(&evs)
+                .into_iter()
+                .map(|line| OverlayItem { label: line, description: String::new() })
+                .collect();
+            app.overlay = Some(Overlay::reference("metrics · Esc close", items));
+            app.transcript.dirty = true;
+        }
+        Err(e) => app.push(Kind::Error, format!("metrics: {e}")),
+    }
+}
+
 fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
     #[derive(Clone, Copy)]
     struct Sample {
@@ -2753,52 +2782,84 @@ fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
     let avg_prompt = average_f64(samples.iter().map(|s| s.prompt_tokens_per_second));
 
     let mut lines = vec![
+        "Summary".to_string(),
         format!(
-            "metrics: {} model call(s), {} compaction(s)",
+            "  calls {:<5} compactions {:<5} peak ctx {}",
             samples.len(),
-            compactions.len()
-        ),
-        format!(
-            "latest: ctx={} out={} reason={} first={} total={} prompt/s={:.1} decode/s={:.1}",
-            compact_count(last.prompt_tokens as u64),
-            last.completion_tokens,
-            last.reasoning_tokens,
-            fmt_ms_opt(last.first_output_ms),
-            fmt_ms(last.total_ms),
-            last.prompt_tokens_per_second,
-            last.completion_tokens_per_second
-        ),
-        format!(
-            "peak ctx: call #{} at {} tokens; avg first={} avg total={} avg prompt/s={:.1} avg decode/s={:.1}",
-            peak.idx,
+            compactions.len(),
             compact_count(peak.prompt_tokens as u64),
-            fmt_ms(avg_first),
-            fmt_ms(avg_total),
-            avg_prompt,
-            avg_decode
+        ),
+        String::new(),
+        "Latest Call".to_string(),
+        metric_pair_line(
+            "ctx",
+            compact_count(last.prompt_tokens as u64),
+            "output",
+            last.completion_tokens.to_string(),
+        ),
+        metric_pair_line(
+            "reasoning",
+            last.reasoning_tokens.to_string(),
+            "first",
+            fmt_ms_opt(last.first_output_ms),
+        ),
+        metric_pair_line(
+            "total",
+            fmt_ms(last.total_ms),
+            "prompt/s",
+            format!("{:.1}", last.prompt_tokens_per_second),
+        ),
+        format!("  {:<11} {:.1}", "decode/s", last.completion_tokens_per_second),
+        String::new(),
+        "Averages".to_string(),
+        metric_pair_line("first", fmt_ms(avg_first), "total", fmt_ms(avg_total)),
+        metric_pair_line(
+            "prompt/s",
+            format!("{avg_prompt:.1}"),
+            "decode/s",
+            format!("{avg_decode:.1}"),
         ),
     ];
     if let Some(breakdown) = last.context_breakdown {
-        lines.push(format!(
-            "latest breakdown (est): system={} skills={} memory={} history={} latest_user={} tools={} sum={} provider={}",
+        lines.push(String::new());
+        lines.push("Context Breakdown".to_string());
+        lines.push(metric_pair_line(
+            "system",
             compact_count(breakdown.system_tokens as u64),
-            compact_count(breakdown.loaded_skill_tokens as u64),
-            compact_count(breakdown.memory_tokens as u64),
-            compact_count(breakdown.history_tokens as u64),
-            compact_count(breakdown.latest_user_tokens as u64),
+            "tools",
             compact_count(breakdown.tool_schema_tokens as u64),
+        ));
+        lines.push(metric_pair_line(
+            "skills",
+            compact_count(breakdown.loaded_skill_tokens as u64),
+            "memory",
+            compact_count(breakdown.memory_tokens as u64),
+        ));
+        lines.push(metric_pair_line(
+            "history",
+            compact_count(breakdown.history_tokens as u64),
+            "latest user",
+            compact_count(breakdown.latest_user_tokens as u64),
+        ));
+        lines.push(metric_pair_line(
+            "est sum",
             compact_count(context_breakdown_total(breakdown) as u64),
+            "provider",
             compact_count(last.prompt_tokens as u64),
         ));
     }
     if let Some((before, after)) = compactions.last() {
-        lines.push(format!("last compact: ~{before} → ~{after} tokens"));
+        lines.push(String::new());
+        lines.push("Compaction".to_string());
+        lines.push(format!("  latest      ~{before} -> ~{after} tokens"));
     }
-    lines.push("recent model calls:".to_string());
+    lines.push(String::new());
+    lines.push("Recent Calls".to_string());
+    lines.push("  #    age    ctx      first    total    decode/s".to_string());
     let first = samples.len().saturating_sub(8);
     for s in &samples[first..] {
         lines.push(format!(
-            "  #{:<3} +{:>4}s  ctx={:<7} first={:<7} total={:<7} decode/s={:.1}",
+            "  {:<4} {:>4}s  {:<7} {:<8} {:<8} {:.1}",
             s.idx,
             s.ts.saturating_sub(start),
             compact_count(s.prompt_tokens as u64),
@@ -2808,6 +2869,15 @@ fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
         ));
     }
     lines
+}
+
+fn metric_pair_line(
+    left_label: &str,
+    left_value: String,
+    right_label: &str,
+    right_value: String,
+) -> String {
+    format!("  {left_label:<11} {left_value:<8}  {right_label:<11} {right_value}")
 }
 
 fn average_ms(values: impl Iterator<Item = u64>) -> u64 {
@@ -3275,6 +3345,19 @@ fn expand_file_mentions(input: &str, cwd: &Path) -> String {
 
 // ---- rendering ------------------------------------------------------------
 
+const OVERLAY_BORDER_ROWS: u16 = 2;
+const OVERLAY_VERTICAL_ANCHOR_DIVISOR: u16 = 3;
+const PICKER_HORIZONTAL_MARGIN: u16 = 8;
+const PICKER_MIN_WIDTH: u16 = 20;
+const PICKER_MAX_WIDTH: u16 = 76;
+const PICKER_MAX_ROWS: u16 = 14;
+const OVERLAY_EMPTY_ROWS: u16 = 1;
+const REFERENCE_HORIZONTAL_MARGIN: u16 = 4;
+const REFERENCE_CONTENT_PADDING: usize = 4;
+const REFERENCE_LABEL_MAX_WIDTH: usize = 20;
+const REFERENCE_MIN_WIDTH: usize = 20;
+const REFERENCE_MAX_ROWS: u16 = 24;
+
 fn ui(f: &mut Frame, app: &App) {
     // The composer grows with its content (up to MAX_INPUT_ROWS), + borders.
     let input_height = app.composer.render_height();
@@ -3379,13 +3462,21 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
 /// A centered floating list. `Clear` blanks what is underneath, which is what
 /// makes it read as a window rather than as text drawn over the transcript.
 fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
+    if !ov.picking {
+        render_reference_overlay(f, area, ov);
+        return;
+    }
+
     let matches = ov.matches();
     // Bounds are constant and ordered, so clamp cannot panic here.
-    let width = area.width.saturating_sub(8).clamp(20, 76);
-    let rows = (matches.len() as u16).clamp(1, 14);
-    let height = (rows + 2).min(area.height.saturating_sub(2));
+    let width = area
+        .width
+        .saturating_sub(PICKER_HORIZONTAL_MARGIN)
+        .clamp(PICKER_MIN_WIDTH, PICKER_MAX_WIDTH);
+    let rows = (matches.len() as u16).clamp(OVERLAY_EMPTY_ROWS, PICKER_MAX_ROWS);
+    let height = (rows + OVERLAY_BORDER_ROWS).min(area.height.saturating_sub(OVERLAY_BORDER_ROWS));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 3;
+    let y = area.y + (area.height.saturating_sub(height)) / OVERLAY_VERTICAL_ANCHOR_DIVISOR;
     let rect = Rect { x, y, width, height };
 
     f.render_widget(ratatui::widgets::Clear, rect);
@@ -3398,7 +3489,7 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .title_bottom(if ov.picking { " ↑↓ move · Enter pick · Esc close " } else { " ↑↓ move · Esc close " });
+        .title_bottom(" ↑↓ move · Enter pick · Esc close ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -3441,6 +3532,93 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
         lines
     };
     f.render_widget(Paragraph::new(body), inner);
+}
+
+fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
+    let matches = ov.matches();
+    let label_w = matches
+        .iter()
+        .filter(|(_, i)| !i.description.is_empty())
+        .map(|(_, i)| i.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(REFERENCE_LABEL_MAX_WIDTH);
+    let rendered: Vec<(String, bool)> = matches
+        .iter()
+        .map(|(_, item)| {
+            if item.description.is_empty() {
+                let heading = is_reference_heading(&item.label);
+                (item.label.clone(), heading)
+            } else {
+                (
+                    format!("{:<label_w$}  {}", item.label, item.description),
+                    false,
+                )
+            }
+        })
+        .collect();
+    let max_width = area
+        .width
+        .saturating_sub(REFERENCE_HORIZONTAL_MARGIN)
+        .max(REFERENCE_MIN_WIDTH as u16) as usize;
+    let line_width = rendered
+        .iter()
+        .map(|(line, _)| line.chars().count())
+        .max()
+        .unwrap_or(REFERENCE_MIN_WIDTH)
+        + REFERENCE_CONTENT_PADDING;
+    let width = line_width.clamp(REFERENCE_MIN_WIDTH, max_width) as u16;
+    let rows = (matches.len() as u16).clamp(OVERLAY_EMPTY_ROWS, REFERENCE_MAX_ROWS);
+    let height = (rows + OVERLAY_BORDER_ROWS).min(area.height.saturating_sub(OVERLAY_BORDER_ROWS));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / OVERLAY_VERTICAL_ANCHOR_DIVISOR;
+    let rect = Rect { x, y, width, height };
+
+    f.render_widget(ratatui::widgets::Clear, rect);
+
+    let title = if ov.filter.is_empty() {
+        format!(" {} ", ov.title)
+    } else {
+        format!(" {} · {} ", ov.title, ov.filter)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(" Esc close ");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let visible = inner.height as usize;
+    let sel = ov.sel_index(matches.len());
+    let first = sel.saturating_sub(visible.saturating_sub(1));
+    let lines: Vec<Line> = rendered
+        .iter()
+        .skip(first)
+        .take(visible)
+        .map(|(text, heading)| {
+            if *heading {
+                Line::from(Span::styled(
+                    text.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(text.clone())
+            }
+        })
+        .collect();
+    let body = if lines.is_empty() {
+        vec![Line::from(Span::styled(
+            "(nothing matches)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        lines
+    };
+    f.render_widget(Paragraph::new(body), inner);
+}
+
+fn is_reference_heading(text: &str) -> bool {
+    !text.is_empty() && !text.starts_with(' ') && !text.starts_with('#')
 }
 
 fn render_transcript(f: &mut Frame, area: Rect, transcript: &Transcript) {
@@ -3745,14 +3923,145 @@ mod tests {
 
         let report = metrics_report(&evs).join("\n");
 
-        assert!(report.contains("metrics: 2 model call(s), 1 compaction(s)"));
-        assert!(report.contains("latest: ctx=2.0k out=100 reason=10 first=750ms total=2.0s"));
-        assert!(report.contains("peak ctx: call #2 at 2.0k"));
-        assert!(report.contains(
-            "latest breakdown (est): system=100 skills=300 memory=50 history=900 latest_user=20 tools=250 sum=1.6k provider=2.0k"
+        assert!(report.contains("Summary"));
+        assert!(report.contains("calls 2     compactions 1     peak ctx 2.0k"));
+        assert!(report.contains("Latest Call"));
+        assert!(report.contains("ctx         2.0k      output      100"));
+        assert!(report.contains("Averages"));
+        assert!(report.contains("Context Breakdown"));
+        assert!(report.contains("system      100       tools       250"));
+        assert!(report.contains("est sum     1.6k      provider    2.0k"));
+        assert!(report.contains("Compaction"));
+        assert!(report.contains("latest      ~1800 -> ~700 tokens"));
+        assert!(report.contains("Recent Calls"));
+        assert!(report.contains("2       5s  2.0k    750ms    2.0s     80.0"));
+        assert!(!report.contains("latest breakdown (est):"));
+    }
+
+    #[test]
+    fn metrics_opens_an_overlay_without_adding_transcript_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut session = Session::create_at(&path, dir.path()).unwrap();
+        session
+            .append_event(&Event::ModelMetrics {
+                prompt_tokens: 2000,
+                completion_tokens: 100,
+                reasoning_tokens: 10,
+                context_breakdown: Some(crate::llm::ContextBreakdown {
+                    system_tokens: 100,
+                    loaded_skill_tokens: 300,
+                    memory_tokens: 50,
+                    history_tokens: 900,
+                    latest_user_tokens: 20,
+                    tool_schema_tokens: 250,
+                }),
+                total_ms: 2000,
+                first_output_ms: Some(750),
+                prompt_tokens_per_second: 2666.7,
+                completion_tokens_per_second: 80.0,
+            })
+            .unwrap();
+
+        let mut app = app();
+        app.session_path = path;
+        app.push(Kind::Assistant, "keep this transcript clean");
+        let before = app.transcript.items.len();
+
+        show_metrics_overlay(&mut app, None);
+
+        assert_eq!(app.transcript.items.len(), before);
+        let overlay = app.overlay.as_ref().expect("metrics should open an overlay");
+        assert!(!overlay.picking);
+        let labels = overlay
+            .matches()
+            .iter()
+            .map(|(_, item)| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Summary"));
+        assert!(labels.contains(&"Latest Call"));
+        assert!(labels.contains(&"Context Breakdown"));
+        assert!(!labels.iter().any(|line| line.starts_with("latest breakdown (est):")));
+    }
+
+    #[test]
+    fn metrics_overlay_renders_as_a_dashboard_not_a_picker() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app();
+        app.overlay = Some(Overlay::reference(
+            "metrics · Esc close",
+            metrics_report(&[crate::session::TimedEvent {
+                ts: 1,
+                event: Event::ModelMetrics {
+                    prompt_tokens: 4800,
+                    completion_tokens: 36,
+                    reasoning_tokens: 11,
+                    context_breakdown: Some(crate::llm::ContextBreakdown {
+                        system_tokens: 2100,
+                        loaded_skill_tokens: 0,
+                        memory_tokens: 0,
+                        history_tokens: 0,
+                        latest_user_tokens: 3,
+                        tool_schema_tokens: 2100,
+                    }),
+                    total_ms: 1400,
+                    first_output_ms: Some(920),
+                    prompt_tokens_per_second: 5219.6,
+                    completion_tokens_per_second: 74.4,
+                },
+            }])
+            .into_iter()
+            .map(|line| OverlayItem {
+                label: line,
+                description: String::new(),
+            })
+            .collect(),
         ));
-        assert!(report.contains("last compact: ~1800 → ~700 tokens"));
-        assert!(report.contains("#2   +   5s  ctx=2.0k"));
+
+        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        term.draw(|f| ui(f, &app)).unwrap();
+        let rendered: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(rendered.contains("Latest Call"));
+        assert!(rendered.contains("Context Breakdown"));
+        assert!(rendered.contains("provider    4.8k"));
+        assert!(rendered.contains("Recent Calls"));
+        assert!(rendered.contains("Esc close"));
+        assert!(!rendered.contains("Enter pick"));
+        assert!(!rendered.contains("latest breakdown (est):"));
+    }
+
+    #[test]
+    fn reference_overlay_page_keys_scroll_the_transcript_behind_it() {
+        let mut app = app();
+        app.overlay = Some(Overlay::reference(
+            "metrics · Esc close",
+            vec![OverlayItem { label: "metrics".into(), description: String::new() }],
+        ));
+
+        let flow = handle_overlay_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
+
+        assert!(matches!(flow, Some(Flow::Continue)));
+        assert_eq!(app.transcript.scroll_up, 10);
+        assert!(app.overlay.is_some(), "scrolling should not close the overlay");
+
+        handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        assert!(app.overlay.is_some(), "Enter should not close a read-only overlay");
+
+        handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app, false);
+        assert!(app.overlay.is_none());
     }
 
     fn project_with_config(config: &str) -> tempfile::TempDir {
@@ -5137,7 +5446,6 @@ mod tests {
             vec![OverlayItem { label: "\u{21bb}".into(), description: "thinking".into() }],
         ));
         assert_no_white(&a, "legend");
-        assert_row_is_marked(&a, "\u{21bb}", "legend");
     }
 
     #[test]
