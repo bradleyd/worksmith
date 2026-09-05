@@ -782,7 +782,9 @@ async fn repl(
             continue;
         }
 
-        if let Some(cmd) = trimmed.strip_prefix('/') {
+        if let Some(cmd) = trimmed.strip_prefix('/')
+            && !starts_with_absolute_path(trimmed)
+        {
             match handle_command(cmd, &mem, session, cwd, &mut workers, &agent, config).await {
                 CommandResult::Quit => break,
                 CommandResult::Handled => {
@@ -886,6 +888,14 @@ enum CommandResult {
     Quit,
     Handled,
     NotACommand,
+}
+
+fn starts_with_absolute_path(input: &str) -> bool {
+    input
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .is_some_and(|head| head.contains('/'))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1759,5 +1769,20 @@ fn resolve_project_trust(config: Config, cwd: &Path, args: &Args) -> Result<Conf
             },
             other => println!("(didn't understand `{other}`)"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::starts_with_absolute_path;
+
+    #[test]
+    fn absolute_paths_are_not_slash_commands() {
+        assert!(starts_with_absolute_path(
+            "/sys/class/drm/card0/device/hwmon/hwmon1/power: 42W"
+        ));
+        assert!(starts_with_absolute_path("  /tmp/worksmith/file.txt"));
+        assert!(!starts_with_absolute_path("/help"));
+        assert!(!starts_with_absolute_path("/memory search power"));
     }
 }
