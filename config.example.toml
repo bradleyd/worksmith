@@ -141,9 +141,11 @@ keep-recent-turns = 6       # turns kept verbatim when compacting
 # (observed: three turns of ~8k reasoning tokens each, zero output).
 #
 # A number is the setting in between: reasoning gets its OWN cap, so the rest of
-# max-tokens is still there for an answer. Only providers that speak the
-# `reasoning` dialect can express this (OpenRouter, OpenAI) — on a chat-template
-# provider (vLLM, llama.cpp) a budget degrades to plain "on" and says so.
+# max-tokens is still there for an answer. OpenRouter and OpenAI express this as
+# `reasoning.max_tokens`. vLLM can enforce it too when its provider section sets
+# `reasoning-budget-param = "thinking_token_budget"`. On a chat-template
+# provider with no configured budget field (llama.cpp, LM Studio, Ollama), a
+# budget degrades to plain "on" and says so.
 #
 # 2000 is the shipped default for the Qwen3-27B class this targets: measured on
 # a chapter review, the same model with uncapped thinking spent all 8192 tokens
@@ -210,8 +212,8 @@ synthesize = true
 # Off by default on purpose, and this is the one to think about before enabling:
 # workers share the session's working tree, so a fan-out of N runs the check N
 # times concurrently in one directory. Safe for a read-only check (`cargo
-# check`, a linter); a poor fit for anything that writes, until each worker gets
-# its own tree (PLAN M11). Per-spawn `/spawn --until "<check>"` overrides it.
+# check`, a linter); a poor fit for anything that writes until workers get
+# separate trees. Per-spawn `/spawn --until "<check>"` overrides it.
 #   validate = "cargo test"
 
 [tools]
@@ -242,8 +244,7 @@ insert-escape-ms = 300
 # --- Models ------------------------------------------------------------------
 # Per-model settings, keyed by the same `provider/model` you put in `model`.
 # One table, because three things want the same key: what a model costs, how it
-# wants to be sampled, and (later) which models `/model` offers and how work is
-# routed between them (PLAN M12).
+# wants to be sampled, and which models `/model` offers.
 #
 # Prices are USD per million tokens, and they are what turns the footer's token
 # counts into a session cost. A model with no entry shows no cost rather than

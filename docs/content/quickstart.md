@@ -79,12 +79,13 @@ key env var is exported.
 cp ~/.worksmith/config.example.toml ~/.worksmith/config.toml
 ```
 
-`--model` overrides the configured model, but it does not create a provider.
-For example, `--model openrouter/qwen/qwen3.5-9b` still needs
-`[providers.openrouter]` in the active config. This matters when you set
-`WORKSMITH_HOME` for a throwaway run: that relocated home has its own config,
-sessions, and global memory, so copy a known-good `config.toml` into it or fill
-in the generated example there.
+`--model` overrides the configured model. For hosted providers with built-in
+defaults, `--model openrouter/...` and `--model openai/...` are enough when the
+matching API key env var is set. For local or custom providers, `--model`
+selects the provider name but does not invent its URL. This matters when you
+set `WORKSMITH_HOME` for a throwaway run: that relocated home has its own
+config, sessions, and global memory, so copy a known-good `config.toml` into it
+or fill in the generated example there.
 
 The whole file you need to start looks like this. One model, one provider:
 
@@ -131,6 +132,40 @@ model = "vllm/Qwen/Qwen3.5-9B"
 type = "openai-compat"
 base-url = "http://localhost:8000/v1"
 # no api-key-env — a local server needs no key
+thinking-param = "chat-template"
+reasoning-budget-param = "thinking_token_budget"
+```
+
+Provider examples, copied into `~/.worksmith/config.toml` as needed:
+
+```toml
+# OpenRouter: hosted models behind OPENROUTER_API_KEY. Built in for --model,
+# but explicit config lets you set routing and timeouts.
+[providers.openrouter]
+type = "openai-compat"
+base-url = "https://openrouter.ai/api/v1"
+api-key-env = "OPENROUTER_API_KEY"
+# sort = "throughput" # or "latency" / "price"
+
+# OpenAI: hosted models behind OPENAI_API_KEY. Also built in for --model.
+[providers.openai]
+type = "openai-compat"
+base-url = "https://api.openai.com/v1"
+api-key-env = "OPENAI_API_KEY"
+
+# vLLM: local or remote OpenAI-compatible server.
+[providers.vllm]
+type = "openai-compat"
+base-url = "http://127.0.0.1:8000/v1"
+thinking-param = "chat-template"
+reasoning-budget-param = "thinking_token_budget"
+
+# oMLX: macOS/Apple silicon server.
+[providers.omlx]
+type = "openai-compat"
+base-url = "http://127.0.0.1:8000/v1"
+thinking-param = "chat-template"
+reasoning-budget-param = "thinking_budget"
 ```
 
 When in doubt about what a local server accepts, ask it. Most are

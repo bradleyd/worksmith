@@ -29,19 +29,21 @@ docs say so out loud.
   4B alone, 95% for the same model in the loop, 100% for Sonnet at 26 cents.
   Includes the four results we retracted and the measurement bugs that produced
   them.
-- **Workers** (coming soon) — one `/spawn` into N workers, the supervisor that
-  is the same nudge/escalate mechanism applied to many, and the worker
-  validator that closes the same hole in the background.
-- **Memory and knowledge** (coming soon) — why a distilled decision is memory
-  and a chunk of the repo's own text is knowledge, and why the prompt never
-  gets the latter wholesale.
-- **Trust** (coming soon) — why a project's `.worksmith/config.toml` is not
-  applied until you say it is, and why the decision is keyed by content, so an
-  edit re-asks.
-- **Thinking cost** (coming soon) — what `↻` in the footer means, why
-  `max-tokens` must cover reasoning *and* output, and when `/fast` is the
-  right call.
+- **Workers** — one `/spawn` into N workers, the supervisor that is the same
+  nudge/escalate mechanism applied to many, and the worker validator that
+  closes the same hole in the background. The current reference is in the
+  README until this gets its own guide page.
+- **Memory and knowledge** — memory is a distilled decision, preference, fact,
+  or lesson; knowledge is the repo's own rebuildable text index. Memory can be
+  mined from past sessions and reviewed with `/memory pending`; knowledge is
+  searched on demand with `/knowledge search`.
+- **Trust** — a project's `.worksmith/config.toml` is not applied until you say
+  it is. The decision is keyed by content, so an edit re-asks. `/trust` shows
+  the current decision and `/trust revoke` reopens it.
+- **Thinking cost** — `↻` in the footer is reasoning spend, `max-tokens` must
+  cover reasoning *and* output, and `/fast` or `/think <budget>` are the main
+  controls when a local model thinks itself into silence.
 
-The reference — CLI flags, config keys, tool descriptions, the event enum — is
-generated from the binary and the source, not hand-written here. When the two
-disagree, the generated reference is right.
+The reference lives in the README, `config.example.toml`, and the in-app
+`/help`. When they disagree, `/help` and the shipped `config.example.toml` are
+closest to the code.

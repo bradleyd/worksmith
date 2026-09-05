@@ -260,6 +260,41 @@ built-in provider defaults (`OPENROUTER_API_KEY` and `OPENAI_API_KEY`). Other
 prefixes, including local servers such as `vllm/...`, need a
 `[providers.<name>]` section because Worksmith cannot guess their URL.
 
+Provider examples:
+
+```toml
+# OpenRouter: hosted models behind one key. Built in for --model, but explicit
+# config lets you set routing, timeouts, or prices per model.
+[providers.openrouter]
+type = "openai-compat"
+base-url = "https://openrouter.ai/api/v1"
+api-key-env = "OPENROUTER_API_KEY"
+# sort = "throughput" # or "latency" / "price"
+
+# OpenAI: hosted OpenAI-compatible endpoint. Built in for --model.
+[providers.openai]
+type = "openai-compat"
+base-url = "https://api.openai.com/v1"
+api-key-env = "OPENAI_API_KEY"
+
+# vLLM: local or remote OpenAI-compatible server. Qwen-style thinking is
+# controlled through chat_template_kwargs; vLLM's server-enforced budget field
+# is thinking_token_budget.
+[providers.vllm]
+type = "openai-compat"
+base-url = "http://127.0.0.1:8000/v1"
+thinking-param = "chat-template"
+reasoning-budget-param = "thinking_token_budget"
+
+# oMLX: macOS/Apple silicon server. It uses the same chat-template switch but
+# spells the server-enforced budget differently.
+[providers.omlx]
+type = "openai-compat"
+base-url = "http://127.0.0.1:8000/v1"
+thinking-param = "chat-template"
+reasoning-budget-param = "thinking_budget"
+```
+
 ### Top level
 
 | key | default | what it does |
@@ -319,7 +354,7 @@ One table, because prices, sampling, and window all want the same key.
 | `repeat-threshold` | `4` | Repeated identical calls before the supervisor acts. |
 | `token-budget` | unset | Completion tokens a worker may spend before escalating. Unset means no budget. A runaway guard, not a work cap. One docs page measured about 10k, so a low value stops real work and reports it as `aborted`. |
 | `request-timeout` | `600` | How long the supervisor waits on an in-flight worker call before escalating. **Workers only.** The main loop's stall guard is `stream-idle-timeout`. |
-| `fanout` | none | Whether a bare `/spawn` plans a fan-out or runs one worker. |
+| `fanout` | `auto` | Whether a bare `/spawn` plans a fan-out or runs one worker. Set `off` to make bare `/spawn` always one worker. |
 | `synthesize` | `true` | After a fan-out group reports, ask the session's model to combine the results. |
 
 ### `[tools]`, `[web]`, `[tui]`
@@ -336,9 +371,9 @@ One table, because prices, sampling, and window all want the same key.
 ## Status
 
 Everything in the next section works today. MCP and a real sandbox are still
-ahead. [`PLAN.md`](PLAN.md) §10a records what is being built next, and why in
-that order. Design notes live in [`PLAN.md`](PLAN.md) and
-[`worksmith-memory-v1.md`](worksmith-memory-v1.md).
+ahead. [`PLAN.md`](PLAN.md) records the loose roadmap and
+[`worksmith-memory-v1.md`](worksmith-memory-v1.md) records the memory design,
+but the feature reference below is the current source of truth for what ships.
 
 ## What works today
 
@@ -353,7 +388,7 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   fork bombs, `dd`/`mkfs` to devices, `curl … | sh`, recursive `chmod` of `/`)
   are refused outright and hard-stop the turn. Outward-facing ones prompt (see
   the approval gate below). None of it is a sandbox. It raises the cost of an
-  accident, not the cost of an attack (PLAN §10a item 4).
+  accident, not the cost of an attack.
 - **Fan-out:** one `/spawn` can become several workers. `/spawn create 3
   separate articles on sqlite` asks a cheap planner whether the request divides
   (it answers "one worker" for most tasks); `-n 3` forces the count;
@@ -380,7 +415,8 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   in the transcript with the **files it changed** and its result; `/agents`
   lists live status, `/agents show <id>` shows changed files, the session-file
   path, and the full result, `/agents kill <id>` cancels. Footer shows
-  `↑N agents`. Concurrency capped by `agents.max`.
+  running/queued worker counts and their separate token spend. Concurrency is
+  capped by `agents.max`.
 - **Cheap workers, smart parent:** `agents.model` (or `/spawn --worker-model
   <provider/model>`) runs workers on a different model than the session. The
   override carries its own client, so the worker model can live behind another
@@ -489,8 +525,8 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   re-plans until the check passes instead of stopping when the model says it is
   done. Opt-in rather than inherited from the session, because workers share one
   working tree, and a fan-out of five would run the check five times at once in
-  the same directory. Fine for a read-only check today. The general answer is a
-  tree per worker (PLAN M11).
+  the same directory. Fine for a read-only check today; a tree per worker is
+  still future work.
 - **Approval gate**: catastrophic commands (`rm -rf /`, `mkfs`, `curl | sh`) are
   refused outright. Outward-facing or irreversible ones prompt before running:
   `git push`, `sudo`, `cargo publish`, `curl -X POST`, `kubectl delete`, and
@@ -503,7 +539,7 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   Ordinary work never prompts, so `cargo test`, `git commit` and `grep` stay
   quiet. A prompt answered reflexively is worse than no prompt at all. None of
   this is isolation. It raises the cost of an accident, not the cost of an
-  attack (PLAN M11).
+  attack.
 - **Skills**: the [Agent Skills](https://agentskills.io) format as published, so
   a `SKILL.md` you wrote for Claude Code, Codex, or Cursor works here unchanged
   (and vice versa). Found in `<project>/skills/`, `~/.claude/skills/`,
@@ -515,10 +551,10 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
   `WORKSMITH_HOME` relocates the whole global directory (config, sessions,
   global memory), which is useful for throwaway runs and used by the test suite.
-  A relocated home starts with no providers configured: either copy a known-good
-  `config.toml` into it or create the provider section from
-  `config.example.toml`. `--model openrouter/...` selects the provider named
-  `openrouter`; it does not create that provider.
+  A relocated home starts with no config. Hosted first runs can still use
+  `--model openrouter/...` or `--model openai/...` when the matching API key env
+  var is set; local/custom providers still need a provider section because
+  Worksmith cannot guess their URL.
 - **Config** (`~/.worksmith/config.toml` + project override) and `AGENTS.md` /
   `CLAUDE.md` discovery.
 - **Memory** (global + project SQLite, supersede semantics): FTS5 search ranked
@@ -568,36 +604,47 @@ Edits from `edit`/`write` render as colored unified diffs so you can see exactly
 what changed.
 
 The composer is multi-line and paste-safe (bracketed paste drops a whole
-snippet in at the cursor instead of sending it line-by-line), with input history.
+snippet in at the cursor instead of sending it line-by-line), with input
+history. Typing while a turn is running steers the model at its next step.
 
-Keys: `Enter` send · `Alt+Enter` newline · `Ctrl+G` edit in `$EDITOR` · `↑`/`↓`
-input history · `←`/`→`/`Home`/`End` move cursor · `Ctrl+W` delete word · `Tab`
-autocomplete (`/command` and `@path`;
-repeat to cycle) · `Esc` abort a running turn (or clear input) · `Ctrl+C` quit ·
-`Ctrl+O` expand/collapse long tool output & diffs · `Ctrl+T` show/hide thinking
-· scroll with the mouse wheel,
-`PgUp`/`PgDn`, `Ctrl+U`/`Ctrl+D`, `↑`/`↓`, `Home`/`End`. Commands: `/new`
-`/compact` `/metrics` `/memory` `/validate <cmd|off>` `/quit`, and `@path` to
-include a file. (Model cycling, vim keybindings, and themes are planned
-follow-ups.)
+Keys: `Enter` sends, or steers a running turn · `Ctrl+N` inserts a newline
+(`Alt`/`Shift+Enter` too when the terminal reports it) · `Ctrl+G` edits in
+`$EDITOR` · `↑`/`↓` browse input history · `←`/`→`/`Home`/`End` move the cursor
+· `Ctrl+W` deletes a word · `Tab` completes commands, ids, models, and `@path`
+mentions · `Esc` aborts a running turn, clears input, or enters normal mode from
+an empty composer · `Ctrl+C` quits · `Ctrl+O` expands/collapses long tool output
+and diffs · `Ctrl+T` shows/hides thinking.
+
+Normal mode (`Esc` on an empty composer, or `jj` when configured) is for reading
+the transcript: `j`/`k`, arrows, `PageUp`/`PageDown`, `Ctrl+U`/`Ctrl+D`,
+`g`/`G`, `/` search, `n`/`N` next/previous match, `y` yank the message under the
+cursor, and `i`/`Enter`/`Esc` returns to typing. The mouse wheel scrolls the
+transcript by default; `/mouse off` gives the wheel back to the terminal for
+selection.
+
+Commands: `/help`, `/new`, `/compact`, `/metrics [session-id]`, `/validate
+<cmd|off>`, `/fast`, `/think`, `/route`, `/model`, `/pair`, `/memory`,
+`/knowledge`, `/skill`, `/spawn`, `/agents`, `/trust`, `/mouse`, `/history`, and
+`/quit`. `@path` includes a file in your message.
 
 ## Plain REPL commands (`--plain`)
 
-The line REPL has the same commands as the TUI:
+The line REPL keeps the core command set, but it does not have the full TUI
+event loop. Use the TUI for overlays, live metrics, model switching, routing,
+normal mode, mouse mode, pairing toggles, and trust prompts.
 
 ```
 /help                     show commands
 /quit                     exit
 /new                      start a new session
 /compact                  summarize the session now
-/metrics [session-id]     latency, token rates, and context trend
 /memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
 /memory search <query> | /memory extract | /memory mine [n]
 /memory pending | /memory approve <id|all> | /memory supersede <new> <old>
-/mouse [on|off]           wheel scrolling vs. selecting text to copy
 /knowledge [index|search <query>|status]
+/skill [name]
 /spawn [-n N | --each-files <regex>] <task>
-/agents [list|tail <id>|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
+/agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
 /validate <cmd|off>       success check for a turn
 @path                     include a file's contents in your message
 ```
@@ -621,10 +668,11 @@ Tests point `WORKSMITH_HOME` at a per-process scratch directory
 
 ### Cutting a release
 
-1. Bump `version` in `Cargo.toml`, then in the tap's formula
-   (`bradleyd/homebrew-worksmith` → `Formula/worksmith.rb`: the URL's
-   `v<version>` tag + version inside the tarball name).
-2. Push, then tag `v<version>`. The release workflow builds the macOS arm64 and
+1. Bump `version` in `Cargo.toml` and `Cargo.lock`, run `cargo test` and
+   `cargo clippy --all-targets -- -D warnings`, commit, then tag `v<version>`.
+2. Push `main` and the tag. The release workflow builds the macOS arm64 and
    Linux x86_64 (musl static) binaries and attaches them to the GitHub release.
-3. Fill the formula's `sha256` from the macOS release artifact and push the
-   tap. Users then get it with `brew upgrade`.
+3. Update the Homebrew tap
+   (`bradleyd/homebrew-worksmith` → `Formula/worksmith.rb`) after the release
+   artifact exists. Point it at the new macOS tarball and fill `sha256` from
+   that artifact. Users then get it with `brew upgrade`.
