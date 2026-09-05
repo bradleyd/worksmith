@@ -94,9 +94,10 @@ pub(super) fn footer_status(app: &App) -> String {
     if app.modals.approval_pending() || app.modals.ask_pending() {
         // No spinner: nothing is happening, and an animation would say it is.
         format!("⏸ waiting for you  {}", app.status)
-    } else if app.running {
+    } else if app.running || app.compacting {
         const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let elapsed = app.turn_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let start = if app.running { app.turn_start } else { app.compact_start };
+        let elapsed = start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
     } else {
         app.status.clone()

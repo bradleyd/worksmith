@@ -146,6 +146,7 @@ struct App {
     /// the whole turn, and awaiting it from the event loop froze the TUI.
     session_path: std::path::PathBuf,
     running: bool,
+    compacting: bool,
     model: String,
     context_limit: usize,
     last_prompt_tokens: u32,
@@ -179,6 +180,7 @@ struct App {
     // Cosmetic/among-turn state.
     spinner: usize,
     turn_start: Option<std::time::Instant>,
+    compact_start: Option<std::time::Instant>,
     agents_running: usize,
     agents_queued: usize,
     /// Fast mode: the model answers without a reasoning pass.
@@ -226,6 +228,7 @@ impl App {
             composer: Composer::default(),
             session_path: std::path::PathBuf::new(),
             running: false,
+            compacting: false,
             model,
             context_limit,
             last_prompt_tokens: 0,
@@ -242,6 +245,7 @@ impl App {
             cur_thinking: None,
             spinner: 0,
             turn_start: None,
+            compact_start: None,
             agents_running: 0,
             agents_queued: 0,
             think_label: None,
@@ -288,6 +292,8 @@ impl App {
         self.total_in_tokens = 0;
         self.total_out_tokens = 0;
         self.last_finish_reason = None;
+        self.compacting = false;
+        self.compact_start = None;
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
@@ -689,6 +695,7 @@ async fn run_loop(
     // on this task, where the memory store lives.
     type MineResults = (Vec<(String, Result<String, String>)>, crate::mining::MineReport);
     let mut mine: Option<JoinHandle<MineResults>> = None;
+    let mut compact: Option<JoinHandle<Result<()>>> = None;
 
     loop {
         // Start queued workers whose slot just freed.
@@ -791,6 +798,7 @@ async fn run_loop(
                             bash_timeout,
                             turn: &mut turn,
                             cancel: &mut cancel,
+                            compact: &mut compact,
                             workers: &mut workers,
                             config: &config,
                         };
@@ -802,10 +810,10 @@ async fn run_loop(
                         // /memory extract: classify the transcript off the UI task.
                         if app.pending_extract {
                             app.pending_extract = false;
-                            if extract.is_some() || app.running {
+                            if extract.is_some() || app.running || app.compacting {
                                 app.push(
                                     Kind::Notice,
-                                    "busy — try /memory extract once the turn finishes"
+                                    "busy — try /memory extract once current work finishes"
                                         .to_string(),
                                 );
                             } else {
@@ -833,10 +841,10 @@ async fn run_loop(
                         // /memory mine: pick the sessions here (the store can't
                         // cross a task boundary), classify them off the UI task.
                         if let Some(limit) = app.pending_mine.take() {
-                            if mine.is_some() || extract.is_some() || app.running {
+                            if mine.is_some() || extract.is_some() || app.running || app.compacting {
                                 app.push(
                                     Kind::Notice,
-                                    "busy — try /memory mine once the turn finishes".to_string(),
+                                    "busy — try /memory mine once current work finishes".to_string(),
                                 );
                             } else {
                                 match crate::mining::plan(&mem, &cwd, limit) {
@@ -985,6 +993,20 @@ async fn run_loop(
                 if app.transcript.follow { app.transcript.scroll_up = 0; }
             }
 
+            // Explicit /compact finished. The compaction event itself arrives
+            // on the bus; this branch restores the input/footer state.
+            res = join_in_flight(&mut compact), if compact.is_some() => {
+                compact = None;
+                app.compacting = false;
+                app.compact_start = None;
+                match res {
+                    Ok(Ok(())) => app.status = "compacted".into(),
+                    Ok(Err(e)) => app.push(Kind::Error, format!("compaction error: {e:#}")),
+                    Err(e) => app.push(Kind::Error, format!("compaction task failed: {e}")),
+                }
+                if app.transcript.follow { app.transcript.scroll_up = 0; }
+            }
+
             // Fan-out planning finished.
             res = join_planned_fanout(&mut fanout), if fanout.is_some() => {
                 let PlannedFanOut { system, request, model, validate, .. } = fanout.take().unwrap();
@@ -1115,7 +1137,7 @@ async fn run_loop(
             // task, so a loop gated on `running` alone would then sleep with a
             // full queue and never start any of it.
             _ = ticker.tick(),
-                if app.running || app.agents_running > 0 || app.agents_queued > 0 => {
+                if app.running || app.compacting || app.agents_running > 0 || app.agents_queued > 0 => {
                 app.spinner = app.spinner.wrapping_add(1);
             }
         }
@@ -1141,6 +1163,9 @@ async fn run_loop(
     cancel.cancel();
     if let Some(t) = turn.take() {
         let _ = t.await;
+    }
+    if let Some(c) = compact.take() {
+        let _ = c.await;
     }
     Ok(())
 }
@@ -1345,6 +1370,7 @@ struct KeyContext<'a> {
     bash_timeout: Duration,
     turn: &'a mut Option<JoinHandle<Result<TurnResult>>>,
     cancel: &'a mut CancellationToken,
+    compact: &'a mut Option<JoinHandle<Result<()>>>,
     workers: &'a mut WorkerManager,
     config: &'a Config,
 }
@@ -1389,7 +1415,7 @@ async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flo
     if input == "/quit" || input == "/exit" || input == "quit" || input == "exit" {
         return Ok(Flow::Quit);
     }
-    if input.starts_with('/') {
+    if input.starts_with('/') && !starts_with_absolute_path(&input) {
         let mut command_ctx = CommandContext::from(&mut *ctx);
         if handle_command(&input, app, &mut command_ctx).await? {
             // This return skips the `refresh_hint()` at the bottom of
@@ -1416,6 +1442,11 @@ async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flo
         if app.transcript.follow {
             app.transcript.scroll_up = 0;
         }
+        return Ok(Flow::Continue);
+    }
+    if app.compacting {
+        app.composer.set_input(raw);
+        app.status = "compacting history… wait to send".into();
         return Ok(Flow::Continue);
     }
 
@@ -1569,6 +1600,7 @@ struct CommandContext<'a> {
     mem: &'a MemoryStore,
     cwd: &'a Path,
     workers: &'a mut WorkerManager,
+    compact: &'a mut Option<JoinHandle<Result<()>>>,
     config: &'a Config,
 }
 
@@ -1580,6 +1612,7 @@ impl<'a, 'b> From<&'a mut KeyContext<'b>> for CommandContext<'a> {
             mem: ctx.mem,
             cwd: ctx.cwd,
             workers: ctx.workers,
+            compact: ctx.compact,
             config: ctx.config,
         }
     }
@@ -1696,6 +1729,10 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 app.status = "can't start a new session while a turn is running".into();
                 return Ok(true);
             }
+            if app.compacting {
+                app.status = "can't start a new session while compacting history".into();
+                return Ok(true);
+            }
             let mut s = session.lock().await;
             *s = Session::create(cwd)?;
             app.reset_for_new_session(s.path().to_path_buf());
@@ -1704,16 +1741,27 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         "compact" => {
             if app.running {
                 app.status = "can't compact while a turn is running".into();
+            } else if app.compacting {
+                app.status = "already compacting history…".into();
             } else {
-                let mut s = session.lock().await;
-                match agent.compact(&mut s).await {
-                    Ok(()) => app.status = "compacted".into(),
-                    Err(e) => app.push(Kind::Error, format!("compaction error: {e:#}")),
-                }
+                let a = agent.clone();
+                let s = session.clone();
+                app.compacting = true;
+                app.compact_start = Some(std::time::Instant::now());
+                app.status = "compacting history…".into();
+                app.push(Kind::Notice, "compacting history…");
+                *ctx.compact = Some(tokio::spawn(async move {
+                    let mut sess = s.lock().await;
+                    a.compact(&mut sess).await
+                }));
             }
         }
         "memory" | "mem" => memory_command(app, mem, parts),
         "spawn" => {
+            if app.compacting {
+                app.status = "can't spawn workers while compacting history".into();
+                return Ok(true);
+            }
             let args = input.trim_start_matches('/')[head.len()..].trim();
             match parse_spawn(args, app.fanout_auto) {
                 Err(msg) => app.push(Kind::Notice, msg),
@@ -1871,6 +1919,14 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         }
     }
     Ok(true)
+}
+
+fn starts_with_absolute_path(input: &str) -> bool {
+    input
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .is_some_and(|head| head.contains('/'))
 }
 
 fn validate_command<'a>(app: &mut App, parts: impl Iterator<Item = &'a str>) {
@@ -3254,6 +3310,8 @@ fn input_title(app: &App) -> String {
         // Say that typing is useful right now. " working… " reads as "wait",
         // which is what made people assume input was ignored — and it was.
         " working… · Enter steers the running turn · Esc aborts ".to_string()
+    } else if app.compacting {
+        " compacting… · scroll works · wait to send ".to_string()
     } else {
         " message · Enter send · Ctrl+N newline ".to_string()
     }
@@ -4081,6 +4139,33 @@ mod tests {
         assert!(a.transcript.items.is_empty(), "the transcript is empty");
         assert_eq!(a.transcript.scroll_up, 0, "nothing to be scrolled back into");
         assert_eq!(a.session_path, PathBuf::from("/tmp/new-session.jsonl"));
+        assert!(!a.compacting, "a new session cannot inherit compaction state");
+        assert_eq!(a.compact_start, None);
+    }
+
+    #[test]
+    fn compacting_is_visible_without_claiming_a_turn_is_running() {
+        let mut a = app();
+        a.compacting = true;
+        a.compact_start = Some(Instant::now() - Duration::from_secs(7));
+        a.status = "compacting history…".into();
+        a.spinner = 1;
+
+        assert!(!a.running, "manual compaction is not a user turn");
+        assert!(
+            input_title(&a).contains("compacting"),
+            "the composer title names the blocking work"
+        );
+        assert!(
+            input_title(&a).contains("scroll works"),
+            "the title must not imply the whole app is frozen"
+        );
+        let status = footer_status(&a);
+        assert!(status.contains("7s"), "elapsed compaction time is visible: {status}");
+        assert!(
+            status.contains("compacting history"),
+            "footer status names the work: {status}"
+        );
     }
 
     #[test]
@@ -5063,6 +5148,16 @@ mod tests {
         a.composer.set_input(String::new());
         a.composer.refresh_hint();
         assert!(a.composer.hint.is_none(), "an empty composer must not still show a command list");
+    }
+
+    #[test]
+    fn absolute_paths_are_not_slash_commands() {
+        assert!(starts_with_absolute_path(
+            "/sys/class/drm/card0/device/hwmon/hwmon1/power: 42W"
+        ));
+        assert!(starts_with_absolute_path("  /tmp/worksmith/file.txt"));
+        assert!(!starts_with_absolute_path("/help"));
+        assert!(!starts_with_absolute_path("/memory search power"));
     }
 
     #[test]
