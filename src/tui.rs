@@ -2696,6 +2696,7 @@ fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
         prompt_tokens: u32,
         completion_tokens: u32,
         reasoning_tokens: u32,
+        context_breakdown: Option<crate::llm::ContextBreakdown>,
         total_ms: u64,
         first_output_ms: Option<u64>,
         prompt_tokens_per_second: f64,
@@ -2711,6 +2712,7 @@ fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
                 prompt_tokens,
                 completion_tokens,
                 reasoning_tokens,
+                context_breakdown,
                 total_ms,
                 first_output_ms,
                 prompt_tokens_per_second,
@@ -2721,6 +2723,7 @@ fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
                 prompt_tokens: *prompt_tokens,
                 completion_tokens: *completion_tokens,
                 reasoning_tokens: *reasoning_tokens,
+                context_breakdown: *context_breakdown,
                 total_ms: *total_ms,
                 first_output_ms: *first_output_ms,
                 prompt_tokens_per_second: *prompt_tokens_per_second,
@@ -2775,6 +2778,19 @@ fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
             avg_decode
         ),
     ];
+    if let Some(breakdown) = last.context_breakdown {
+        lines.push(format!(
+            "latest breakdown (est): system={} skills={} memory={} history={} latest_user={} tools={} sum={} provider={}",
+            compact_count(breakdown.system_tokens as u64),
+            compact_count(breakdown.loaded_skill_tokens as u64),
+            compact_count(breakdown.memory_tokens as u64),
+            compact_count(breakdown.history_tokens as u64),
+            compact_count(breakdown.latest_user_tokens as u64),
+            compact_count(breakdown.tool_schema_tokens as u64),
+            compact_count(context_breakdown_total(breakdown) as u64),
+            compact_count(last.prompt_tokens as u64),
+        ));
+    }
     if let Some((before, after)) = compactions.last() {
         lines.push(format!("last compact: ~{before} → ~{after} tokens"));
     }
@@ -2802,6 +2818,15 @@ fn average_ms(values: impl Iterator<Item = u64>) -> u64 {
         sum = sum.saturating_add(v);
     }
     sum.checked_div(n).unwrap_or(0)
+}
+
+fn context_breakdown_total(b: crate::llm::ContextBreakdown) -> u32 {
+    b.system_tokens
+        .saturating_add(b.loaded_skill_tokens)
+        .saturating_add(b.memory_tokens)
+        .saturating_add(b.history_tokens)
+        .saturating_add(b.latest_user_tokens)
+        .saturating_add(b.tool_schema_tokens)
 }
 
 fn average_f64(values: impl Iterator<Item = f64>) -> f64 {
@@ -3680,6 +3705,7 @@ mod tests {
                     prompt_tokens: 1500,
                     completion_tokens: 40,
                     reasoning_tokens: 5,
+                    context_breakdown: None,
                     total_ms: 1500,
                     first_output_ms: Some(500),
                     prompt_tokens_per_second: 3000.0,
@@ -3701,6 +3727,14 @@ mod tests {
                     prompt_tokens: 2000,
                     completion_tokens: 100,
                     reasoning_tokens: 10,
+                    context_breakdown: Some(crate::llm::ContextBreakdown {
+                        system_tokens: 100,
+                        loaded_skill_tokens: 300,
+                        memory_tokens: 50,
+                        history_tokens: 900,
+                        latest_user_tokens: 20,
+                        tool_schema_tokens: 250,
+                    }),
                     total_ms: 2000,
                     first_output_ms: Some(750),
                     prompt_tokens_per_second: 2666.7,
@@ -3714,6 +3748,9 @@ mod tests {
         assert!(report.contains("metrics: 2 model call(s), 1 compaction(s)"));
         assert!(report.contains("latest: ctx=2.0k out=100 reason=10 first=750ms total=2.0s"));
         assert!(report.contains("peak ctx: call #2 at 2.0k"));
+        assert!(report.contains(
+            "latest breakdown (est): system=100 skills=300 memory=50 history=900 latest_user=20 tools=250 sum=1.6k provider=2.0k"
+        ));
         assert!(report.contains("last compact: ~1800 → ~700 tokens"));
         assert!(report.contains("#2   +   5s  ctx=2.0k"));
     }

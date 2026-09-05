@@ -1040,6 +1040,7 @@ async fn the_session_records_model_request_metrics() {
         prompt_tokens,
         completion_tokens,
         reasoning_tokens,
+        context_breakdown,
         total_ms,
         first_output_ms,
         ..
@@ -1052,6 +1053,12 @@ async fn the_session_records_model_request_metrics() {
     assert_eq!(*reasoning_tokens, 7);
     assert!(*total_ms > 0, "total latency should be recorded");
     assert_eq!(*first_output_ms, None, "the scripted client does not stream deltas");
+    let breakdown = context_breakdown.expect("prompt attribution should be recorded");
+    assert!(breakdown.system_tokens > 0);
+    assert_eq!(breakdown.memory_tokens, 0);
+    assert_eq!(breakdown.history_tokens, 0);
+    assert!(breakdown.latest_user_tokens > 0);
+    assert!(breakdown.tool_schema_tokens > 0);
 }
 
 /// A model switch recorded in the session must read back after the process

@@ -471,8 +471,8 @@ that order. Design notes live in [`PLAN.md`](PLAN.md) and
   left out; they would multiply the file by the length of every answer.
 - **Model-call metrics** (`/metrics`, `/metrics <session-id>`): summarizes the
   recorded request timings, context size, output and reasoning tokens, first
-  output latency, total latency, token rates, and compaction count for a
-  session.
+  output latency, total latency, token rates, approximate prompt breakdown, and
+  compaction count for a session.
 - **Watching a worker** (`/agents tail <id>`): a worker's events go to its own
   bus and never reach the parent's transcript, so `/agents` could report status
   but never what a worker was doing. Each worker now keeps a bounded log of its

@@ -26,6 +26,8 @@ pub enum Event {
         prompt_tokens: u32,
         completion_tokens: u32,
         reasoning_tokens: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_breakdown: Option<crate::llm::ContextBreakdown>,
         total_ms: u64,
         first_output_ms: Option<u64>,
         prompt_tokens_per_second: f64,

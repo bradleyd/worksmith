@@ -179,6 +179,7 @@ def parse_events(stdout: str) -> dict:
     model_ms = first_output_ms = prompt_tps = decode_tps = metrics_calls = first_outputs = 0
     outcome = None
     memory_ids: list[str] = []
+    context_breakdown: dict = {}
     by_tool: dict[str, int] = {}
     tool_errors: dict[str, int] = {}
     for line in stdout.splitlines():
@@ -203,6 +204,7 @@ def parse_events(stdout: str) -> dict:
             prompt_tps += e.get("prompt_tokens_per_second", 0.0)
             decode_tps += e.get("completion_tokens_per_second", 0.0)
             ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
+            context_breakdown = e.get("context_breakdown") or context_breakdown
             if e.get("first_output_ms") is not None:
                 first_outputs += 1
                 first_output_ms += e["first_output_ms"]
@@ -227,7 +229,8 @@ def parse_events(stdout: str) -> dict:
             "gen_tokens": gen_tokens, "reasoning_tokens": reasoning_tokens,
             "ctx_peak": ctx_peak, "model_ms": model_ms,
             "first_output_ms": avg_first, "prompt_tps": avg_prompt_tps,
-            "decode_tps": avg_decode_tps, "outcome": outcome,
+            "decode_tps": avg_decode_tps, "context_breakdown": context_breakdown,
+            "outcome": outcome,
             "memory_ids": memory_ids, "memory_used": bool(memory_ids),
             "by_tool": by_tool, "tool_errors": tool_errors}
 
@@ -272,7 +275,7 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
            "passed": False, "model_calls": 0, "tool_calls": 0, "gen_tokens": 0,
            "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None,
            "ctx_peak": 0, "model_ms": 0, "first_output_ms": 0,
-           "prompt_tps": 0.0, "decode_tps": 0.0,
+           "prompt_tps": 0.0, "decode_tps": 0.0, "context_breakdown": {},
            "memory_used": False, "memory_ids": []}
     t0 = time.time()
     try:

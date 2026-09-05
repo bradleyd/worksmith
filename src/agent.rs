@@ -18,7 +18,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, EventBus};
-use crate::llm::{ChatRequest, LlmClient, Message, ModelOverride, StreamEvent, Thinking};
+use crate::llm::{
+    ChatRequest, ContextBreakdown, LlmClient, Message, ModelOverride, StreamEvent, Thinking,
+    ToolDef,
+};
 use crate::memory::MemoryContext;
 use crate::session::Session;
 use crate::tools::{ToolContext, ToolRegistry};
@@ -881,7 +884,7 @@ impl Agent {
                 }
             }
 
-            let mut messages = request_messages(
+            let mut request_parts = request_messages(
                 system_prompt,
                 &self.tool_ctx,
                 memory_context,
@@ -915,10 +918,14 @@ impl Agent {
             let mut shrunk = false;
             let mut compacted_here = false;
             let completion = loop {
+                let tools = self.advertised_tools();
+                request_parts.breakdown.tool_schema_tokens =
+                    tokens_u32(estimate_tool_schema_tokens(&tools));
                 let req = ChatRequest {
                     model: active.model.clone(),
-                    messages: messages.clone(),
-                    tools: self.advertised_tools(),
+                    messages: request_parts.messages.clone(),
+                    tools,
+                    context_breakdown: Some(request_parts.breakdown),
                     temperature: active.temperature,
                     top_p: active.top_p,
                     top_k: active.top_k,
@@ -958,7 +965,7 @@ impl Agent {
                         });
                         break Err(e);
                     }
-                    messages = request_messages(
+                    request_parts = request_messages(
                         system_prompt,
                         &self.tool_ctx,
                         memory_context,
@@ -1373,6 +1380,7 @@ impl Agent {
                         session,
                         &self.bus,
                         &c.usage,
+                        req.context_breakdown,
                         total_ms,
                         first_output_ms.load(Ordering::Relaxed),
                     );
@@ -1456,6 +1464,7 @@ impl Agent {
             model: active.model.clone(),
             messages: vec![Message::system(system), Message::user(user)],
             tools: vec![],
+            context_breakdown: None,
             temperature: Some(0.2),
             top_p: active.top_p,
             top_k: active.top_k,
@@ -1582,6 +1591,7 @@ fn emit_model_metrics(
     session: &mut Session,
     bus: &EventBus,
     usage: &crate::llm::Usage,
+    context_breakdown: Option<ContextBreakdown>,
     total_ms: u64,
     first_output_ms: u64,
 ) {
@@ -1597,6 +1607,7 @@ fn emit_model_metrics(
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         reasoning_tokens: usage.reasoning_tokens,
+        context_breakdown,
         total_ms,
         first_output_ms: first_output,
         prompt_tokens_per_second,
@@ -1629,11 +1640,26 @@ fn tokens_per_second(tokens: u32, ms: u64) -> f64 {
 /// Bounded: a project with many large skills should not be able to crowd out
 /// the conversation, so past the cap the oldest loads are dropped and the model
 /// can reload one if it still needs it.
-fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> String {
+struct RequestParts {
+    messages: Vec<Message>,
+    breakdown: ContextBreakdown,
+}
+
+struct SystemPromptParts {
+    text: String,
+    system_tokens: u32,
+    loaded_skill_tokens: u32,
+}
+
+fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> SystemPromptParts {
     const MAX_PINNED_CHARS: usize = 12_000;
     let loaded = ctx.loaded_skills.lock().unwrap();
     if loaded.is_empty() {
-        return system_prompt.to_string();
+        return SystemPromptParts {
+            text: system_prompt.to_string(),
+            system_tokens: text_tokens(system_prompt),
+            loaded_skill_tokens: 0,
+        };
     }
     let mut packs: Vec<&(String, String)> = Vec::new();
     let mut used = 0usize;
@@ -1646,15 +1672,23 @@ fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> String {
     }
     packs.reverse();
 
-    let mut out = String::with_capacity(system_prompt.len() + used + 64);
-    out.push_str(system_prompt);
-    out.push_str("\n\n<SKILLS-LOADED>\n");
+    let mut skills = String::with_capacity(used + 48);
+    skills.push_str("<SKILLS-LOADED>\n");
     for (_, text) in packs {
-        out.push_str(text);
-        out.push_str("\n\n");
+        skills.push_str(text);
+        skills.push_str("\n\n");
     }
-    out.push_str("</SKILLS-LOADED>\n");
-    out
+    skills.push_str("</SKILLS-LOADED>\n");
+
+    let mut out = String::with_capacity(system_prompt.len() + skills.len() + 2);
+    out.push_str(system_prompt);
+    out.push_str("\n\n");
+    out.push_str(&skills);
+    SystemPromptParts {
+        text: out,
+        system_tokens: text_tokens(system_prompt),
+        loaded_skill_tokens: text_tokens(&skills),
+    }
 }
 
 fn request_messages(
@@ -1662,23 +1696,40 @@ fn request_messages(
     ctx: &ToolContext,
     memory_context: Option<&MemoryContext>,
     session: &Session,
-) -> Vec<Message> {
+) -> RequestParts {
     let mut messages = Vec::with_capacity(session.messages().len() + 2);
+    let mut breakdown = ContextBreakdown::default();
     // Skills are pinned above the compaction line. Their text is standing
     // instruction — the conventions the work has to follow — and treating it
     // as ordinary conversation meant compaction ate it and the model reloaded
     // the same pack again and again.
-    messages.push(Message::system(with_loaded_skills(system_prompt, ctx)));
+    let system = with_loaded_skills(system_prompt, ctx);
+    breakdown.system_tokens = system.system_tokens;
+    breakdown.loaded_skill_tokens = system.loaded_skill_tokens;
+    messages.push(Message::system(system.text));
     // Turn memory is deliberately a separate dynamic prefix. Keep it out of
     // the system role: some chat templates, including Qwen under vLLM, require
     // any system message to be the first message.
     if let Some(memory) = memory_context
         && !memory.text.trim().is_empty()
     {
+        breakdown.memory_tokens = text_tokens(&memory.text);
         messages.push(Message::user(memory.text.clone()));
     }
-    messages.extend(session.messages().iter().cloned());
-    messages
+    let latest_user = session
+        .messages()
+        .iter()
+        .rposition(|m| matches!(m.role, crate::llm::Role::User));
+    for (idx, message) in session.messages().iter().enumerate() {
+        let tokens = tokens_u32(message_tokens(message));
+        if Some(idx) == latest_user {
+            breakdown.latest_user_tokens = breakdown.latest_user_tokens.saturating_add(tokens);
+        } else {
+            breakdown.history_tokens = breakdown.history_tokens.saturating_add(tokens);
+        }
+        messages.push(message.clone());
+    }
+    RequestParts { messages, breakdown }
 }
 
 /// The first line of an error chain, short enough for one notice.
@@ -1846,6 +1897,24 @@ fn estimate_tokens(messages: &[Message]) -> usize {
         }
     }
     chars / 4
+}
+
+fn estimate_tool_schema_tokens(tools: &[ToolDef]) -> usize {
+    let mut chars = 0usize;
+    for tool in tools {
+        chars += tool.name.len();
+        chars += tool.description.len();
+        chars += tool.parameters.to_string().len();
+    }
+    chars / 4
+}
+
+fn text_tokens(text: &str) -> u32 {
+    tokens_u32(text.len() / 4)
+}
+
+fn tokens_u32(tokens: usize) -> u32 {
+    tokens.try_into().unwrap_or(u32::MAX)
 }
 
 /// Choose a split index so that everything from it onward is the last

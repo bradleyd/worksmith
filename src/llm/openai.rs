@@ -677,6 +677,7 @@ mod thinking_tests {
             model: "m".into(),
             messages: vec![],
             tools: vec![],
+            context_breakdown: None,
             temperature: None,
             top_p: None,
             top_k: None,

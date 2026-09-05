@@ -122,6 +122,21 @@ pub struct Usage {
     pub reasoning_tokens: u32,
 }
 
+/// Rough token estimate for the pieces Worksmith assembled into a prompt.
+///
+/// The provider's `prompt_tokens` remains the source of truth. These numbers
+/// are local attribution: enough to answer "what made this request large?"
+/// without writing prompt text into the session log.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextBreakdown {
+    pub system_tokens: u32,
+    pub loaded_skill_tokens: u32,
+    pub memory_tokens: u32,
+    pub history_tokens: u32,
+    pub latest_user_tokens: u32,
+    pub tool_schema_tokens: u32,
+}
+
 /// Marker attached to failures that are worth trying again: a dropped
 /// connection, a timeout, a 429, a 5xx. Carried as the *source* of the error so
 /// the message the user sees stays the real one.
@@ -156,6 +171,8 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
+    /// Local attribution for prompt size. It is not sent to providers.
+    pub context_breakdown: Option<ContextBreakdown>,
     /// f64, not f32. `serde_json::Value` has no f32 variant, so an f32 is
     /// widened on the way out and its representation error becomes visible:
     /// `0.7f32` serializes as `0.699999988079071`. Most providers ignore the
