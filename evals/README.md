@@ -9,6 +9,8 @@ after the agent finishes:
 
 - **raw** — `worksmith --mode json "<goal>"` (the model stops when it decides
   it's done)
+- **memory** — raw mode, but with the task's `[[memory]]` rows seeded into
+  project memory before the turn starts
 - **guided** — `worksmith --mode json --until "<validate>" "<goal>"` (the
   validation-driven loop re-plans until the check passes)
 - **workers** — `worksmith --mode json spawn -n N "<goal>"` (fan out to N
@@ -37,14 +39,19 @@ second command with the models swapped.
 
 ## What config a run uses
 
-Each task runs in a fresh temp directory. Global `~/.worksmith/config.toml`
-applies as the base, and the repo's own `.worksmith/config.toml` is copied in as
-the project config so the eval uses the same model and provider you develop
-against. Set `--model` to override.
+Each task runs in a fresh temp directory. The harness creates an isolated
+`WORKSMITH_HOME` inside that directory and copies the active global
+`config.toml` into it, so runs can use the same provider/model without reading
+or writing real global sessions or memory. The repo's own `.worksmith/config.toml`
+is copied in as the project config so the eval uses the same project defaults.
+Set `--model` to override.
 
 Runs pass `--approve-all` and `--trust-project`, because nobody is there to
 answer either prompt and the project config in the workdir is one this harness
 wrote itself. Real interactive runs prompt for both.
+
+`memory` mode seeds only the rows declared by the selected task. Tasks without
+`[[memory]]` rows are skipped in that mode.
 
 ## Local comparison runs
 
@@ -101,6 +108,7 @@ backends whose defaults differ, so `--think default` is not one setting.
 python3 evals/run.py                    # all tasks, both modes
 python3 evals/run.py --task fix-bug     # one task
 python3 evals/run.py --modes guided     # one mode
+python3 evals/run.py --modes raw,memory --task memory-convention
 python3 evals/run.py --model openrouter/qwen/qwen3-32b
 python3 evals/run.py --timeout 240 --json results.json
 python3 evals/run.py --modes workers --worker-model openrouter/qwen/qwen3.5-9b
@@ -119,6 +127,13 @@ description = "..."
 goal = "<prompt given to the agent>"
 validate = "<shell command; exit 0 = success>"
 workers = 3             # optional: run in `workers` mode with N workers
+
+[[memory]]              # optional: active project memory seeded for `memory` mode
+scope = "project"
+kind = "preference"     # decision|constraint|preference|fact|lesson
+subject = "..."
+content = "..."
+importance = 90
 
 [files]                 # optional: files written into the scratch dir first
 "bug.py" = '''
@@ -139,6 +154,27 @@ Keep `validate` dependency-light (bash/grep/python3) so tasks run anywhere.
 - This measures *task success*, not code quality.
 
 ## Findings so far
+
+**2026-09, qwen3.5-9b (OpenRouter), `memory-convention` teach-test ×3:**
+
+```
+task                 raw pass    raw tok  memory pass memory tok
+memory-convention         0/3       3592          3/3        501
+
+raw     0/3 passed   avg_calls=29.0   avg_elapsed=118.9s   max_ctx=20535
+memory  3/3 passed   avg_calls=6.0    avg_elapsed=15.3s    max_ctx=3221
+```
+
+The task hides the project convention in seeded memory only: status lines must
+render as `[<name>] <value>`. Raw mode never found it, despite trying tools and
+even searching memory explicitly in two runs. Memory mode injected one relevant
+row on every run (`memory_used=true`) and passed every time.
+
+This is a teach-test, not a broad benchmark. It proves the memory path can
+matter when the missing fact is genuinely project-specific and not inferable
+from the files. It does not prove memory helps every task, or that larger
+models benefit; the next useful comparison is the same task on a stronger model
+where raw may infer the convention or self-rescue.
 
 **2026-08, newsletter-judge in `workers` mode — it works, and the judge is the
 weakest link.** Kimi K3 planning and judging, three deepseek-v4-flash workers

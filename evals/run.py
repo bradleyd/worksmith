@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Worksmith eval harness.
 
-Runs each task in `tasks/*.toml` under two modes and reports whether the task's
+Runs each task in `tasks/*.toml` under modes and reports whether the task's
 validation command passes afterward:
 
   raw     — `worksmith --mode json "<goal>"`         (model stops when it decides)
+  memory  — raw, but with the task's [[memory]] rows seeded into project memory
   guided  — `worksmith --mode json --until "<validate>" "<goal>"`
             (the validation-driven loop: re-plan until the check passes)
   workers — `worksmith --mode json spawn -n N "<goal>"`
@@ -12,7 +13,7 @@ validation command passes afterward:
             the task, and is *unguided* — workers have no validator, so the
             honest comparison is raw vs workers, not guided vs workers)
 
-Both are judged by the SAME criterion — the harness runs `validate` in the
+All modes are judged by the SAME criterion — the harness runs `validate` in the
 scratch dir after the agent finishes — so the comparison is fair. The question
 this answers: does the guidance layer make a given model succeed more often?
 
@@ -20,6 +21,7 @@ Usage:
   python3 evals/run.py                      # all tasks, both modes
   python3 evals/run.py --task fix-bug       # one task
   python3 evals/run.py --modes guided       # one mode
+  python3 evals/run.py --modes raw,memory --task memory-convention
   python3 evals/run.py --model openrouter/qwen/qwen3-32b
   python3 evals/run.py --timeout 240 --json results.json
 """
@@ -27,11 +29,13 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -61,9 +65,95 @@ def load_tasks(only: str | None) -> list[dict]:
     return tasks
 
 
-def setup_workdir(task: dict) -> Path:
+def active_global_config() -> Path:
+    home = os.environ.get("WORKSMITH_HOME")
+    if home:
+        return Path(home) / "config.toml"
+    return Path.home() / ".worksmith" / "config.toml"
+
+
+def seed_project_memory(path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    now = int(time.time())
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id            TEXT PRIMARY KEY,
+                scope         TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                subject       TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                importance    INTEGER NOT NULL DEFAULT 50,
+                confidence    REAL NOT NULL DEFAULT 1.0,
+                created_at    INTEGER NOT NULL,
+                updated_at    INTEGER NOT NULL,
+                supersedes_id TEXT,
+                status        TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
+            CREATE INDEX IF NOT EXISTS idx_memories_status  ON memories(status);
+            CREATE TABLE IF NOT EXISTS mined_sessions (
+                session_id TEXT PRIMARY KEY,
+                mined_at   INTEGER NOT NULL,
+                candidates INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                subject, content, kind, id UNINDEXED, tokenize = 'porter unicode61'
+            );
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(subject, content, kind, id)
+                VALUES (new.subject, new.content, new.kind, new.id);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                DELETE FROM memories_fts WHERE id = old.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                DELETE FROM memories_fts WHERE id = old.id;
+                INSERT INTO memories_fts(subject, content, kind, id)
+                VALUES (new.subject, new.content, new.kind, new.id);
+            END;
+            """
+        )
+        for row in rows:
+            conn.execute(
+                """
+                INSERT INTO memories
+                    (id, scope, kind, subject, content, importance, confidence,
+                     created_at, updated_at, supersedes_id, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active')
+                """,
+                (
+                    str(uuid.uuid4()).replace("-", "")[:8],
+                    row.get("scope", "project"),
+                    row["kind"],
+                    row["subject"],
+                    row["content"],
+                    int(row.get("importance", 80)),
+                    float(row.get("confidence", 1.0)),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def setup_workdir(task: dict, seed_memory: bool = False) -> Path:
     d = Path(tempfile.mkdtemp(prefix=f"wseval-{task['name']}-"))
-    # Reuse the repo's provider config so the eval uses the same model.
+    # Copy the active global config into an isolated home, so evals can use the
+    # same provider/model without reading or writing the user's real memory DB.
+    home = d / ".worksmith-home"
+    home.mkdir(parents=True, exist_ok=True)
+    global_cfg = active_global_config()
+    if global_cfg.exists():
+        shutil.copy(global_cfg, home / "config.toml")
+
+    # Reuse the repo's project config so the eval uses the same project defaults.
     ws = d / ".worksmith"
     ws.mkdir(parents=True, exist_ok=True)
     repo_cfg = REPO / ".worksmith" / "config.toml"
@@ -79,12 +169,15 @@ def setup_workdir(task: dict) -> Path:
         dst = d / fx
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dst)
+    if seed_memory:
+        seed_project_memory(ws / "memory.db", task.get("memory") or [])
     return d
 
 
 def parse_events(stdout: str) -> dict:
     model_calls = tool_calls = gen_tokens = ctx_peak = reasoning_tokens = 0
     outcome = None
+    memory_ids: list[str] = []
     by_tool: dict[str, int] = {}
     tool_errors: dict[str, int] = {}
     for line in stdout.splitlines():
@@ -113,11 +206,14 @@ def parse_events(stdout: str) -> dict:
         elif t == "tool_result" and not e.get("ok", True):
             n = e.get("name") or "?"
             tool_errors[n] = tool_errors.get(n, 0) + 1
+        elif t == "memory_used":
+            memory_ids.extend(e.get("ids") or [])
         elif t == "turn_complete":
             outcome = e.get("outcome")
     return {"model_calls": model_calls, "tool_calls": tool_calls,
             "gen_tokens": gen_tokens, "reasoning_tokens": reasoning_tokens,
             "ctx_peak": ctx_peak, "outcome": outcome,
+            "memory_ids": memory_ids, "memory_used": bool(memory_ids),
             "by_tool": by_tool, "tool_errors": tool_errors}
 
 
@@ -130,7 +226,7 @@ def validate(workdir: Path, cmd: str) -> bool:
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
             fast: bool = False, think: str | None = None) -> dict:
-    workdir = setup_workdir(task)
+    workdir = setup_workdir(task, seed_memory=mode == "memory")
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
     # is. Real interactive runs prompt instead.
@@ -159,11 +255,14 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
     thinking = "off" if fast else (think or "default")
     row = {"task": task["name"], "mode": mode, "fast": fast, "thinking": thinking,
            "passed": False, "model_calls": 0, "tool_calls": 0, "gen_tokens": 0,
-           "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None}
+           "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None,
+           "memory_used": False, "memory_ids": []}
     t0 = time.time()
     try:
+        env = os.environ.copy()
+        env["WORKSMITH_HOME"] = str(workdir / ".worksmith-home")
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, env=env)
         row.update(parse_events(r.stdout))
         row["passed"] = validate(workdir, task["validate"])
         # Keep stderr even on success: it carries the planner's account of how
@@ -230,10 +329,14 @@ def main() -> int:
                 print(f"skipping {task['name']} [workers]: no `workers = N` in the task "
                       "(it doesn't decompose)", file=sys.stderr)
                 continue
+            if mode == "memory" and not task.get("memory"):
+                print(f"skipping {task['name']} [memory]: no [[memory]] rows in the task",
+                      file=sys.stderr)
+                continue
             for i in range(args.repeat):
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
                 if args.dry_run:
-                    wd = setup_workdir(task)
+                    wd = setup_workdir(task, seed_memory=mode == "memory")
                     # Unattended and trusted: nobody is here to approve, and
                     # a refusal would score as a task failure rather than the
                     # safety behaviour it is. --trust-project because the
@@ -265,16 +368,17 @@ def main() -> int:
                 # than of the clock.
                 budget = int(task.get("timeout") or args.timeout)
                 row = run_one(binp, task, mode, args.model, budget, args.keep,
-                              args.worker_model, args.fast)
+                              args.worker_model, args.fast, args.think)
                 row["run"] = i
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"
                 extra = f" ({row['error']})" if row["error"] else ""
                 reason = (f" reason_tok={row['reasoning_tokens']}"
                           if row["reasoning_tokens"] else "")
+                memory = " memory=used" if row.get("memory_used") else ""
                 print(f"  {mark}  {row['elapsed']}s calls={row['tool_calls']} "
                       f"gen_tok={row['gen_tokens']}{reason} "
-                      f"outcome={row['outcome']}{extra}",
+                      f"outcome={row['outcome']}{memory}{extra}",
                       file=sys.stderr)
                 # Write partial results after each run so a killed run isn't lost.
                 if args.json:

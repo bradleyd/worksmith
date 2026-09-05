@@ -683,7 +683,9 @@ async fn turn_memory_is_a_dynamic_message_after_the_stable_system_prompt() {
     let calls = seen.lock().unwrap();
     let messages = calls.first().expect("one model request");
     assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].role, worksmith::llm::Role::System);
     assert_eq!(messages[0].content.as_deref(), Some("stable system"));
+    assert_eq!(messages[1].role, worksmith::llm::Role::User);
     assert_eq!(
         messages[1].content.as_deref(),
         Some(
@@ -691,6 +693,7 @@ async fn turn_memory_is_a_dynamic_message_after_the_stable_system_prompt() {
              - [project/preference/abc12345] formatting: Use targeted rustfmt."
         )
     );
+    assert_eq!(messages[2].role, worksmith::llm::Role::User);
     assert_eq!(messages[2].content.as_deref(), Some("make a rust change"));
 
     let events = worksmith::session::events(session.path()).unwrap();

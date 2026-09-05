@@ -1,0 +1,33 @@
+name = "memory-convention"
+description = "Use project memory to apply an unstated formatting convention"
+goal = "Update formatter.py so `python3 report.py` prints the current project convention for status lines. Do not change report.py."
+validate = '''
+python3 - <<'PY'
+from pathlib import Path
+import subprocess
+
+report = Path("report.py").read_text()
+assert report == 'from formatter import format_status\n\nprint(format_status("build", "green"))\n', "do not change report.py"
+
+out = subprocess.check_output(["python3", "report.py"], text=True).strip()
+assert out == "[build] green", out
+PY
+'''
+
+[[memory]]
+scope = "project"
+kind = "preference"
+subject = "status line format"
+content = "Project status lines use bracketed lowercase labels: `[<name>] <value>`."
+importance = 90
+
+[files]
+"formatter.py" = '''
+def format_status(name, value):
+    return f"{name}: {value}"
+'''
+"report.py" = '''
+from formatter import format_status
+
+print(format_status("build", "green"))
+'''

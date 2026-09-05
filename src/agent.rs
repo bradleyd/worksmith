@@ -1605,13 +1605,13 @@ fn request_messages(
     // as ordinary conversation meant compaction ate it and the model reloaded
     // the same pack again and again.
     messages.push(Message::system(with_loaded_skills(system_prompt, ctx)));
-    // Turn memory is deliberately a separate dynamic prefix. The stable system
-    // prompt can still be provider-cached, while this small block can vary by
-    // request without poisoning that prefix.
+    // Turn memory is deliberately a separate dynamic prefix. Keep it out of
+    // the system role: some chat templates, including Qwen under vLLM, require
+    // any system message to be the first message.
     if let Some(memory) = memory_context
         && !memory.text.trim().is_empty()
     {
-        messages.push(Message::system(memory.text.clone()));
+        messages.push(Message::user(memory.text.clone()));
     }
     messages.extend(session.messages().iter().cloned());
     messages
