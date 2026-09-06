@@ -1,23 +1,49 @@
 # Loose ends
 
 Things known to be wrong or unfinished, with enough detail to act on without
-re-deriving them. Not a roadmap — `PLAN.md` §10a is the roadmap. This is the
-list that otherwise lives only in someone's head or a chat log.
+re-deriving them. `NEXT.md` is the short operational list. This file keeps the
+longer evidence trail that otherwise lives only in someone's head or a chat log.
 
 Each entry says what is wrong and how it was found, because "how it was found"
-is usually the fastest route back in.
+is usually the fastest route back in. Older entries are intentionally preserved
+when they explain a failure mode, even if the top of the entry now says fixed.
 
-**Closed since this list was written:** `agent.pair` / `decisions-dir` /
-provider tables / model tables all merged field-by-field (four separate keys
-that parsed, validated, and were then silently dropped); `worksmith config
-check` built, which found the fourth itself on its first run; `/model` steps 3
-and 4a; compaction no longer trades the whole context for a sentence; the
-forgiving tool-call parser (`llm/rescue.rs`); both checkpoint complaints — it
-shows its evidence now, and it can take a question; the worker tail; the
-footer's worker spend and the truncated agent count; `/agents` timestamps; a
-nudge to a stopped worker; the stale command popup; and the supervisor killing
-workers that were merely running a slow check; empty Enter on a pending
-checkpoint now skips it; and checkpoint answers now share one TUI helper.
+## Current priority index
+
+These are the entries to reach for first after the 0.5.0 release:
+
+1. **M9 metrics, second pass.** `/metrics` now exists as an overlay and model
+   calls record context, latency, throughput, token counts, and an estimated
+   prompt breakdown. The next pass should make this a real diagnostic view:
+   per-turn trends, provider cache data, cost by model, worker metrics, and a
+   plain/log-friendly dump. This is the prerequisite for proving frugal mode and
+   role routing.
+2. **M12 per-role model routing.** Compaction, memory extraction, fan-out
+   planning, and judging should not all inherit the session model. This is a
+   mechanical role-to-model lookup, not task-kind auto-classification.
+3. **Session store cleanup.** Test and eval sessions have polluted the real
+   session directory, and resume still crawls a flat store. Fixing this helps
+   `/history`, `/metrics <session-id>`, workers, evals, and `--resume`.
+4. **M11 worker worktrees.** Workers still share the user's live tree. A
+   per-worker worktree or scratch overlay is the real answer for fan-out
+   collisions, undo, and write-heavy validation.
+5. **TUI/run-loop refactor only as needed.** The giant TUI file is still a
+   maintenance risk, but feature-driven extraction is higher value than another
+   purely mechanical pass.
+
+**Closed since this list was first written:** `agent.pair` / `decisions-dir` /
+provider tables / model tables all merged field-by-field; `worksmith config
+check` built; `/model` switching landed in the TUI; compaction no longer trades
+the whole context for a sentence; the forgiving tool-call parser
+(`llm/rescue.rs`) landed; checkpoints show evidence and can answer questions;
+worker tail readability improved; footer worker spend and truncated worker
+count fixed; `/agents` timestamps landed; nudge-to-stopped-worker fixed; stale
+command popup fixed; supervisor no longer kills workers merely running a slow
+check; empty Enter on a pending checkpoint skips it; checkpoint answers share
+one TUI helper; turn-start memory injection is dynamic and capped; memory writes
+are reviewed; provider presets make hosted first-run `--model` usable; the
+first `/metrics` overlay shipped; manual `/compact` shows progress; current
+public docs and `config.example.toml` were refreshed for 0.5.0.
 
 ## Bugs
 

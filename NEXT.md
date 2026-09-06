@@ -1,157 +1,150 @@
 # What to do next
 
-Written at the end of 2026-08-31, then updated after the 2026-09-02 TUI
-refactor checkpoint. `LOOSE_ENDS.md` is the full list of what is wrong. This is
-the short list of what to *do*, in order, with enough context to start without
-re-deriving it.
+Updated after the 0.5.0 release and the documentation catch-up on
+2026-09-05. `LOOSE_ENDS.md` keeps the longer forensic notes; this file is the
+short operational list.
 
 ## Current stopping point
 
-The TUI command-arm refactor stopped after `/trust`. The latest clean commit
-before this note was `70a02e5 Show the current session id in the TUI`.
+`main` has shipped and tagged `v0.5.0`. The recent work landed:
 
-The current local work is on branch `memory-turn-context`: use relevant durable
-memory automatically at turn start without bloating the stable system prompt.
-The old prompt path injected the top 20 memories by importance into
-`build_system_prompt`, which was both irrelevant on many turns and bad for
-provider prefix caching. The new shape is a capped dynamic memory message after
-the stable system prompt, with ids logged as `MemoryUsed`.
+- automatic turn-start memory injection with capped, relevant dynamic memory;
+- memory proposal review before durable writes;
+- provider presets for first-run `--model openrouter/...` and `openai/...`;
+- the first model-call metrics collector and `/metrics` dashboard overlay;
+- a manual compaction progress overlay so `/compact` no longer looks frozen;
+- current README, quickstart, guide index, and `config.example.toml` updates.
 
-`cargo fmt --check` is still not a useful narrow check: rustfmt wants broad
-pre-existing rewrites outside this slice. Bare `rustfmt --check src/tui.rs` is
-also noisy because it follows `mod` children and reports older formatting in the
-split TUI modules. For now, manually keep touched hunks rustfmt-shaped and use
-`git diff --check`, compile, clippy, and tests as the gates.
+The current branch is for planning-doc cleanup only. Keep it to `NEXT.md` and
+`LOOSE_ENDS.md`.
 
-Checks for this slice should be:
+Known untracked local files that are not part of this branch:
 
-- `cargo test --test memory_search`
-- `cargo test turn_memory_is_a_dynamic_message_after_the_stable_system_prompt --test agent_loop`
+- `evals/results/memory-convention-qwen9b.json`
+- `scripts/`
+
+## Checks for this slice
+
+This is a markdown-only branch, so do not run the full Rust suite just to prove
+the prose changed.
+
 - `git diff --check`
-- targeted rustfmt review of touched Rust hunks
-- `cargo check`
-- `cargo clippy --all-targets`
-- `cargo test`
+- scan for stale branch names, old release references, and placeholders
+- read the first screen of both files and make sure the next action is clear
 
-Manual testing for this slice: add a project memory such as "Use targeted
-rustfmt, not broad cargo fmt"; start a fresh small-model session and ask for a
-Rust change. Expected: the transcript shows `memory: using ...`, the request
-uses that convention without `/memory search`, and an unrelated Python project
-does not pull the Rust memory into the turn.
+## 1. Finish the planning-doc refresh
 
-## 1. Stop and reassess command handling.
+Bring `NEXT.md` and the top of `LOOSE_ENDS.md` up to date with the shipped
+0.5.0 state. Preserve old incident notes where they still explain failures, but
+the first page should say what is actually next.
 
-Do not keep extracting command arms mechanically. `CommandContext` now exists and
-`/validate`, `/pair`, `/mouse`, `/route`, `/fast`, `/think`, and `/trust` are
-already out. The remaining inline families are either low payoff (`/help`) or
-more coupled (`/new`, `/compact`, `/spawn`, `/history`, `/model`).
+Commit command when ready:
 
-This is where the refactor gets riskier: slash commands touch session state,
-worker state, config, validation, hints, footer status, and transcript output.
-Before another command extraction, decide whether the real next move is a
-`commands` module boundary, a focused `/spawn` module, or the run-loop event
-dispatch work below.
+```bash
+git add NEXT.md LOOSE_ENDS.md
+git diff --cached --check
+git commit -m "Refresh planning notes after 0.5.0"
+```
 
-## 2. Next non-command bug candidates.
+## 2. M9 metrics, second pass
 
-Next, continue session store cleanup: test/eval junk is filling the real
-sessions directory. The TUI now shows the current session id, but the flat
-session directory and `most_recent_for_cwd` crawl remain open.
+This is the next best feature work.
 
-## 3. Then revisit run-loop event dispatch.
+Why: the last long dogfood session made the performance problem visible but not
+actionable. The TUI now has a `/metrics` overlay and records request timing,
+token counts, context size, and an estimated context breakdown. The next pass
+should turn that into a diagnostic instrument.
 
-Once input and command handling are less tangled, extract `run_loop`'s select
-branches into named handlers. This is another risk point because ordering is
-observable: worker completions, parent synthesis prompts, approvals,
-checkpoints, mining results, and turn completion all race through the same loop.
+Target shape:
 
-Do this only after command handling has smaller boundaries, and keep each
-handler extraction behavior-preserving.
+- per-turn rows, not only aggregate latest/average numbers;
+- session totals for model calls, tool calls, generated tokens, reasoning
+  tokens, elapsed model time, and compactions;
+- cache data when providers expose it, especially
+  `prompt_tokens_details.cached_tokens`;
+- cost by model using `[models]` prices, with local providers explicitly free
+  unless priced;
+- worker metrics included as worker metrics, not mixed into the parent context
+  percentage;
+- `/stats` or an equivalent non-overlay dump for plain mode and logs;
+- JSONL events rich enough that eval scripts stop rebuilding a shadow metrics
+  system outside Worksmith.
 
-## 4. Supervisor escalation follow-up, if it reappears.
+Success criteria:
 
-A worker was stopped with `still off track after 2 nudges` during a run where
-the only long gap was a 60s bash call, at `stuck-timeout = 20`. That is exactly
-three ticks, so the tool-in-flight guard should have held.
+- after a long session, the user can answer "what grew the context?", "how fast
+  is the provider from Worksmith's point of view?", and "which turns cost the
+  most?" without reading server logs;
+- the memory teach/test eval can report the same headline numbers from
+  Worksmith's own events;
+- the metrics display stays out of the transcript and does not block transcript
+  scrolling.
 
-**It does hold.** `tests/supervisor.rs::a_worker_inside_a_slow_tool_call_is_not_nudged`
-drives a 2s bash call at a 200ms timeout through the real worker loop and the
-worker finishes with zero nudges. Delete the guard and that test fails with
-`got 2 and escalation Some("still off track after 2 nudges")`, byte for byte
-what the live run said. So the mechanism is right and something else produced
-those nudges.
+## 3. M12 per-role model routing
 
-`f091842` now logs every supervisor decision where it is *made* rather than
-where it lands, and the directive text names the rule: idle opens "No progress
-for", the repeat detector "You have called", the blocked detector "You said you
-are blocked". Run any spawn, wait for an escalation, read `/agents tail`.
+Do this after the metrics second pass, because routing needs measurement.
 
-Do this first because it is cheap and it has been guessed at twice, wrongly.
+The harness already makes model calls that are not the user's main turn:
+compaction, memory extraction/classification, fan-out planning, and synthesis or
+judging. Today those mostly inherit the session model. That is expensive,
+rough on local VRAM, and hard to compare.
 
-## 5. Why TUI is still the right path.
+First useful shape:
 
-`TUI_REFACTOR.md` §3 has the steps. R1 splits `App` into focused structs, R4
-breaks up `handle_command`. Each is independently checkable with `cargo test`.
+```toml
+[roles]
+planner = "openrouter/qwen/qwen3.5-9b"
+classifier = "openrouter/qwen/qwen3.5-9b"
+compactor = "vllm/Qwen/Qwen3.5-9B"
+judge = "openrouter/qwen/qwen3.8-27b"
+```
 
-**Why this one.** It is the gate on three separate ideas already filed: the
-dashboard, the tail-as-trace port, and the fan-out roster. All three want to
-land in a file that has been broken up first, and adding several hundred lines
-to a 5,153-line file before that makes the project's own thesis harder to
-demonstrate in its own codebase.
+Keep this mechanical: call-site role -> configured model -> existing
+`client_for` path. Avoid task-kind auto-classification for now.
 
-**And the evidence now supports attempting it.** `LOOSE_ENDS` calls that file
-the wound on the strength of a 27B making zero edits across 404 steps. On
-2026-08-31 a 9B made two correct changes in it (`5b8ced1`, `d6c400b`) using grep
-and offset reads rather than paging. So the open question is no longer whether a
-small model can work in a 218KB file. It is whether it can do so repeatedly
-across a sequence of related changes, which nothing has measured.
+## 4. Session store cleanup
 
-Use `--until "cargo test"`. The suite takes about seven minutes after an edit;
-tell the worker so in the prompt, because a model that does not know sets its own
-short `timeout_secs`, watches it expire, and concludes the build is stuck.
+The real session store has been polluted by test and eval runs, and
+`most_recent_for_cwd` still crawls a flat directory. This matters more now that
+`/history`, `/metrics <session-id>`, `--resume`, workers, and evals all depend
+on sessions.
 
-**Read every diff.** Four times on 2026-08-31 a worker passed its check with a
-change that was wrong in a way the check could not see.
+Cheap first cut:
 
-## 6. The fan-out shares one check.
+- make tests and evals default to an isolated `WORKSMITH_HOME`;
+- keep real user sessions out of temp/eval storage;
+- add enough indexing or directory structure that resume does not parse every
+  session file.
 
-The larger job, and the last place the differentiator degrades into something
-meaningless. `/spawn -n 3 --until "..."` copies one command to every worker, so
-worker 1 cannot pass until 2 and 3 have also finished. Needs both halves:
-worktrees per worker for coherent state (PLAN.md M11), and a per-task check
-emitted by the planner rather than one string copied to all. `TOOLCALL_PLAN.md`
-has the full argument at the end.
+## 5. M11 worker worktrees
 
-## 7. Small things worth clearing while in the area.
+This is the next large safety/usefulness project, but it is larger than the
+metrics and routing work.
 
-- The finished-worker line prints an absolute path in `changed` where it should
-  be repo-relative. The model passed an absolute path to `edit` and it is stored
-  verbatim.
-- The footer glyphs have now been wrong three times for three different reasons.
-  `LOOSE_ENDS` has the position: fewer glyphs, not better ones.
-- `README.md` claims `--until "vale docs/"` works for prose. Nobody has run it.
+Each worker should be able to run in its own git worktree or scratch overlay,
+then report a diff for the parent to accept. That fixes fan-out collisions,
+makes worker undo real, and lets write-heavy validation run without leaving
+failed attempts in the user's live tree.
 
-## Not yet, and why
+Do not call it a full security sandbox. It is filesystem isolation and review
+semantics first.
 
-**Prompt triage** and **post-run security checks** are both good and both new.
-They will be easier to design once the refactor gives them somewhere to live.
-Both are written up in `LOOSE_ENDS.md`.
+## 6. TUI command/run-loop refactor
 
-## The thing to carry over
+Keep going here only when a feature forces it. `CommandContext` already pulled
+several command families out of the giant TUI file. The remaining command and
+run-loop extractions are valuable, but mechanical refactoring is lower leverage
+than metrics, routing, and session cleanup right now.
 
-Nearly every fix on 2026-08-31 came from *using* worksmith rather than reading
-it, and the recurring failure was never the model. It was a check that could not
-fail, five separate times:
+When returning to it, keep each extraction behavior-preserving and test the
+branch ordering carefully: worker completions, parent synthesis, approvals,
+checkpoints, memory mining, compaction, and turn completion race through the
+same loop.
 
-1. the MUD scaffold check, which passed just as happily on implemented code;
-2. `worksmith spawn --until`, which accepted the flag and ran no check at all;
-3. `playcheck.py` v1, three of whose five assertions could not fail, certifying
-   a game with a locked door and no key;
-4. `playcheck.py` v2, which then failed a *working* game and sent a worker that
-   had already succeeded off to break things;
-5. the guard test in `tui.rs`, which passed with the guard deleted because it
-   matched a `return` belonging to a different branch.
+## Habit to keep
 
-Two of those five were checks written while explicitly warning about this
-failure mode. **Test the test**: delete the thing it guards and watch it fail.
-That habit is the single highest-value practice to keep.
+Test the test. Nearly every expensive false turn came from a check that passed
+for the wrong reason: a scaffold check that accepted implemented code, a
+playcheck with vacuous assertions, `spawn --until` accepting a flag but not
+running the check, and guard tests that matched the wrong branch. Before
+trusting a new validation, break the thing it claims to guard and watch it fail.
