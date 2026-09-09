@@ -246,9 +246,10 @@ insert-escape-ms = 300
 # One table, because three things want the same key: what a model costs, how it
 # wants to be sampled, and which models `/model` offers.
 #
-# Prices are USD per million tokens, and they are what turns the footer's token
-# counts into a session cost. A model with no entry shows no cost rather than
-# $0.00: unknown is not the same as free.
+# Prices are USD per million tokens. Each request records its cost estimate at
+# these standard rates (cache discounts are not inferred). Loopback endpoints
+# default to free unless priced; unpriced remote calls remain unknown in /stats.
+# Changing prices or /model does not reprice already recorded requests.
 #
 # Sampling belongs here rather than as a global default because the right
 # numbers are the model's own. Qwen asks for temperature 0.6 / top_p 0.95 /

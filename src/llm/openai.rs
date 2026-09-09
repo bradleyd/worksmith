@@ -488,14 +488,36 @@ struct DeltaFunction {
 #[derive(Deserialize)]
 struct UsageResp {
     #[serde(default)]
-    prompt_tokens: u32,
+    prompt_tokens: Option<u32>,
     #[serde(default)]
-    completion_tokens: u32,
+    completion_tokens: Option<u32>,
     #[serde(default)]
     total_tokens: u32,
     /// OpenAI-style breakdown; absent on servers that don't report it.
     #[serde(default)]
     completion_tokens_details: Option<CompletionTokensDetails>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+// Wire names and inclusive-count semantics stay inside this adapter.
+impl From<UsageResp> for Usage {
+    fn from(u: UsageResp) -> Self {
+        Self {
+            reported: u.prompt_tokens.is_some() && u.completion_tokens.is_some(),
+            prompt_tokens: u.prompt_tokens.unwrap_or(0),
+            completion_tokens: u.completion_tokens.unwrap_or(0),
+            total_tokens: u.total_tokens,
+            reasoning_tokens: u.completion_tokens_details.map(|d| d.reasoning_tokens).unwrap_or(0),
+            cached_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            cache_write_tokens: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    cached_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -550,15 +572,7 @@ fn strip_toolcall_noise(s: &str) -> String {
 impl Accumulator {
     async fn apply(&mut self, chunk: ChunkResp, sink: &mpsc::Sender<StreamEvent>) {
         if let Some(u) = chunk.usage {
-            self.usage = Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-                reasoning_tokens: u
-                    .completion_tokens_details
-                    .map(|d| d.reasoning_tokens)
-                    .unwrap_or(0),
-            };
+            self.usage = u.into();
             let _ = sink.send(StreamEvent::Usage(self.usage)).await;
         }
 
@@ -671,6 +685,58 @@ impl Accumulator {
 mod thinking_tests {
     use super::*;
     use crate::llm::{Thinking, ThinkingDialect};
+
+    #[tokio::test]
+    async fn provider_cache_telemetry_preserves_absent_zero_and_nonzero() {
+        for (details, expected) in [(serde_json::Value::Null, None),
+            (serde_json::json!({"cached_tokens": 0}), Some(0)),
+            (serde_json::json!({"cached_tokens": 900}), Some(900))] {
+            let chunk = serde_json::from_value(serde_json::json!({
+                "choices": [], "usage": { "prompt_tokens": 1000, "completion_tokens": 10,
+                    "prompt_tokens_details": details }
+            })).unwrap();
+            let (tx, _rx) = mpsc::channel(8);
+            let mut acc = Accumulator::default();
+            acc.apply(chunk, &tx).await;
+            assert_eq!(acc.usage.cached_tokens, expected);
+            assert_eq!(acc.usage.prompt_tokens, 1000, "cached input is already included");
+            assert_eq!(acc.usage.cache_write_tokens, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_and_partial_usage_are_distinct_from_reported_zero() {
+        for (wire, expected) in [
+            (serde_json::Value::Null, false),
+            (serde_json::json!({}), false),
+            (serde_json::json!({"prompt_tokens": 12}), false),
+            (serde_json::json!({"completion_tokens": 12}), false),
+            (serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0}), true),
+        ] {
+            let chunk = serde_json::from_value(serde_json::json!({
+                "choices": [], "usage": wire
+            })).unwrap();
+            let (tx, _rx) = mpsc::channel(8);
+            let mut acc = Accumulator::default();
+            acc.apply(chunk, &tx).await;
+            assert_eq!(acc.into_completion().usage.reported, expected);
+        }
+    }
+
+    #[test]
+    fn inclusive_wire_counts_are_not_added_to_their_details() {
+        let wire: UsageResp = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
+            "prompt_tokens_details": {"cached_tokens":700},
+            "completion_tokens_details": {"reasoning_tokens":20}
+        })).unwrap();
+        let usage = Usage::from(wire);
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.completion_tokens, 100);
+        assert_eq!(usage.total_tokens, 1100);
+        assert_eq!(usage.reasoning_tokens, 20);
+        assert_eq!(usage.cached_tokens, Some(700));
+    }
 
     fn req(thinking: Option<Thinking>) -> ChatRequest {
         ChatRequest {

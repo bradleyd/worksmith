@@ -12,12 +12,11 @@ when they explain a failure mode, even if the top of the entry now says fixed.
 
 These are the entries to reach for first after the 0.5.0 release:
 
-1. **M9 metrics, second pass.** `/metrics` now exists as an overlay and model
-   calls record context, latency, throughput, token counts, and an estimated
-   prompt breakdown. The next pass should make this a real diagnostic view:
-   per-turn trends, provider cache data, cost by model, worker metrics, and a
-   plain/log-friendly dump. This is the prerequisite for proving frugal mode and
-   role routing.
+1. **M9 metrics, second pass — implemented on the feature branch.**
+   `codex/m9-metrics-second-pass` adds per-turn accounting, provider cache data,
+   request-time cost by model, helper/worker spend, `/stats`, and an offline
+   JSON export used by evals. Review and dogfood before merging. Missing old
+   prices/worker links and provider-specific cache discounts remain unavailable.
 2. **M12 per-role model routing.** Compaction, memory extraction, fan-out
    planning, and judging should not all inherit the session model. This is a
    mechanical role-to-model lookup, not task-kind auto-classification.

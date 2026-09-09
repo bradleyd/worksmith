@@ -216,6 +216,8 @@ enum IdleReason {
 /// a new model with the old context window is a request that gets rejected.
 #[derive(Clone)]
 pub struct ActiveModel {
+    pub model_key: String,
+    pub prices: crate::config::ModelSettings,
     pub client: Arc<dyn LlmClient>,
     pub model: String,
     pub temperature: Option<f64>,
@@ -231,6 +233,8 @@ impl From<ModelOverride> for ActiveModel {
     /// previous one's numbers.
     fn from(o: ModelOverride) -> ActiveModel {
         ActiveModel {
+            model_key: o.model_key,
+            prices: o.settings.clone(),
             client: o.client,
             model: o.model,
             temperature: o.temperature,
@@ -243,6 +247,7 @@ impl From<ModelOverride> for ActiveModel {
 
 /// Drives one or more turns against a model + tools.
 pub struct Agent {
+    accounting_path: Mutex<Option<std::path::PathBuf>>,
     registry: Arc<ToolRegistry>,
     bus: EventBus,
     /// The model the session currently runs on, swapped as a set with
@@ -304,9 +309,12 @@ impl Agent {
         tool_ctx: ToolContext,
     ) -> Self {
         Self {
+            accounting_path: Mutex::new(None),
             registry,
             bus,
             active: Arc::new(Mutex::new(ActiveModel {
+                model_key: model.clone(),
+                prices: Default::default(),
                 client,
                 model,
                 temperature,
@@ -363,6 +371,32 @@ impl Agent {
         self
     }
 
+    pub fn set_session_path(&self, path: std::path::PathBuf) {
+        *self.accounting_path.lock().unwrap() = Some(path);
+    }
+
+    /// Snapshot a background helper job's model and session before spawning it.
+    /// All calls in the job retain that origin, even after the UI starts /new.
+    pub fn helper_snapshot(&self) -> Agent {
+        let helper = self.fork(self.bus.clone(), self.tool_ctx.session_id.clone());
+        *helper.accounting_path.lock().unwrap() = self.accounting_path.lock().unwrap().clone();
+        helper
+    }
+
+    pub fn with_session_path(self, path: std::path::PathBuf) -> Self {
+        self.set_session_path(path);
+        self
+    }
+
+    pub fn with_accounting(self, model_key: String, prices: crate::config::ModelSettings) -> Self {
+        {
+            let mut active = self.active.lock().unwrap();
+            active.model_key = model_key;
+            active.prices = prices;
+        }
+        self
+    }
+
     pub fn with_thinking(mut self, thinking: Option<Thinking>) -> Self {
         self.thinking = ThinkingMode::new(thinking);
         self
@@ -372,7 +406,10 @@ impl Agent {
     /// Broadcast an event *and* write it to the session, so the loop's history
     /// survives the process. Everything structural goes through here; the two
     /// destinations drifting apart is how the history came to be missing.
-    fn emit(&self, session: &mut Session, ev: Event) {
+    fn emit(&self, session: &mut Session, mut ev: Event) {
+        if let Event::ModelMetrics { session_id, .. } = &mut ev {
+            *session_id = session.path().file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+        }
         // Best-effort: a session that cannot be written must not kill a turn.
         let _ = session.append_event(&ev);
         self.bus.emit(ev);
@@ -515,6 +552,7 @@ impl Agent {
             None => self.current(),
         };
         Agent {
+            accounting_path: Mutex::new(None),
             registry: self.registry.clone(),
             bus,
             active: Arc::new(Mutex::new(active)),
@@ -563,6 +601,7 @@ impl Agent {
         validator: Option<&dyn Validator>,
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
+        self.set_session_path(session.path().to_path_buf());
         session.append_message(Message::user(user_input))?;
         self.emit(
             session,
@@ -933,7 +972,7 @@ impl Agent {
                     thinking: self.thinking.get(),
                     sort: self.route.lock().unwrap().clone(),
                 };
-                let result = self.call_model(session, req, cancel, &active.client).await;
+                let result = self.call_model(session, req, cancel, active).await;
                 let Err(e) = result else {
                     break result;
                 };
@@ -1332,7 +1371,7 @@ impl Agent {
         session: &mut Session,
         req: ChatRequest,
         cancel: &CancellationToken,
-        client: &Arc<dyn LlmClient>,
+        active: &ActiveModel,
     ) -> Result<crate::llm::Completion> {
         for attempt in 0..TRANSPORT_ATTEMPTS {
             let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
@@ -1369,21 +1408,21 @@ impl Agent {
             });
 
             self.emit(session, Event::ModelCallStarted);
-            let completion = client.stream(req.clone(), tx, cancel.clone()).await;
+            let completion = active.client.stream(req.clone(), tx, cancel.clone()).await;
             let _ = forwarder.await;
             let total_ms = (started.elapsed().as_millis() as u64).max(1);
             self.emit(session, Event::ModelCallFinished);
 
             let err = match completion {
                 Ok(c) => {
-                    emit_model_metrics(
-                        session,
-                        &self.bus,
+                    let metrics = model_metrics(
+                        active,
                         &c.usage,
                         req.context_breakdown,
                         total_ms,
                         first_output_ms.load(Ordering::Relaxed),
                     );
+                    self.emit(session, metrics);
                     // Said here, through `emit`, so it reaches the session file
                     // as well as the screen. The client cannot do this: the
                     // stream sink goes to the display and nothing else, so the
@@ -1449,8 +1488,8 @@ impl Agent {
         unreachable!("the loop returns on its last attempt")
     }
 
-    /// One-shot helper completion: no tools, no session, no streaming to the
-    /// bus — just the model's text. Used for the harness's own side calls
+    /// One-shot helper completion: no tools or streamed text. Usage is recorded
+    /// in the originating session and broadcast for accounting. Used for the harness's own side calls
     /// (compaction, fan-out planning, memory extraction), not for user turns.
     ///
     /// Thinking is forced OFF regardless of the session's setting. These calls
@@ -1472,11 +1511,33 @@ impl Agent {
             thinking: Some(Thinking::Off),
             sort: self.route.lock().unwrap().clone(),
         };
-        // Drain the stream sink; we only want the assembled text.
+        let path = self.accounting_path.lock().unwrap().clone();
+        let started = Instant::now();
+        let first_output = Arc::new(AtomicU64::new(0));
+        let seen = first_output.clone();
+        // Helpers contribute spend without streaming their text into the UI.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
-        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let completion = active.client.stream(req, tx, CancellationToken::new()).await?;
+        let drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, StreamEvent::TextDelta(_) | StreamEvent::ReasoningDelta(_)) {
+                    record_first_output(&seen, started);
+                }
+            }
+        });
+        let completion = active.client.stream(req, tx, CancellationToken::new()).await;
         let _ = drain.await;
+        let completion = completion?;
+        let mut event = model_metrics(&active, &completion.usage, None,
+            (started.elapsed().as_millis() as u64).max(1), first_output.load(Ordering::Relaxed));
+        if let Event::ModelMetrics { purpose, .. } = &mut event {
+            *purpose = "helper".into();
+        }
+        if let Some(path) = path {
+            // No conversation lock: helpers can run while the agent owns it.
+            if let Ok(mut writer) = Session::event_writer(&path) {
+                self.emit(&mut writer, event);
+            }
+        }
         let text = completion.content.unwrap_or_default();
         if text.trim().is_empty() {
             // Empty is never a useful answer to a helper call, and silently
@@ -1495,6 +1556,7 @@ impl Agent {
     /// verbatim, shrinking the working context. The full transcript stays in the
     /// session JSONL. Public so `/compact` can force it.
     pub async fn compact(&self, session: &mut Session) -> Result<()> {
+        self.set_session_path(session.path().to_path_buf());
         let active = self.current();
         // Gather what we need, then drop the borrow before the await.
         let (before, tokens_before, split, transcript) = {
@@ -1587,14 +1649,13 @@ impl Agent {
     }
 }
 
-fn emit_model_metrics(
-    session: &mut Session,
-    bus: &EventBus,
+fn model_metrics(
+    active: &ActiveModel,
     usage: &crate::llm::Usage,
     context_breakdown: Option<ContextBreakdown>,
     total_ms: u64,
     first_output_ms: u64,
-) {
+) -> Event {
     let first_output = (first_output_ms > 0).then_some(first_output_ms);
     let prompt_tokens_per_second = first_output
         .map(|ms| tokens_per_second(usage.prompt_tokens, ms))
@@ -1603,7 +1664,15 @@ fn emit_model_metrics(
         .map(|ms| total_ms.saturating_sub(ms).max(1))
         .unwrap_or(total_ms.max(1));
     let completion_tokens_per_second = tokens_per_second(usage.completion_tokens, completion_ms);
-    let ev = Event::ModelMetrics {
+    Event::ModelMetrics {
+        session_id: None,
+        model: active.model_key.clone(),
+        purpose: "agent".into(),
+        cached_tokens: usage.cached_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        cost_usd: usage.reported.then(|| active.prices.cost(
+            usage.prompt_tokens as u64, usage.completion_tokens as u64,
+        )).flatten(),
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -1612,9 +1681,7 @@ fn emit_model_metrics(
         first_output_ms: first_output,
         prompt_tokens_per_second,
         completion_tokens_per_second,
-    };
-    let _ = session.append_event(&ev);
-    bus.emit(ev);
+    }
 }
 
 fn record_first_output(first_output_ms: &AtomicU64, started: Instant) {
@@ -2328,7 +2395,7 @@ pub(crate) mod scripted {
                     name: name.to_string(),
                     arguments: args.to_string(),
                 }],
-                usage: Usage { completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
+                usage: Usage { reported: true, completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
                 finish_reason: Some("tool_calls".to_string()),
                 rescued: None,
             }
@@ -2340,7 +2407,7 @@ pub(crate) mod scripted {
                 content: Some(text.to_string()),
                 reasoning: None,
                 tool_calls: Vec::new(),
-                usage: Usage { completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
+                usage: Usage { reported: true, completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
                 finish_reason: Some("stop".to_string()),
                 rescued: None,
             }

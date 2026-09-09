@@ -178,6 +178,7 @@ def parse_events(stdout: str) -> dict:
     model_calls = tool_calls = gen_tokens = ctx_peak = reasoning_tokens = 0
     model_ms = first_output_ms = prompt_tps = decode_tps = metrics_calls = first_outputs = 0
     outcome = None
+    session_id = None
     memory_ids: list[str] = []
     context_breakdown: dict = {}
     by_tool: dict[str, int] = {}
@@ -191,7 +192,9 @@ def parse_events(stdout: str) -> dict:
         except json.JSONDecodeError:
             continue
         t = e.get("type")
-        if t == "usage":
+        if t == "session_started":
+            session_id = e.get("id")
+        elif t == "usage":
             model_calls += 1
             gen_tokens += e.get("completion_tokens", 0)
             # Reasoning is part of completion_tokens; splitting it out is what
@@ -203,8 +206,9 @@ def parse_events(stdout: str) -> dict:
             model_ms += e.get("total_ms", 0)
             prompt_tps += e.get("prompt_tokens_per_second", 0.0)
             decode_tps += e.get("completion_tokens_per_second", 0.0)
-            ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
-            context_breakdown = e.get("context_breakdown") or context_breakdown
+            if e.get("purpose") != "helper":
+                ctx_peak = max(ctx_peak, e.get("prompt_tokens", 0))
+                context_breakdown = e.get("context_breakdown") or context_breakdown
             if e.get("first_output_ms") is not None:
                 first_outputs += 1
                 first_output_ms += e["first_output_ms"]
@@ -230,7 +234,7 @@ def parse_events(stdout: str) -> dict:
             "ctx_peak": ctx_peak, "model_ms": model_ms,
             "first_output_ms": avg_first, "prompt_tps": avg_prompt_tps,
             "decode_tps": avg_decode_tps, "context_breakdown": context_breakdown,
-            "outcome": outcome,
+            "outcome": outcome, "session_id": session_id,
             "memory_ids": memory_ids, "memory_used": bool(memory_ids),
             "by_tool": by_tool, "tool_errors": tool_errors}
 
@@ -284,6 +288,17 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
         r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
                            timeout=timeout, env=env)
         row.update(parse_events(r.stdout))
+        if row.get("session_id"):
+            try:
+                stats = subprocess.run([binp, "stats", row["session_id"], "--json"],
+                                       cwd=workdir, capture_output=True, text=True,
+                                       timeout=30, env=env)
+                if stats.returncode == 0:
+                    row.update(metrics_fields(json.loads(stats.stdout)))
+                else:
+                    row["metrics_error"] = (stats.stderr or "stats unavailable")[-500:]
+            except (subprocess.TimeoutExpired, OSError, ValueError, KeyError, TypeError) as exc:
+                row["metrics_error"] = f"stats unavailable: {exc}"[-500:]
         row["passed"] = validate(workdir, task["validate"])
         # Keep stderr even on success: it carries the planner's account of how
         # it split the work, which is the only explanation of a surprising
@@ -305,6 +320,16 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
         else:
             shutil.rmtree(workdir, ignore_errors=True)
     return row
+
+
+def metrics_fields(stats: dict) -> dict:
+    """Headline accounting comes from Worksmith, including helpers and workers."""
+    total = stats["combined"]
+    return {"metrics": stats, "model_calls": total["calls"],
+            "tool_calls": total["tool_calls"], "gen_tokens": total["completion_tokens"],
+            "reasoning_tokens": total["reasoning_tokens"], "model_ms": total["model_ms"],
+            "prompt_tokens": total["prompt_tokens"], "cached_tokens": total["cached_tokens"],
+            "known_cost_usd": total["known_cost_usd"], "unpriced_calls": total["unpriced_calls"]}
 
 
 def main() -> int:
@@ -443,6 +468,12 @@ def main() -> int:
         per = round(gen / passed) if passed else "-"
         print(f"  {mode:<8} {passed}/{len(mr)} passed   gen_tokens={gen} "
               f"(reasoning={reason}, {per}/solved)   {round(secs)}s")
+        known = sum(r.get("known_cost_usd", 0.0) for r in mr)
+        complete = all("metrics" in r and not r.get("unpriced_calls")
+                       and not r["metrics"].get("warnings") for r in mr)
+        dollars = f"${known / passed:.6f}/solved" if complete and passed else "$/solved unavailable"
+        print(f"           recorded cost=${known:.6f}   {dollars}"
+              + (" (incomplete pricing or metrics)" if not complete else ""))
 
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=2))

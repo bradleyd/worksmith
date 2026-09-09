@@ -300,3 +300,27 @@ async fn a_workers_activity_can_be_followed_while_it_runs() {
 
     assert!(mgr.log_since("nope", 0).is_none(), "an unknown id is not a panic");
 }
+
+#[tokio::test]
+async fn queued_workers_keep_their_original_parent_session() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let parent = worksmith::session::Session::create(dir.path()).unwrap();
+    let next = worksmith::session::Session::create(dir.path()).unwrap();
+    let agent = Arc::new(template_agent(vec![done("first"), done("second")], dir.path()));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1);
+    mgr.set_parent_session(parent.path().to_path_buf());
+    let first = started(&mut mgr, "first");
+    assert!(matches!(mgr.spawn("second".into(), "system".into()).unwrap(), worksmith::worker::SpawnOutcome::Queued(_)));
+    mgr.set_parent_session(next.path().to_path_buf());
+    wait_terminal(&mgr, &first).await;
+    let ids = mgr.pump();
+    assert_eq!(ids.len(), 1);
+    wait_terminal(&mgr, &ids[0]).await;
+    let links = worksmith::session::worker_links(parent.path()).unwrap();
+    assert_eq!(links.len(), 2);
+    assert!(worksmith::session::worker_links(next.path()).unwrap().is_empty());
+    let report = worksmith::metrics::load(parent.path()).unwrap();
+    assert_eq!(report.workers.len(), 2);
+    assert_eq!(report.combined.calls, 2);
+}

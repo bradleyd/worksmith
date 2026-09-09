@@ -26,12 +26,12 @@ pub(super) fn footer_string(app: &App) -> String {
     let reasoning = if reasoning > 0 { format!("  ↻{}", compact_tokens(reasoning)) } else { String::new() };
     // "length" means the model was cut off rather than finished.
     let cut = if app.last_finish_reason.as_deref() == Some("length") { "  ⚠cut" } else { "" };
-    // Only when the model has prices. A local model is free, and $0.00 would be
-    // a claim rather than a fact.
-    let cost = match app.prices.cost(app.total_in_tokens, app.total_out_tokens) {
-        Some(c) if c >= 0.01 => format!("  ${c:.2}"),
-        Some(c) if c > 0.0 => format!("  ${c:.3}"),
-        _ => String::new(),
+    // Sum request-time prices; switching models must not reprice past calls.
+    let cost = match &app.recorded_spend {
+        s if s.calls == 0 => String::new(),
+        s if s.unpriced_calls > 0 => format!("  ${:.3}+?", s.known_cost_usd),
+        s if s.known_cost_usd >= 0.01 => format!("  ${:.2}", s.known_cost_usd),
+        s => format!("  ${:.3}", s.known_cost_usd),
     };
     let fast = match &app.think_label {
         Some(l) => format!("  think:{l}"),
@@ -126,7 +126,7 @@ pub(super) fn footer_legend() -> Vec<OverlayItem> {
             "reasoning tokens on the last step — a live estimate while it streams, the provider's number once it lands. In the transcript ↻ marks a nudge — same glyph, different place.",
         ),
         ("⚠cut", "the last answer was cut off at max-tokens (finish reason `length`) — truncated, not finished"),
-        ("$N", "cost this session — only shown when the model has prices; a free/local model shows nothing"),
+        ("$N", "recorded session cost estimate; +? means some calls are unpriced; local calls default to zero"),
         ("think:<label>", "current thinking mode (off / on / a budget like 2k / an effort)"),
         ("🤖 … 🪙 N", "background workers: how many are running, how many are queued, and the output tokens and cost they have spent — kept separate from this session's own ↓ and $, and priced per worker model, since --worker-model exists so a cheap fan-out can run under an expensive judge. Placed before the token and cost fields because it used to sit last and was the first thing an 80-column terminal truncated away."),
     ]

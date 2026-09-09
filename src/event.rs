@@ -22,7 +22,23 @@ pub enum Event {
     ModelCallFinished,
     /// Worksmith's view of one completed model request. These timings bracket
     /// the client call, so they include local server queueing and prefill.
+    /// Token counts follow `llm::Usage` semantics, independent of provider.
     ModelMetrics {
+        /// Originating session; absent in legacy events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default)]
+        model: String,
+        /// Empty in old sessions; `helper` identifies harness side calls.
+        #[serde(default)]
+        purpose: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u32>,
+        /// Estimate at configured standard rates, captured at request time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
         prompt_tokens: u32,
         completion_tokens: u32,
         reasoning_tokens: u32,

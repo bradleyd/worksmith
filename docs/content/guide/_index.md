@@ -29,6 +29,9 @@ docs say so out loud.
   4B alone, 95% for the same model in the loop, 100% for Sonnet at 26 cents.
   Includes the four results we retracted and the measurement bugs that produced
   them.
+- [**Metrics and cost accounting**](@/guide/metrics.md) — what every dashboard, footer,
+  and JSON value means; cache and cost formulas; provider-neutral accounting;
+  and a dogfood checklist for the feature branch.
 - **Workers** — one `/spawn` into N workers, the supervisor that is the same
   nudge/escalate mechanism applied to many, and the worker validator that
   closes the same hole in the background. The current reference is in the

@@ -110,16 +110,69 @@ pub struct ToolDef {
     pub parameters: serde_json::Value,
 }
 
-/// Token accounting for a completion.
+/// Provider-neutral accounting returned by every `LlmClient`.
+///
+/// Adapters translate wire fields and streaming updates before returning this
+/// value. Input includes cache reads and writes; output includes reasoning.
+/// Details are subsets, never additional billable tokens. The legacy field
+/// names stay stable for JSONL readers; they do not prescribe a wire format.
+/// New optional measurements belong here with serde defaults, then in events
+/// and aggregation, rather than as provider-specific branches in the agent/UI.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// Both input and output counts were reported, including explicit zeros.
+    /// False for absent or partial usage; adapters must set this explicitly.
+    #[serde(default)]
+    pub reported: bool,
+    /// All input tokens, including cache reads and cache creation.
     pub prompt_tokens: u32,
+    /// All generated tokens, including reasoning and tool-call output.
     pub completion_tokens: u32,
     pub total_tokens: u32,
-    /// The share of `completion_tokens` spent reasoning, when the provider
-    /// breaks it out (`completion_tokens_details.reasoning_tokens`). This is the
-    /// number that explains a turn that took a minute and said nothing.
+    /// Subset of output spent reasoning. Zero when not reported.
     pub reasoning_tokens: u32,
+    /// Input served from cache. None means unavailable, Some(0) means no hits.
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
+    /// Input used to create cache entries, distinct from cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+}
+
+/// Disjoint input categories for adapters whose wire totals exclude caching.
+/// Adapters with inclusive totals can populate `Usage` directly instead.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InputTokens {
+    pub uncached: u32,
+    pub cache_read: Option<u32>,
+    pub cache_write: Option<u32>,
+}
+
+/// Disjoint output categories for adapters that report reasoning separately.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OutputTokens {
+    pub non_reasoning: u32,
+    pub reasoning: u32,
+}
+
+impl Usage {
+    /// Normalize complete, reported disjoint categories at the adapter boundary.
+    /// Do not pass inclusive provider totals as uncached/non-reasoning counts.
+    pub fn from_parts(input: InputTokens, output: OutputTokens) -> Self {
+        let prompt_tokens = input.uncached
+            .saturating_add(input.cache_read.unwrap_or(0))
+            .saturating_add(input.cache_write.unwrap_or(0));
+        let completion_tokens = output.non_reasoning.saturating_add(output.reasoning);
+        Self {
+            reported: true,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+            reasoning_tokens: output.reasoning,
+            cached_tokens: input.cache_read,
+            cache_write_tokens: input.cache_write,
+        }
+    }
 }
 
 /// Rough token estimate for the pieces Worksmith assembled into a prompt.
@@ -551,6 +604,7 @@ pub fn context_mismatch(model: &str, served: usize, configured: usize) -> Option
 /// behind a different provider, not just a different name.
 #[derive(Clone)]
 pub struct ModelOverride {
+    pub model_key: String,
     pub client: std::sync::Arc<dyn LlmClient>,
     pub model: String,
     /// Sampling and prices for *this* model, already resolved against the
@@ -577,6 +631,7 @@ impl ModelOverride {
     pub fn resolve(config: &crate::config::Config, spec: &str) -> anyhow::Result<ModelOverride> {
         let resolved = config.resolve_model(Some(spec))?;
         Ok(ModelOverride {
+            model_key: resolved.model_key.clone(),
             client: client_for(&resolved)?,
             model: resolved.model,
             context_limit: resolved.settings.context.unwrap_or_else(|| config.context_limit()),

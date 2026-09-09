@@ -7,6 +7,9 @@
 //! mutex) so the UI keeps rendering and stays responsive to Esc (abort) while
 //! the model streams.
 
+use crate::metrics::{compact_count, fmt_ms, fmt_ms_opt};
+#[cfg(test)]
+use crate::metrics::report as metrics_report;
 use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -128,6 +131,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/agents", "list workers, or tail one live"),
     ("/validate", "the check a turn must pass"),
     ("/metrics", "model latency, token rates, and context trend"),
+    ("/stats", "dump recorded usage, costs, and workers"),
     ("/fast", "answer without thinking first"),
     ("/think", "how hard to think: a level or a token budget"),
     ("/route", "which provider serves you (OpenRouter)"),
@@ -158,9 +162,9 @@ struct App {
     /// history, so this is a running total of what was charged, not the size of
     /// the conversation.
     total_in_tokens: u64,
-    /// Prices for the session's model, when the config gives them. A local
-    /// model has none, and showing $0.00 would be a claim rather than a fact.
+    /// Resolved prices for newly spawned workers and model switching.
     prices: crate::config::ModelSettings,
+    recorded_spend: crate::metrics::Totals,
     /// Worker spend, already priced by each worker's own model, refreshed from
     /// the manager each frame. Costed there rather than here because that is
     /// where the resolved `ModelSettings` lives — matching model names across
@@ -236,6 +240,7 @@ impl App {
             last_reasoning_tokens: 0,
             total_in_tokens: 0,
             prices: crate::config::ModelSettings::default(),
+            recorded_spend: Default::default(),
             agent_spend: crate::worker::WorkerSpend::default(),
             step_reasoning_chars: 0,
             last_finish_reason: None,
@@ -291,6 +296,7 @@ impl App {
         self.last_reasoning_tokens = 0;
         self.step_reasoning_chars = 0;
         self.total_in_tokens = 0;
+        self.recorded_spend = Default::default();
         self.total_out_tokens = 0;
         self.last_finish_reason = None;
         self.compacting = false;
@@ -439,7 +445,15 @@ impl App {
                 self.touch(at);
             }
             // Bookkeeping for the supervisor and /metrics; nothing to draw.
-            Event::ModelCallStarted | Event::ModelCallFinished | Event::ModelMetrics { .. } => {}
+            Event::ModelCallStarted | Event::ModelCallFinished => {}
+            event @ Event::ModelMetrics { .. } => {
+                if let Event::ModelMetrics { session_id: Some(ref id), .. } = event
+                    && self.session_path.file_stem().and_then(|s| s.to_str()) != Some(id.as_str())
+                {
+                    return;
+                }
+                self.recorded_spend.observe(&event);
+            }
             Event::ModelChanged { from, to } => {
                 self.push(Kind::Notice, format!("model changed: {from} → {to}"));
             }
@@ -654,10 +668,14 @@ async fn run_loop(
     {
         let s = session.lock().await;
         app.session_path = s.path().to_path_buf();
+        workers.set_parent_session(app.session_path.clone());
         app.show_session_id(&s.id);
     }
     app.insert_escape = config.insert_escape();
     app.prices = model_settings.clone();
+    if let Ok(events) = crate::session::events(&app.session_path) {
+        app.recorded_spend = crate::metrics::Accounting::from_events(&events).totals;
+    }
     app.fanout_auto = fanout_auto;
     app.think_label = agent.thinking_mode().label();
     app.synthesize = synthesize;
@@ -826,7 +844,7 @@ async fn run_loop(
                                     app.push(Kind::Notice, "(nothing to distill yet)".to_string());
                                 } else {
                                     app.status = "distilling memories…".into();
-                                    let a = agent.clone();
+                                    let a = Arc::new(agent.helper_snapshot());
                                     extract = Some(tokio::spawn(async move {
                                         // A failed extraction must not read as
                                         // "nothing worth saving" — that is how an
@@ -856,7 +874,7 @@ async fn run_loop(
                                     Ok(p) => {
                                         app.status =
                                             format!("mining {} sessions…", p.items.len());
-                                        let a = agent.clone();
+                                        let a = Arc::new(agent.helper_snapshot());
                                         let report = p.report.clone();
                                         let items = p.items;
                                         mine = Some(tokio::spawn(async move {
@@ -873,7 +891,7 @@ async fn run_loop(
                         // /spawn asked for a planned fan-out: run the model call
                         // off this task so the UI keeps drawing.
                         if let Some(pf) = app.pending_fanout.take() {
-                            let a = agent.clone();
+                            let a = Arc::new(agent.helper_snapshot());
                             let max = agents_max;
                             let request = pf.task.clone();
                             fanout = Some(PlannedFanOut {
@@ -1697,6 +1715,7 @@ SESSION
   /new                                start a fresh session
   /compact                            summarize the history now
   /metrics [session-id]               latency, token rates, and context trend
+  /stats [session-id]                 dump usage, costs, and workers
   /validate <cmd|off>                 command that must pass before a turn is done
   /quit
 
@@ -1760,6 +1779,8 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             let mut s = session.lock().await;
             *s = Session::create(cwd)?;
             app.reset_for_new_session(s.path().to_path_buf());
+            workers.set_parent_session(app.session_path.clone());
+            agent.set_session_path(app.session_path.clone());
             app.push(Kind::Notice, format!("started new session {}", s.id));
         }
         "compact" => {
@@ -1885,6 +1906,18 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     );
                 }
                 Err(e) => app.push(Kind::Error, format!("history: {e}")),
+            }
+        }
+        "stats" => {
+            let id = parts.next();
+            if parts.next().is_some() {
+                app.push(Kind::Error, "usage: /stats [session-id]");
+                return Ok(true);
+            }
+            let path = id.map(Session::path_for_id).unwrap_or_else(|| Ok(app.session_path.clone()));
+            match path.and_then(|p| crate::metrics::session_report(&p)) {
+                Ok(lines) => { for line in lines { app.push(Kind::Notice, line); } }
+                Err(e) => app.push(Kind::Error, format!("stats: {e}")),
             }
         }
         "metrics" => {
@@ -2704,9 +2737,9 @@ fn show_metrics_overlay(app: &mut App, id: Option<String>) {
         app.push(Kind::Error, "no such session".to_string());
         return;
     };
-    match crate::session::events(&path) {
-        Ok(evs) => {
-            let items = metrics_report(&evs)
+    match crate::metrics::session_report(&path) {
+        Ok(lines) => {
+            let items = lines
                 .into_iter()
                 .map(|line| OverlayItem { label: line, description: String::new() })
                 .collect();
@@ -2714,218 +2747,6 @@ fn show_metrics_overlay(app: &mut App, id: Option<String>) {
             app.transcript.dirty = true;
         }
         Err(e) => app.push(Kind::Error, format!("metrics: {e}")),
-    }
-}
-
-fn metrics_report(evs: &[crate::session::TimedEvent]) -> Vec<String> {
-    #[derive(Clone, Copy)]
-    struct Sample {
-        idx: usize,
-        ts: u64,
-        prompt_tokens: u32,
-        completion_tokens: u32,
-        reasoning_tokens: u32,
-        context_breakdown: Option<crate::llm::ContextBreakdown>,
-        total_ms: u64,
-        first_output_ms: Option<u64>,
-        prompt_tokens_per_second: f64,
-        completion_tokens_per_second: f64,
-    }
-
-    let start = evs.first().map(|e| e.ts).unwrap_or(0);
-    let mut samples = Vec::new();
-    let mut compactions = Vec::new();
-    for ev in evs {
-        match &ev.event {
-            Event::ModelMetrics {
-                prompt_tokens,
-                completion_tokens,
-                reasoning_tokens,
-                context_breakdown,
-                total_ms,
-                first_output_ms,
-                prompt_tokens_per_second,
-                completion_tokens_per_second,
-            } => samples.push(Sample {
-                idx: samples.len() + 1,
-                ts: ev.ts,
-                prompt_tokens: *prompt_tokens,
-                completion_tokens: *completion_tokens,
-                reasoning_tokens: *reasoning_tokens,
-                context_breakdown: *context_breakdown,
-                total_ms: *total_ms,
-                first_output_ms: *first_output_ms,
-                prompt_tokens_per_second: *prompt_tokens_per_second,
-                completion_tokens_per_second: *completion_tokens_per_second,
-            }),
-            Event::Compaction {
-                tokens_before,
-                tokens_after,
-                ..
-            } => compactions.push((*tokens_before, *tokens_after)),
-            _ => {}
-        }
-    }
-    if samples.is_empty() {
-        return vec!["metrics: no model metrics recorded yet".to_string()];
-    }
-
-    let last = *samples.last().expect("checked non-empty");
-    let peak = samples
-        .iter()
-        .max_by_key(|s| s.prompt_tokens)
-        .copied()
-        .expect("checked non-empty");
-    let avg_first = average_ms(samples.iter().filter_map(|s| s.first_output_ms));
-    let avg_total = average_ms(samples.iter().map(|s| s.total_ms));
-    let avg_decode = average_f64(samples.iter().map(|s| s.completion_tokens_per_second));
-    let avg_prompt = average_f64(samples.iter().map(|s| s.prompt_tokens_per_second));
-
-    let mut lines = vec![
-        "Summary".to_string(),
-        format!(
-            "  calls {:<5} compactions {:<5} peak ctx {}",
-            samples.len(),
-            compactions.len(),
-            compact_count(peak.prompt_tokens as u64),
-        ),
-        String::new(),
-        "Latest Call".to_string(),
-        metric_pair_line(
-            "ctx",
-            compact_count(last.prompt_tokens as u64),
-            "output",
-            last.completion_tokens.to_string(),
-        ),
-        metric_pair_line(
-            "reasoning",
-            last.reasoning_tokens.to_string(),
-            "first",
-            fmt_ms_opt(last.first_output_ms),
-        ),
-        metric_pair_line(
-            "total",
-            fmt_ms(last.total_ms),
-            "prompt/s",
-            format!("{:.1}", last.prompt_tokens_per_second),
-        ),
-        format!("  {:<11} {:.1}", "decode/s", last.completion_tokens_per_second),
-        String::new(),
-        "Averages".to_string(),
-        metric_pair_line("first", fmt_ms(avg_first), "total", fmt_ms(avg_total)),
-        metric_pair_line(
-            "prompt/s",
-            format!("{avg_prompt:.1}"),
-            "decode/s",
-            format!("{avg_decode:.1}"),
-        ),
-    ];
-    if let Some(breakdown) = last.context_breakdown {
-        lines.push(String::new());
-        lines.push("Context Breakdown".to_string());
-        lines.push(metric_pair_line(
-            "system",
-            compact_count(breakdown.system_tokens as u64),
-            "tools",
-            compact_count(breakdown.tool_schema_tokens as u64),
-        ));
-        lines.push(metric_pair_line(
-            "skills",
-            compact_count(breakdown.loaded_skill_tokens as u64),
-            "memory",
-            compact_count(breakdown.memory_tokens as u64),
-        ));
-        lines.push(metric_pair_line(
-            "history",
-            compact_count(breakdown.history_tokens as u64),
-            "latest user",
-            compact_count(breakdown.latest_user_tokens as u64),
-        ));
-        lines.push(metric_pair_line(
-            "est sum",
-            compact_count(context_breakdown_total(breakdown) as u64),
-            "provider",
-            compact_count(last.prompt_tokens as u64),
-        ));
-    }
-    if let Some((before, after)) = compactions.last() {
-        lines.push(String::new());
-        lines.push("Compaction".to_string());
-        lines.push(format!("  latest      ~{before} -> ~{after} tokens"));
-    }
-    lines.push(String::new());
-    lines.push("Recent Calls".to_string());
-    lines.push("  #    age    ctx      first    total    decode/s".to_string());
-    let first = samples.len().saturating_sub(8);
-    for s in &samples[first..] {
-        lines.push(format!(
-            "  {:<4} {:>4}s  {:<7} {:<8} {:<8} {:.1}",
-            s.idx,
-            s.ts.saturating_sub(start),
-            compact_count(s.prompt_tokens as u64),
-            fmt_ms_opt(s.first_output_ms),
-            fmt_ms(s.total_ms),
-            s.completion_tokens_per_second
-        ));
-    }
-    lines
-}
-
-fn metric_pair_line(
-    left_label: &str,
-    left_value: String,
-    right_label: &str,
-    right_value: String,
-) -> String {
-    format!("  {left_label:<11} {left_value:<8}  {right_label:<11} {right_value}")
-}
-
-fn average_ms(values: impl Iterator<Item = u64>) -> u64 {
-    let mut n = 0u64;
-    let mut sum = 0u64;
-    for v in values {
-        n += 1;
-        sum = sum.saturating_add(v);
-    }
-    sum.checked_div(n).unwrap_or(0)
-}
-
-fn context_breakdown_total(b: crate::llm::ContextBreakdown) -> u32 {
-    b.system_tokens
-        .saturating_add(b.loaded_skill_tokens)
-        .saturating_add(b.memory_tokens)
-        .saturating_add(b.history_tokens)
-        .saturating_add(b.latest_user_tokens)
-        .saturating_add(b.tool_schema_tokens)
-}
-
-fn average_f64(values: impl Iterator<Item = f64>) -> f64 {
-    let mut n = 0.0;
-    let mut sum = 0.0;
-    for v in values {
-        n += 1.0;
-        sum += v;
-    }
-    if n == 0.0 { 0.0 } else { sum / n }
-}
-
-fn fmt_ms(ms: u64) -> String {
-    if ms >= 1000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        format!("{ms}ms")
-    }
-}
-
-fn fmt_ms_opt(ms: Option<u64>) -> String {
-    ms.map(fmt_ms).unwrap_or_else(|| "n/a".to_string())
-}
-
-fn compact_count(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
     }
 }
 
@@ -3914,11 +3735,59 @@ mod tests {
     }
 
     #[test]
+    fn footer_keeps_recorded_prices_when_the_model_changes() {
+        let mut a = app();
+        let event = Event::ModelMetrics {
+            session_id: None,
+            model: "old/model".into(), purpose: "agent".into(), cost_usd: Some(0.25),
+            cached_tokens: None, cache_write_tokens: None, prompt_tokens: 1000, completion_tokens: 100,
+            reasoning_tokens: 0, context_breakdown: None, total_ms: 100,
+            first_output_ms: None, prompt_tokens_per_second: 0.0, completion_tokens_per_second: 1000.0,
+        };
+        a.apply_event(event);
+        a.prices = crate::config::ModelSettings { input: Some(100.0), output: Some(200.0), ..Default::default() };
+        assert!(footer_string(&a).contains("$0.25"));
+        a.reset_for_new_session(PathBuf::from("new.jsonl"));
+        assert_eq!(a.recorded_spend.calls, 0);
+        assert!(!footer_string(&a).contains('$'));
+    }
+
+    #[test]
+    fn late_helper_metrics_do_not_charge_a_new_session() {
+        let mut a = app();
+        a.session_path = PathBuf::from("old.jsonl");
+        let mut event = Event::ModelMetrics {
+            session_id: Some("old".into()), model: "priced/model".into(),
+            purpose: "helper".into(), cost_usd: Some(0.25),
+            cached_tokens: None, cache_write_tokens: None, prompt_tokens: 1000,
+            completion_tokens: 100, reasoning_tokens: 0, context_breakdown: None,
+            total_ms: 100, first_output_ms: None,
+            prompt_tokens_per_second: 0.0, completion_tokens_per_second: 1000.0,
+        };
+        a.apply_event(event.clone());
+        assert_eq!(a.recorded_spend.known_cost_usd, 0.25);
+        a.reset_for_new_session(PathBuf::from("new.jsonl"));
+        a.apply_event(event.clone());
+        assert_eq!(a.recorded_spend.calls, 0);
+        if let Event::ModelMetrics { session_id, .. } = &mut event {
+            *session_id = Some("new".into());
+        }
+        a.apply_event(event);
+        assert_eq!(a.recorded_spend.calls, 1);
+        assert_eq!(a.recorded_spend.known_cost_usd, 0.25);
+    }
+
+    #[test]
     fn metrics_report_summarizes_model_calls() {
         let evs = vec![
             crate::session::TimedEvent {
                 ts: 10,
                 event: Event::ModelMetrics {
+                    session_id: None,
+                    model: String::new(),
+                    purpose: String::new(),
+                    cached_tokens: None, cache_write_tokens: None,
+                    cost_usd: None,
                     prompt_tokens: 1500,
                     completion_tokens: 40,
                     reasoning_tokens: 5,
@@ -3941,6 +3810,11 @@ mod tests {
             crate::session::TimedEvent {
                 ts: 15,
                 event: Event::ModelMetrics {
+                    session_id: None,
+                    model: String::new(),
+                    purpose: String::new(),
+                    cached_tokens: None, cache_write_tokens: None,
+                    cost_usd: None,
                     prompt_tokens: 2000,
                     completion_tokens: 100,
                     reasoning_tokens: 10,
@@ -3984,6 +3858,11 @@ mod tests {
         let mut session = Session::create_at(&path, dir.path()).unwrap();
         session
             .append_event(&Event::ModelMetrics {
+                    session_id: None,
+                    model: String::new(),
+                    purpose: String::new(),
+                    cached_tokens: None, cache_write_tokens: None,
+                    cost_usd: None,
                 prompt_tokens: 2000,
                 completion_tokens: 100,
                 reasoning_tokens: 10,
@@ -4034,6 +3913,11 @@ mod tests {
             metrics_report(&[crate::session::TimedEvent {
                 ts: 1,
                 event: Event::ModelMetrics {
+                    session_id: None,
+                    model: String::new(),
+                    purpose: String::new(),
+                    cached_tokens: None, cache_write_tokens: None,
+                    cost_usd: None,
                     prompt_tokens: 4800,
                     completion_tokens: 36,
                     reasoning_tokens: 11,
@@ -4873,6 +4757,8 @@ mod tests {
         a.last_reasoning_tokens = 2000;
         a.last_finish_reason = Some("length".into());
         a.prices = crate::config::ModelSettings { input: Some(1.0), output: Some(2.0), ..Default::default() };
+        a.recorded_spend.calls = 1;
+        a.recorded_spend.known_cost_usd = 3.0;
         a.total_in_tokens = 1_000_000;
         a.total_out_tokens = 1_000_000;
         a.think_label = Some("2k".into());

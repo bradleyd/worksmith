@@ -66,6 +66,7 @@ fn over(
     model: &str,
 ) -> worksmith::llm::ModelOverride {
     worksmith::llm::ModelOverride {
+        model_key: "test/model".into(),
         client,
         model: model.into(),
         settings: Default::default(),

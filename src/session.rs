@@ -271,7 +271,7 @@ impl Session {
             data,
         };
         let line = serde_json::to_string(&entry).context("serializing session entry")?;
-        writeln!(self.file, "{line}").context("writing session entry")?;
+        self.file.write_all(format!("{line}\n").as_bytes()).context("writing session entry")?;
         self.file.flush().ok();
         self.last_id = Some(id);
         Ok(())
@@ -323,3 +323,45 @@ pub fn events(path: &Path) -> Result<Vec<TimedEvent>> {
     Ok(out)
 }
 
+
+/// A durable worker relation, independent of the replayable conversation tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerLink {
+    pub id: String,
+    pub session_id: String,
+}
+
+/// The controller can append this while a turn owns the session lock. One
+/// append write keeps it separate from the agent's message/event records.
+pub fn link_worker(path: &Path, link: &WorkerLink) -> Result<()> {
+    let entry = SessionEntry {
+        id: Uuid::new_v4().to_string(), parent_id: None, kind: "worker".into(),
+        ts: now_secs(), data: serde_json::to_value(link)?,
+    };
+    let line = format!("{}\n", serde_json::to_string(&entry)?);
+    OpenOptions::new().append(true).open(path)?.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+pub fn worker_links(path: &Path) -> Result<Vec<WorkerLink>> {
+    let mut out = Vec::new();
+    for line in BufReader::new(File::open(path)?).lines() {
+        let Ok(entry) = serde_json::from_str::<SessionEntry>(&line?) else { continue };
+        if entry.kind == "worker" {
+            out.push(serde_json::from_value(entry.data)?);
+        }
+    }
+    Ok(out)
+}
+
+impl Session {
+    /// An append handle for side-call events only. It has no conversation to
+    /// replay and does not contend for the running turn's session lock.
+    pub(crate) fn event_writer(path: &Path) -> Result<Self> {
+        Ok(Self {
+            id: String::new(), path: path.to_path_buf(),
+            file: OpenOptions::new().append(true).open(path)?,
+            last_id: None, messages: Vec::new(), message_ids: Vec::new(), cwd: String::new(),
+        })
+    }
+}

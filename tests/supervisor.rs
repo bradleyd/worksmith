@@ -174,10 +174,12 @@ async fn worker_is_escalated_after_its_nudges_run_out() {
     let responses: VecDeque<Completion> = (0..200)
         .map(|_| Completion {
             usage: worksmith::llm::Usage {
+                reported: true,
                 prompt_tokens: 0,
                 completion_tokens: 100,
                 total_tokens: 100,
                 reasoning_tokens: 0,
+                cached_tokens: None, cache_write_tokens: None,
             },
             ..ls_call()
         })

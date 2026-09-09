@@ -53,9 +53,10 @@ fn a_fork_onto_another_model_takes_its_context_window_too() {
 
     let parent = agent(ToolContext::default()); // 32_000 window, no sampling
     let over = ModelOverride {
+        model_key: "test/model".into(),
         client: Arc::new(Silent),
         model: "cheap/model".to_string(),
-        settings: ModelSettings { top_p: Some(0.8), top_k: Some(20), ..Default::default() },
+        settings: ModelSettings { input: Some(0.1), output: Some(0.2), top_p: Some(0.8), top_k: Some(20), ..Default::default() },
         context_limit: 8_192,
         temperature: Some(0.6),
         missing_key_env: None,
@@ -65,6 +66,8 @@ fn a_fork_onto_another_model_takes_its_context_window_too() {
     let active = worker.current();
 
     assert_eq!(active.model, "cheap/model");
+    assert_eq!(active.model_key, "test/model");
+    assert_eq!(active.prices.cost(1_000_000, 1_000_000), Some(0.3_f64));
     // The bug: these four came from the parent, so an 8k worker ran with the
     // session's 32k window and compaction never fired.
     assert_eq!(active.context_limit, 8_192, "the window must move with the model");

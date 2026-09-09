@@ -50,6 +50,7 @@ impl WorkerStatus {
 
 #[derive(Default)]
 struct Runtime {
+    accounting: crate::metrics::Totals,
     status: WorkerStatus,
     last: String,
     tool_calls: usize,
@@ -210,6 +211,7 @@ pub struct WorkerSpend {
 
 /// A task waiting for a free worker slot.
 struct PendingTask {
+    parent_session: Option<PathBuf>,
     task: String,
     system: String,
     group: Option<u64>,
@@ -252,6 +254,7 @@ pub struct FanOutReport {
 
 /// Tracks spawned workers and enforces the concurrency cap.
 pub struct WorkerManager {
+    parent_session: Option<PathBuf>,
     template: Arc<Agent>,
     cwd: PathBuf,
     max: usize,
@@ -289,7 +292,12 @@ impl WorkerManager {
             counter: 0,
             next_group: 0,
             retired_tokens: HashMap::new(),
+            parent_session: None,
         }
+    }
+
+    pub fn set_parent_session(&mut self, path: PathBuf) {
+        self.parent_session = Some(path);
     }
 
     /// Watch spawned workers with this policy (`agents.supervisor` et al).
@@ -374,10 +382,10 @@ impl WorkerManager {
         let model = model.or_else(|| self.default_model.clone());
         let validate = validate.or_else(|| self.default_validate.clone());
         if self.running_count() >= self.max {
-            self.queued.push_back(PendingTask { task, system, group, model, validate });
+            self.queued.push_back(PendingTask { task, system, group, model, validate, parent_session: self.parent_session.clone() });
             return Ok(SpawnOutcome::Queued(self.queued.len()));
         }
-        self.start(task, system, group, model, validate).map(SpawnOutcome::Started)
+        self.start(task, system, group, model, validate, self.parent_session.clone()).map(SpawnOutcome::Started)
     }
 
     /// Spawn one worker per task. More than one becomes a *group*: they're
@@ -452,7 +460,7 @@ impl WorkerManager {
             let Some(p) = self.queued.pop_front() else {
                 break;
             };
-            match self.start(p.task, p.system, p.group, p.model, p.validate) {
+            match self.start(p.task, p.system, p.group, p.model, p.validate, p.parent_session) {
                 Ok(id) => started.push(id),
                 Err(_) => continue, // couldn't create a session; skip this one
             }
@@ -485,12 +493,18 @@ impl WorkerManager {
         group: Option<u64>,
         model: Option<ModelOverride>,
         validate: Option<String>,
+        parent_session: Option<PathBuf>,
     ) -> Result<String, String> {
         self.counter += 1;
         let id = format!("w{}", self.counter);
 
         let session = Session::create(&self.cwd).map_err(|e| format!("session: {e}"))?;
         let session_id = session.id.clone();
+        if let Some(path) = parent_session {
+            crate::session::link_worker(&path, &crate::session::WorkerLink {
+                id: id.clone(), session_id: session_id.clone(),
+            }).map_err(|e| format!("recording worker session: {e}"))?;
+        }
         let bus = EventBus::new();
         let steering = Steering::new();
         let model_label = model.as_ref().map(|m| m.model.clone());
@@ -500,7 +514,8 @@ impl WorkerManager {
         // prefix, so `qwen/qwen3.5-9b` never matched the config's
         // `openrouter/qwen/qwen3.5-9b` and a fan-out's cost silently stayed
         // blank with prices correctly configured.
-        let model_prices = model.as_ref().map(|m| m.settings.clone());
+        let model_prices = Some(model.as_ref().map(|m| m.settings.clone())
+            .unwrap_or_else(|| self.template.current().prices));
         // Created before the fork so the worker's tools can be pointed at it.
         // A fork otherwise inherits the *parent's* token, and the worker's own
         // kill switch reaches nothing that is actually running.
@@ -510,6 +525,7 @@ impl WorkerManager {
             .fork_with(bus.clone(), session_id.clone(), model)
             .with_steering(steering.clone())
             .with_cancel(cancel.clone());
+        agent.set_session_path(session.path().to_path_buf());
         let mut rx = bus.subscribe();
         drop(bus); // the forked agent keeps a sender clone
 
@@ -527,6 +543,7 @@ impl WorkerManager {
             finished: None,
             prompt_tokens: 0,
             check_passed: None,
+            accounting: Default::default(),
         }));
 
         let awaiting_approval = agent.awaiting_approval();
@@ -693,6 +710,12 @@ impl WorkerManager {
         }
         for w in &self.workers {
             let r = w.runtime.lock().unwrap();
+            if r.accounting.calls > 0 {
+                out.prompt += r.accounting.prompt_tokens;
+                out.completion += r.accounting.completion_tokens;
+                out.cost += r.accounting.known_cost_usd;
+                continue;
+            }
             let (p, c) = (r.prompt_tokens, r.tokens as u64);
             out.prompt += p;
             out.completion += c;
@@ -832,6 +855,7 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
         _ => {}
     }
     match e {
+        event @ Event::ModelMetrics { .. } => g.accounting.observe(&event),
         Event::ToolCall { name, arguments, .. } => {
             g.tool_calls += 1;
             g.last = format!("⚙ {name} {}", truncate(arguments.trim(), 50));
@@ -990,6 +1014,7 @@ mod log_tests {
             finished: None,
             prompt_tokens: 0,
             check_passed: None,
+            accounting: Default::default(),
         };
         for i in 0..(LOG_LINES + 50) {
             log_line(&mut rt, i.to_string());

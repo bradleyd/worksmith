@@ -614,10 +614,12 @@ impl LlmClient for RecordingClient {
         Ok(Completion {
             content: Some(self.reply.clone()),
             usage: worksmith::llm::Usage {
+                reported: true,
                 prompt_tokens: self.prompt_tokens,
                 completion_tokens: 5,
                 total_tokens: self.prompt_tokens + 5,
                 reasoning_tokens: 0,
+                cached_tokens: None, cache_write_tokens: None,
             },
             ..Default::default()
         })
@@ -1014,17 +1016,21 @@ async fn the_session_records_model_request_metrics() {
         MockClient::new(vec![Completion {
             content: Some("all set".into()),
             usage: worksmith::llm::Usage {
+                reported: true,
                 prompt_tokens: 1234,
                 completion_tokens: 56,
                 total_tokens: 1290,
                 reasoning_tokens: 7,
+                cached_tokens: Some(1000), cache_write_tokens: None,
             },
             finish_reason: Some("stop".into()),
             ..Default::default()
         }]),
         dir.path(),
         3,
-    );
+    ).with_accounting("priced/model".into(), worksmith::config::ModelSettings {
+        input: Some(1.0), output: Some(2.0), ..Default::default()
+    });
     agent
         .run_turn(&mut session, "measure this", "system", None, CancellationToken::new())
         .await
@@ -1037,6 +1043,9 @@ async fn the_session_records_model_request_metrics() {
         .expect("model metrics should be persisted");
 
     let worksmith::event::Event::ModelMetrics {
+        model,
+        cached_tokens,
+        cost_usd,
         prompt_tokens,
         completion_tokens,
         reasoning_tokens,
@@ -1048,6 +1057,9 @@ async fn the_session_records_model_request_metrics() {
     else {
         unreachable!("filtered to model metrics");
     };
+    assert_eq!(model, "priced/model");
+    assert_eq!(*cached_tokens, Some(1000));
+    assert!((cost_usd.unwrap() - 0.001346).abs() < 1e-12);
     assert_eq!(*prompt_tokens, 1234);
     assert_eq!(*completion_tokens, 56);
     assert_eq!(*reasoning_tokens, 7);
@@ -1589,4 +1601,137 @@ async fn real_handover_notes_are_accepted() {
     let kept: String =
         session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
     assert!(kept.contains("src/tui.rs:2476"), "the locations survive, which is the point");
+}
+
+#[tokio::test]
+async fn helper_costs_and_model_switches_survive_reopening_without_repricing() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metrics.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+    let response = || Completion {
+        content: Some("finished".into()),
+        usage: worksmith::llm::Usage { reported: true, prompt_tokens: 1000, completion_tokens: 100,
+            ..Default::default() },
+        ..Default::default()
+    };
+    let agent = build_agent(MockClient::new(vec![response(), response(), response()]), dir.path(), 3)
+        .with_accounting("priced/a".into(), worksmith::config::ModelSettings {
+            input: Some(1.0), output: Some(2.0), ..Default::default()
+        });
+    agent.run_turn(&mut session, "first", "system", None, CancellationToken::new()).await.unwrap();
+    agent.ask("helper", "summarize", 512).await.unwrap();
+    let mut active = agent.current();
+    active.model = "b".into();
+    active.model_key = "priced/b".into();
+    active.prices.input = Some(10.0);
+    active.prices.output = Some(20.0);
+    agent.set_model(active);
+    agent.run_turn(&mut session, "second", "system", None, CancellationToken::new()).await.unwrap();
+    drop(session);
+    let events = worksmith::session::events(&path).unwrap();
+    let stats = worksmith::metrics::Accounting::from_events(&events);
+    assert_eq!(stats.totals.calls, 3);
+    assert_eq!(stats.turns.len(), 2);
+    assert!((stats.models["priced/a"].known_cost_usd - 0.0024).abs() < 1e-12);
+    assert!((stats.models["priced/b"].known_cost_usd - 0.012).abs() < 1e-12);
+    assert_eq!(stats.turns[1].totals.calls, 1, "a helper between turns is not the next turn");
+    assert_eq!(Session::open(&path).unwrap().messages().len(), 4, "helper text is not history");
+}
+
+#[tokio::test]
+async fn disjoint_provider_usage_uses_the_same_events_costs_and_reports() {
+    use worksmith::llm::{InputTokens, OutputTokens, Usage};
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("other-provider.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+    // A synthetic adapter reports disjoint counts, unlike the currently
+    // shipped client's inclusive input/output totals. No OpenAI wire types.
+    let usage = Usage::from_parts(
+        InputTokens { uncached: 200, cache_read: Some(700), cache_write: Some(100) },
+        OutputTokens { non_reasoning: 80, reasoning: 20 },
+    );
+    assert_eq!(usage.total_tokens, 1100);
+    let agent = build_agent(MockClient::new(vec![Completion {
+        content: Some("done".into()), usage, ..Default::default()
+    }]), dir.path(), 3).with_accounting("other/provider-model".into(), worksmith::config::ModelSettings {
+        input: Some(1.0), output: Some(2.0), ..Default::default()
+    });
+    agent.run_turn(&mut session, "measure", "system", None, CancellationToken::new()).await.unwrap();
+    drop(session);
+    let stats = worksmith::metrics::load(&path).unwrap();
+    let totals = &stats.parent.totals;
+    assert_eq!(totals.prompt_tokens, 1000, "cache categories belong in input exactly once");
+    assert_eq!(totals.completion_tokens, 100, "reasoning belongs in output exactly once");
+    assert_eq!(totals.reasoning_tokens, 20);
+    assert_eq!(totals.cached_tokens, 700);
+    assert_eq!(totals.cache_write_tokens, 100);
+    assert_eq!(totals.cache_write_reported_calls, 1);
+    assert!((totals.known_cost_usd - 0.0012).abs() < 1e-12);
+    let report = worksmith::metrics::session_report(&path).unwrap().join("\n");
+    assert!(report.contains("70.0%; 1/1 calls reported"));
+    assert!(report.contains("cache writes 100 tokens (1/1 calls reported)"));
+    assert!(report.contains("other/provider-model"));
+}
+
+#[tokio::test]
+async fn missing_usage_is_unpriced_even_with_configured_rates() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing-usage.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+    let agent = build_agent(MockClient::new(vec![done("finished")]), dir.path(), 3)
+        .with_accounting("priced/model".into(), worksmith::config::ModelSettings {
+            input: Some(1.0), output: Some(2.0), ..Default::default()
+        });
+    agent.run_turn(&mut session, "measure", "system", None, CancellationToken::new()).await.unwrap();
+    let stats = worksmith::metrics::load(&path).unwrap();
+    assert_eq!(stats.combined.calls, 1);
+    assert_eq!(stats.combined.unpriced_calls, 1);
+}
+
+#[tokio::test]
+async fn helper_job_keeps_its_origin_across_session_changes() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old.jsonl");
+    let new = dir.path().join("new.jsonl");
+    let _old_session = Session::create_at(&old, dir.path()).unwrap();
+    let _new_session = Session::create_at(&new, dir.path()).unwrap();
+    let agent = build_agent(MockClient::new(vec![done("first"), done("second")]), dir.path(), 3)
+        .with_session_path(old.clone());
+    let helper = agent.helper_snapshot();
+    // A spawned job might not even be polled before /new runs.
+    agent.set_session_path(new.clone());
+    helper.ask("helper", "first", 512).await.unwrap();
+    helper.ask("helper", "second", 512).await.unwrap();
+    let events = worksmith::session::events(&old).unwrap();
+    assert_eq!(events.len(), 2);
+    for entry in events {
+        assert!(matches!(entry.event, worksmith::event::Event::ModelMetrics {
+            session_id: Some(ref id), ..
+        } if id == "old"));
+    }
+    assert!(worksmith::session::events(&new).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn explicitly_reported_zero_usage_has_known_zero_cost() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zero-usage.jsonl");
+    let mut session = Session::create_at(&path, dir.path()).unwrap();
+    let agent = build_agent(MockClient::new(vec![Completion {
+        content: Some("finished".into()),
+        usage: worksmith::llm::Usage::from_parts(Default::default(), Default::default()),
+        ..Default::default()
+    }]), dir.path(), 3).with_accounting("priced/model".into(), worksmith::config::ModelSettings {
+        input: Some(1.0), output: Some(2.0), ..Default::default()
+    });
+    agent.run_turn(&mut session, "measure", "system", None, CancellationToken::new()).await.unwrap();
+    let stats = worksmith::metrics::load(&path).unwrap();
+    assert_eq!(stats.combined.calls, 1);
+    assert_eq!(stats.combined.unpriced_calls, 0);
+    assert_eq!(stats.combined.known_cost_usd, 0.0);
 }

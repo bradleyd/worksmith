@@ -100,6 +100,12 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Report recorded metrics without loading a model or contacting a provider.
+    Stats {
+        session_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a task in background workers and print what they produced.
     ///
     /// The non-interactive form of `/spawn`: fans out, waits, reports each
@@ -195,6 +201,16 @@ async fn run(args: Args) -> Result<()> {
         .await;
     }
 
+    if let Some(Cmd::Stats { session_id, json }) = &args.cmd {
+        let path = Session::path_for_id(session_id)?;
+        if *json || args.mode.as_deref() == Some("json") {
+            println!("{}", serde_json::to_string_pretty(&worksmith::metrics::load(&path)?)?);
+        } else {
+            println!("{}", worksmith::metrics::session_report(&path)?.join("\n"));
+        }
+        return Ok(());
+    }
+
     let config = resolve_project_trust(Config::load(&cwd)?, &cwd, &args)?;
     let resolved = config.resolve_model(args.model.as_deref())?;
 
@@ -223,6 +239,7 @@ async fn run(args: Args) -> Result<()> {
         // The renderer has to exist before the work starts, or `--mode json`
         // reports a silent, tokenless run — which is exactly what it did.
         let renderer = spawn_renderer(bus.subscribe(), mode);
+        bus.emit(Event::SessionStarted { id: session.id.clone() });
         let outcome = run_spawn(
             &args,
             &config,
@@ -300,6 +317,8 @@ async fn run(args: Args) -> Result<()> {
         config.keep_recent_turns(),
         tool_ctx,
     )
+    .with_accounting(resolved.model_key.clone(), resolved.settings.clone())
+    .with_session_path(session.path().to_path_buf())
     .with_sampling(
         resolved.settings.temperature,
         resolved.settings.top_p,
@@ -484,6 +503,8 @@ async fn run_spawn(
             config.keep_recent_turns(),
             tool_ctx,
         )
+        .with_accounting(resolved.model_key.clone(), resolved.settings.clone())
+        .with_session_path(session.path().to_path_buf())
         .with_sampling(
             resolved.settings.temperature,
             resolved.settings.top_p,
@@ -542,6 +563,7 @@ async fn run_spawn(
             Duration::from_secs(config.bash_timeout_secs()),
         )
         .with_supervisor(config.supervisor());
+    workers.set_parent_session(session.path().to_path_buf());
     let report = workers.spawn_many_on(tasks, system, task.clone(), over);
     let expected = report.started.len() + report.queued;
     if expected == 0 {
@@ -721,6 +743,7 @@ async fn repl(
         .with_supervisor(config.supervisor())
         .with_default_model(worker_model);
 
+    workers.set_parent_session(session.path().to_path_buf());
     println!("worksmith — model: {model}  (/help for commands, /quit to exit)");
     if let Some(c) = &validate_cmd {
         println!("validation: `{c}` must pass before a task is considered done");
@@ -912,11 +935,25 @@ async fn handle_command(
     let head = parts.next().unwrap_or("");
     match head {
         "quit" | "exit" | "q" => CommandResult::Quit,
+        "stats" | "metrics" => {
+            let id = parts.next();
+            if parts.next().is_some() {
+                eprintln!("usage: /stats [session-id]");
+                return CommandResult::Handled;
+            }
+            let path = id.map(Session::path_for_id).unwrap_or_else(|| Ok(session.path().to_path_buf()));
+            match path.and_then(|p| worksmith::metrics::session_report(&p)) {
+                Ok(lines) => println!("{}", lines.join("\n")),
+                Err(e) => eprintln!("stats: {e}"),
+            }
+            CommandResult::Handled
+        }
         "help" | "h" => {
             println!(
                 "commands:\n  \
                  /help                    this help\n  \
                  /quit                    exit\n  \
+                 /stats [session-id]      recorded usage, costs, and workers\n  \
                  /new                     start a new session\n  \
                  /memory [list|global|project]  list memories\n  \
                  /memory show <id>        show a memory\n  \
@@ -939,6 +976,8 @@ async fn handle_command(
         "new" => match Session::create(cwd) {
             Ok(s) => {
                 *session = s;
+                workers.set_parent_session(session.path().to_path_buf());
+                agent.set_session_path(session.path().to_path_buf());
                 println!("(started new session {})", session.id);
                 CommandResult::Handled
             }

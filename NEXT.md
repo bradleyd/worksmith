@@ -1,8 +1,7 @@
 # What to do next
 
-Updated after the 0.5.0 release and the documentation catch-up on
-2026-09-05. `LOOSE_ENDS.md` keeps the longer forensic notes; this file is the
-short operational list.
+Updated after the M9 accounting review fixes on 2026-09-08. `LOOSE_ENDS.md`
+keeps the longer forensic notes; this file is the short operational list.
 
 ## Current stopping point
 
@@ -15,47 +14,54 @@ short operational list.
 - a manual compaction progress overlay so `/compact` no longer looks frozen;
 - current README, quickstart, guide index, and `config.example.toml` updates.
 
-The current branch is for planning-doc cleanup only. Keep it to `NEXT.md` and
-`LOOSE_ENDS.md`.
+The planning-doc refresh is committed. Current implementation branch:
+`codex/m9-metrics-second-pass`.
 
-Known untracked local files that are not part of this branch:
+Known unrelated local files remain outside this work:
 
 - `evals/results/memory-convention-qwen9b.json`
 - `scripts/`
 
 ## Checks for this slice
 
-This is a markdown-only branch, so do not run the full Rust suite just to prove
-the prose changed.
+Verified on 2026-09-08: 426 Rust tests, three Python metrics tests,
+warning-clean Clippy, the Zola docs build, and `git diff --check` all pass.
+The command-output fix and its PTY dogfood check remain pending.
 
+- `cargo test`
+- `cargo clippy --all-targets -- -D warnings`
+- `python3 -m unittest discover -s evals -p test_metrics.py`
+- PTY smoke test for `/metrics`, `/stats`, scrolling, and exit
 - `git diff --check`
-- scan for stale branch names, old release references, and placeholders
-- read the first screen of both files and make sure the next action is clear
-
-## 1. Finish the planning-doc refresh
-
-Bring `NEXT.md` and the top of `LOOSE_ENDS.md` up to date with the shipped
-0.5.0 state. Preserve old incident notes where they still explain failures, but
-the first page should say what is actually next.
-
-Commit command when ready:
-
-```bash
-git add NEXT.md LOOSE_ENDS.md
-git diff --cached --check
-git commit -m "Refresh planning notes after 0.5.0"
-```
 
 ## 2. M9 metrics, second pass
 
-This is the next best feature work.
+Implemented on the feature branch: request-time model/cost/cache records,
+shared accounting in `src/metrics.rs`, per-turn history and context attribution,
+helper spend, durable worker links, `/stats`, and offline text/JSON reports.
+The eval harness reads Worksmith's own combined totals to report dollars per
+solved task. The footer accumulates recorded costs across model switches. Usage is normalized
+at the provider adapter boundary; cache reads/writes and reasoning have explicit
+subset semantics, with coverage for inclusive and disjoint provider counts.
+
+The three accounting review findings are fixed: missing/partial usage stays
+unpriced; background helper jobs retain their originating session and late
+metrics cannot charge a new footer; eval stats failures no longer skip validation
+or overwrite task outcomes. Regression tests cover these cases.
+
+The implementation and documentation remain uncommitted. The next separate bug
+is tracked in `COMMAND_OUTPUT_PLAN.md`: transcript-printing commands interleave
+with a running turn, and `/skill <name>` displays rather than loads the skill.
+That command-output work is still pending. Finish it and dogfood before M12. Historical sessions cannot
+recover missing prices or worker links; cache-discount billing remains outside
+this pass. Failed or interrupted requests with no returned usage are not billed
+by this accounting.
 
 Why: the last long dogfood session made the performance problem visible but not
 actionable. The TUI now has a `/metrics` overlay and records request timing,
-token counts, context size, and an estimated context breakdown. The next pass
-should turn that into a diagnostic instrument.
+token counts, context size, and an estimated context breakdown. This pass turns that into a diagnostic instrument.
 
-Target shape:
+Implemented scope:
 
 - per-turn rows, not only aggregate latest/average numbers;
 - session totals for model calls, tool calls, generated tokens, reasoning

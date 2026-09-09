@@ -232,9 +232,8 @@ pub struct ModelSettings {
 }
 
 impl ModelSettings {
-    /// Cost in USD for a request, or `None` when this model has no prices (a
-    /// local model is free, and guessing a number would be worse than saying
-    /// nothing).
+    /// Cost at standard rates, or `None` when either price is unknown.
+    /// Model resolution supplies zero defaults for loopback providers.
     pub fn cost(&self, prompt_tokens: u64, completion_tokens: u64) -> Option<f64> {
         let (i, o) = (self.input?, self.output?);
         Some((prompt_tokens as f64 * i + completion_tokens as f64 * o) / 1_000_000.0)
@@ -280,6 +279,7 @@ pub struct TuiConfig {
 pub struct ResolvedModel {
     pub provider: ProviderConfig,
     pub model: String,
+    pub model_key: String,
     pub api_key: Option<String>,
     /// Prices and sampling for this model, from `[models."provider/model"]`.
     pub settings: ModelSettings,
@@ -706,12 +706,24 @@ impl Config {
             .as_ref()
             .and_then(|env| std::env::var(env).ok());
 
-        let settings = self
+        let mut settings = self
             .models
             .get(&format!("{provider_name}/{model}"))
             .cloned()
             .unwrap_or_default();
+        // Only loopback endpoints are inferred free; remote servers may be billed.
+        let local = reqwest::Url::parse(&provider.base_url).ok().is_some_and(|url| {
+            url.host_str().is_some_and(|host| {
+                host == "localhost" || host == "[::1]"
+                    || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+            })
+        });
+        if local {
+            settings.input.get_or_insert(0.0);
+            settings.output.get_or_insert(0.0);
+        }
         Ok(ResolvedModel {
+            model_key: format!("{provider_name}/{model}"),
             provider,
             model,
             api_key,
@@ -892,6 +904,26 @@ pub fn load_project_instructions(start: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_prices_default_to_free_but_hosted_prices_remain_unknown() {
+        for endpoint in ["http://127.0.0.1:8000/v1", "http://localhost:8000/v1", "http://[::1]:8000/v1"] {
+            let config: Config = toml::from_str(&format!("[providers.local]\nbase-url = \"{endpoint}\"\n")).unwrap();
+            let resolved = config.resolve_model(Some("local/model")).unwrap();
+            assert_eq!(resolved.settings.cost(1000, 100), Some(0.0));
+            assert_eq!(resolved.model_key, "local/model");
+        }
+        let hosted: Config = toml::from_str("[providers.remote]\nbase-url = \"https://example.com/v1\"\n").unwrap();
+        assert_eq!(hosted.resolve_model(Some("remote/model")).unwrap().settings.cost(1000, 100), None);
+        let priced: Config = toml::from_str(r#"
+            [providers.local]
+            base-url = "http://127.0.0.1:8000/v1"
+            [models."local/model"]
+            input = 1.0
+            output = 2.0
+        "#).unwrap();
+        assert_eq!(priced.resolve_model(Some("local/model")).unwrap().settings.cost(1000, 100), Some(0.0012));
+    }
 
     /// Every key a project config sets must survive the merge.
     ///

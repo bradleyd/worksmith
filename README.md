@@ -505,10 +505,30 @@ but the feature reference below is the current source of truth for what ships.
   happened. Diagnosing a worker that died otherwise meant reading the model
   server's own logs and correlating timestamps by hand. Per-token deltas are
   left out; they would multiply the file by the length of every answer.
-- **Model-call metrics** (`/metrics`, `/metrics <session-id>`): summarizes the
-  recorded request timings, context size, output and reasoning tokens, first
-  output latency, total latency, token rates, approximate prompt breakdown, and
-  compaction count for a session.
+- **Model-call metrics** (`/metrics`, `/metrics <session-id>`): an overlay with
+  request timing, context breakdowns, per-turn history, session totals, provider
+  cache coverage, and estimated cost by model. Helper calls (compaction,
+  planning, memory extraction) contribute spend separately from conversation
+  context. Linked workers have separate totals, plus a combined spend figure.
+  `/stats [session-id]` dumps the same report in the TUI or plain REPL.
+  `worksmith stats <session-id> --json` exports structured accounting without
+  loading a model or contacting a provider; omit `--json` for a text report.
+  Costs use configured `[models]` standard input/output rates captured at
+  request time, so model switches and later price edits do not reprice history.
+  Loopback providers default to free unless priced; unpriced hosted calls stay
+  explicitly unknown. Cache discounts are not inferred. Old sessions remain
+  readable, but missing historical prices and worker links cannot be recovered.
+  Counts cover completed requests with recorded usage, not provider billing
+  for failed or interrupted requests. Latency includes client overhead and
+  provider queueing; prompt/s is an estimate from time to first output.
+  Provider adapters normalize usage at the `LlmClient` boundary: input includes
+  cache reads/writes, and output includes reasoning. Optional cache-write data
+  is recorded separately from hits. Adapters with disjoint counts can use
+  `Usage::from_parts`; inclusive totals map directly to `Usage`. The collector,
+  JSONL, `/stats`, and evals consume that shared contract, not provider response
+  fields. New measurements can extend it with optional, serde-defaulted fields.
+  See the [metrics reference and dogfood checklist](docs/content/guide/metrics.md)
+  for every value, formula, scope, and a step-by-step test sequence.
 - **Watching a worker** (`/agents tail <id>`): a worker's events go to its own
   bus and never reach the parent's transcript, so `/agents` could report status
   but never what a worker was doing. Each worker now keeps a bounded log of its
@@ -622,7 +642,7 @@ cursor, and `i`/`Enter`/`Esc` returns to typing. The mouse wheel scrolls the
 transcript by default; `/mouse off` gives the wheel back to the terminal for
 selection.
 
-Commands: `/help`, `/new`, `/compact`, `/metrics [session-id]`, `/validate
+Commands: `/help`, `/new`, `/compact`, `/metrics [session-id]`, `/stats [session-id]`, `/validate
 <cmd|off>`, `/fast`, `/think`, `/route`, `/model`, `/pair`, `/memory`,
 `/knowledge`, `/skill`, `/spawn`, `/agents`, `/trust`, `/mouse`, `/history`, and
 `/quit`. `@path` includes a file in your message.
@@ -638,6 +658,7 @@ normal mode, mouse mode, pairing toggles, and trust prompts.
 /quit                     exit
 /new                      start a new session
 /compact                  summarize the session now
+/stats [session-id]       dump usage, costs, and workers (/metrics also works)
 /memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
 /memory search <query> | /memory extract | /memory mine [n]
 /memory pending | /memory approve <id|all> | /memory supersede <new> <old>
