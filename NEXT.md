@@ -1,6 +1,6 @@
 # What to do next
 
-Updated during the command-output fix on 2026-09-08. `LOOSE_ENDS.md`
+Updated after prompt/cache validation on 2026-09-08. `LOOSE_ENDS.md`
 keeps the longer forensic notes; this file is the short operational list.
 
 ## Current stopping point
@@ -14,32 +14,28 @@ keeps the longer forensic notes; this file is the short operational list.
 - a manual compaction progress overlay so `/compact` no longer looks frozen;
 - current README, quickstart, guide index, and `config.example.toml` updates.
 
-M9 metrics is committed as `c4268f7` and merged into `main`. Current branch:
-`codex/command-output-fix`.
-
-Known unrelated local files remain outside this work:
-
-- `evals/results/memory-convention-qwen9b.json`
-- `scripts/`
+M9 metrics (`c4268f7`) and command overlays/skill management (`9a6ba4a`) are
+merged into `main` and pushed. Current branch: `codex/prompt-cache-validation`.
+This branch contains provider probes, captured results, and documentation only;
+production memory placement remains unchanged.
 
 ## Checks for this slice
 
-Verified on 2026-09-08: 445 Rust tests, three Python metrics tests,
-warning-clean Clippy, the Zola docs build, and `git diff --check` all pass.
-A PTY smoke test used a local mock provider to exercise stats/catalog overlays,
-keyboard and mouse navigation, filtering, mid-turn skill selection/loading,
-repeat-load handling, preview focus, unloading/reloading, streaming, and exit.
-Catalog tests also cover loaded markers, external loads, empty filters, and failed
-loads. A separate plain-REPL smoke test verified that loading and unloading a skill
-change the following model request. The opt-in LAN cache probe also passed; it is
-ignored by the normal test suite. Responsive browser tests cover 60×20 through 140×40 terminals, including long
-status text and composer isolation. The command-output changes remain uncommitted.
+The prior merged UI slice passed 445 Rust tests, warning-clean Clippy, Python
+metrics tests, docs build, and PTY/manual coverage. This validation slice adds two
+offline tests for experimental layout stability and the quality scoring oracle.
+Live probes remain ignored by normal `cargo test`. Final verification passed:
+447 Rust tests (two live probes ignored), warning-clean Clippy, the Zola docs
+build, and `git diff --check`.
 
 - `cargo test`
 - `cargo clippy --all-targets -- -D warnings`
-- `python3 -m unittest discover -s evals -p test_metrics.py`
-- PTY smoke test for `/metrics`, `/stats`, scrolling, and exit
+- Zola docs build
 - `git diff --check`
+
+Two OpenRouter runs completed 90 requests total. See
+`docs/content/guide/prompt-cache-results.md` for scores, cache telemetry, limitations,
+and the next production gate. The local B70 was not used for this slice.
 
 ## 2. M9 metrics, second pass
 
@@ -56,8 +52,7 @@ unpriced; background helper jobs retain their originating session and late
 metrics cannot charge a new footer; eval stats failures no longer skip validation
 or overwrite task outcomes. Regression tests cover these cases.
 
-The command-output fix from `COMMAND_OUTPUT_PLAN.md` is implemented on its own
-branch: `/stats` and the skill catalog use reference overlays; keyboard/wheel
+The command-output fix from `COMMAND_OUTPUT_PLAN.md` was merged in `9a6ba4a`: `/stats` and the skill catalog use reference overlays; keyboard/wheel
 navigation stays inside them. The skill catalog distinguishes active instructions from discovered catalog
 entries. The two-pane browser previews instructions without loading; Tab switches
 panes, Enter loads, and `u` unloads without closing the catalog.
@@ -70,15 +65,16 @@ status, and distinguishes discovered catalog entries from active instructions. W
 for these commands stay out of the streaming transcript. Other commands that
 print transcript notices have not been migrated to overlays.
 
-Prompt/cache validation now compares request prefixes, skill lifecycle changes,
-wire metadata, memory changes, and compaction. The opt-in synthetic LAN probe
-showed ~1.7s first output for repeats versus ~3.3s after changing early memory;
-changing tail memory stayed ~1.6s. Cached-token telemetry was unavailable, so this
-is not a measured hit rate. The user also confirmed concurrent server load, so
-latency comparisons are inconclusive and require an isolated rerun. Production memory placement
-is unchanged. See `docs/content/guide/prompt-cache.md` for the reproduction command
-and full results. Next: compare task quality with memory near the latest turn
-before changing its placement. The skill/browser/cache work remains uncommitted.
+Prompt/cache validation covers request prefixes, skill lifecycle changes,
+wire metadata, memory changes, and compaction. The new OpenRouter comparison found
+potential cache reuse with memory before the current turn, but no consistent
+latency benefit. Synthetic direct-answer quality was 10/12 for each placement,
+with different failures. A tool-enabled exploratory sample did not execute returned
+tool calls and cannot establish completed-agent quality. Production placement stays
+unchanged. Next gate: completed tool-loop fixture tasks with observed/fixed provider
+routing, followed by cross-turn, compaction, and resume coverage if placement moves.
+See `docs/content/guide/prompt-cache-results.md`. This validation branch remains
+uncommitted.
 
 Review and dogfood this change before M12. Historical sessions cannot
 recover missing prices or worker links; cache-discount billing remains outside

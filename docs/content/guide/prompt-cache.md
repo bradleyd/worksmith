@@ -65,25 +65,47 @@ in-flight request, erase historical tool results, or prevent a later model tool
 call from loading the skill again. Loaded state is in-process; it is not restored
 from session JSONL on restart.
 
-## Repeatable local measurement
+## Repeatable provider measurements
 
-The ignored Rust test sends seven small requests using synthetic conversation
-text and the real OpenAI-compatible adapter. It requires an explicit endpoint and
-model; ordinary `cargo test` runs never invoke it. Use a local server with an
-appropriate chat template and thinking dialect.
+The two ignored Rust probes use entirely synthetic instructions, conversations,
+and schemas through the real OpenAI-compatible adapter. They send no repository
+or user instructions. Ordinary `cargo test` runs only the two offline layout and
+scoring checks; live probes require an explicit endpoint and model.
 
 ```sh
-WORKSMITH_CACHE_BASE_URL=http://localhost:8000/v1 \
-WORKSMITH_CACHE_MODEL=your-model \
-cargo test --test prompt_cache compare_prefix_reuse -- --ignored --nocapture
+export WORKSMITH_CACHE_BASE_URL=https://openrouter.ai/api/v1
+export WORKSMITH_CACHE_MODEL=qwen/qwen3.8-27b
+export WORKSMITH_CACHE_API_KEY_ENV=OPENROUTER_API_KEY
+export WORKSMITH_CACHE_SESSION_ID=worksmith-cache-check-unique-run-id
+cargo test --test prompt_cache -- --ignored --nocapture --test-threads=1
 ```
 
-Each JSON row reports `prompt_tokens`, optional `cached_tokens`, whether usage was
-reported, milliseconds to the first nonempty text/reasoning delta, and total
-elapsed milliseconds. A missing cache count is unavailable telemetry, not zero.
-The probe compares identical repeats, changed early memory, changed tail memory,
-and a changed skill suffix. It does not assert latency thresholds or flush the
-server cache. Shared tool prefixes may already be cached even on the first case.
+Set the API key separately in the named environment variable. For a local server,
+change the endpoint/model and unset the optional key-variable and session settings.
+Use a fresh session ID for each run. OpenRouter's explicit session header avoids
+changing its inferred conversation key when opening messages change; affinity is
+best effort, not a provider pin. See [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+
+`compare_prefix_reuse` sends 21 requests across three rounds: first requests,
+identical repeats, changed memory in both layouts, and a changed skill suffix.
+`compare_memory_quality` sends 24 requests across six direct-answer cases, two
+layouts, and two rounds. It checks memory conventions, superseded history,
+explicit overrides, irrelevant or missing memory, and a prior tool result.
+Current tools are omitted from the quality probe to separate answer quality from
+tool selection. Returned tool calls, truncation, malformed JSON, extra fields,
+and incorrect values fail its exact-JSON rubric. It prints scores without a
+pass-rate assertion: successful execution does not mean every answer passed.
+
+Rows report input/output tokens, optional cached tokens, usage availability,
+finish reason, tool calls, total elapsed milliseconds, and milliseconds to the
+first nonempty text/reasoning delta. Tool-only replies can have no first-delta
+measurement. Missing cached tokens mean unavailable telemetry, not zero.
+Neither probe flushes caches or asserts latency thresholds. Even a first request
+can share a cached prefix. These are placement experiments, not completed coding
+agent evaluations.
+
+See the [OpenRouter comparison results](@/guide/prompt-cache-results.md) for the
+2026-09-08 measurements and the decision to preserve production memory placement.
 
 ### Local observation, 2026-09-08
 
