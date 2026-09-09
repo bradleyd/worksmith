@@ -11,6 +11,7 @@ mod read;
 mod recall;
 mod search;
 mod skill;
+pub(crate) use skill::{load_skill_instructions, preview_skill_instructions};
 mod web;
 pub(crate) use search::{display_rel, walk};
 mod write;

@@ -4,24 +4,32 @@ description = "How to read each metric, compare sessions, and test the accountin
 weight = 30
 +++
 
-Use `/metrics` for the dashboard and `/stats` for a text report. Both read the
+Use `/metrics` or `/stats` for a report overlay in the TUI, or a text report in
+the plain REPL. Both read the
 session's recorded data. A turn can make several model calls; each call can
 resend the conversation. That is why input-token spend can grow much faster
 than the context window.
+
+The footer keeps short status messages beside the metrics. Longer messages move
+to wrapped rows below them, with space reserved so the composer stays visible.
 
 ## Open a report
 
 | Command | Result |
 |---|---|
 | `/metrics [session-id]` in the TUI | Dashboard overlay for the current session or the given session. |
-| `/stats [session-id]` | Text report in the TUI transcript or plain REPL. In plain mode, `/metrics` is also an alias. |
+| `/stats [session-id]` | Report overlay in the TUI; text report in the plain REPL. In plain mode, `/metrics` is also an alias. |
 | `worksmith stats <session-id>` | Offline text report. No model configuration or provider connection needed. |
 | `worksmith stats <session-id> --json` | Structured accounting for scripts and evals. |
 
-Use the full session ID printed at startup. In the overlay, **↑/↓** or
-**Ctrl+P/Ctrl+N** scroll its rows; **PageUp/PageDown** or **Ctrl+U/Ctrl+D** scroll
-the transcript behind it. Typing filters rows, and **Esc** closes the overlay.
-Opening `/metrics` does not add transcript rows. It is a snapshot: reopen it to
+Use the full session ID printed at startup. In reference overlays, **j/k**,
+**↑/↓**, or **Ctrl+P/Ctrl+N** move one row; **PageUp/PageDown** and
+**Ctrl+U/Ctrl+D** move ten rows. **gg/G** jump to the top/bottom. The mouse wheel
+also scrolls the overlay, leaving the transcript in place. Press **/** to type a
+substring filter, **Enter** or **Esc** to return to navigation with the filter
+preserved, and **Esc** while navigating to close.
+**q** also closes while navigating; in a filter it is ordinary text.
+Opening `/metrics` or `/stats` does not add transcript rows. It is a snapshot: reopen it to
 refresh the numbers while work continues.
 
 ## Which work is counted?
@@ -248,8 +256,10 @@ cargo run -- --model <your-provider/model>
 
 1. Ask it to explain a source file, then trace a related function. Open
    `/metrics` and check that calls, tool usage, tokens, and per-turn rows grow.
-   Scroll the dashboard and the transcript behind it, then close with Esc.
-2. Run `/stats` after work has stopped. Compare its totals with a freshly opened
+   Scroll the dashboard with page keys or the wheel; the transcript should stay
+   in place. Try `/` filtering, Enter, and `gg/G`, then close with Esc.
+2. Run `/stats` while thinking is streaming; closing it should reveal uninterrupted
+   thinking without command output in the transcript. Compare its totals with a freshly opened
    `/metrics`. Cache data should show reported coverage or unavailable; cache
    hits depend on the provider and are not guaranteed by repeating a prompt.
 3. Use `/model` to choose another configured model and send another prompt.

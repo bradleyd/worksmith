@@ -32,6 +32,8 @@ docs say so out loud.
 - [**Metrics and cost accounting**](@/guide/metrics.md) — what every dashboard, footer,
   and JSON value means; cache and cost formulas; provider-neutral accounting;
   and a dogfood checklist for the feature branch.
+- [**Prompt and cache behavior**](@/guide/prompt-cache.md) — skill lifecycle,
+  stable request prefixes, and a repeatable local cache probe.
 - **Workers** — one `/spawn` into N workers, the supervisor that is the same
   nudge/escalate mechanism applied to many, and the worker validator that
   closes the same hole in the background. The current reference is in the

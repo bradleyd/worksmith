@@ -57,43 +57,49 @@ impl Tool for SkillTool {
             };
         }
         match catalog.get(name) {
-            Some(skill) => match skill.body() {
-                Ok(body) => {
-                    // Already loaded: the text is pinned to the system prompt,
-                    // so serving it again spends a thousand tokens to tell the
-                    // model something it is already looking at.
-                    let mut loaded = ctx.loaded_skills.lock().unwrap();
-                    if loaded.iter().any(|(n, _)| n == &skill.name) {
-                        return ToolOutput::ok(format!(
-                            "skill `{}` is already loaded — its full instructions are in your \
-                             system prompt under <SKILLS-LOADED>. Files live in {}. Fetch one \
-                             reference section with skill(name, section). Get on with the work \
-                             it describes.",
-                            skill.name,
-                            skill.dir.display()
-                        ));
-                    }
-                    // The map is the second level of progressive disclosure:
-                    // the model sees what sections exist without holding any of
-                    // them, and fetches one when it needs it.
-                    let map = skill.map();
-                    let text = format!(
-                        // Naming the directory is what makes the skill's own
-                        // `references/...` paths resolvable with the read tool.
-                        "skill `{}` (files live in {})\n\n{}{}",
-                        skill.name,
-                        skill.dir.display(),
-                        body.trim(),
-                        if map.is_empty() { String::new() } else { format!("\n\n{map}") }
-                    );
-                    loaded.push((skill.name.clone(), text.clone()));
-                    ToolOutput::ok(text)
-                }
-                Err(e) => ToolOutput::error(format!("could not read skill `{name}`: {e}")),
+            Some(skill) => match load_skill_instructions(skill, ctx) {
+                Ok(text) => ToolOutput::ok(text),
+                Err(e) => ToolOutput::error(format!("could not load skill `{name}`: {e}")),
             },
             None => ToolOutput::error(format!("no skill named `{name}`.\n{}", list(&catalog))),
         }
     }
+}
+
+/// Pin a skill for subsequent requests; shared by the tool and slash command.
+pub(crate) fn load_skill_instructions(
+    skill: &crate::skill::Skill,
+    ctx: &ToolContext,
+) -> anyhow::Result<String> {
+    // Filesystem work stays outside the lock shared with request assembly.
+    let text = preview_skill_instructions(skill)?;
+    let mut loaded = ctx.loaded_skills.lock().unwrap();
+    if loaded.iter().any(|(n, _)| n == &skill.name) {
+        return Ok(format!(
+            "skill `{}` is already loaded — its full instructions are in your \
+             system prompt under <SKILLS-LOADED>. Files live in {}. Fetch one \
+             reference section with skill(name, section). Get on with the work \
+             it describes.",
+            skill.name,
+            skill.dir.display()
+        ));
+    }
+    loaded.push((skill.name.clone(), text.clone()));
+    Ok(text)
+}
+
+/// Read the exact instruction text without changing loaded state.
+pub(crate) fn preview_skill_instructions(skill: &crate::skill::Skill) -> anyhow::Result<String> {
+    let body = skill.body()?;
+    let map = skill.map();
+    let text = format!(
+        "skill `{}` (files live in {})\n\n{}{}",
+        skill.name,
+        skill.dir.display(),
+        body.trim(),
+        if map.is_empty() { String::new() } else { format!("\n\n{map}") }
+    );
+    Ok(text)
 }
 
 fn fetch_section(skill: &crate::skill::Skill, query: &str) -> ToolOutput {

@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::App;
 use super::overlay::OverlayItem;
@@ -23,7 +23,8 @@ pub(super) fn footer_string(app: &App) -> String {
     // nothing is otherwise indistinguishable from one that is merely slow.
     let live = (app.step_reasoning_chars / 4) as u32;
     let reasoning = live.max(app.last_reasoning_tokens);
-    let reasoning = if reasoning > 0 { format!("  ↻{}", compact_tokens(reasoning)) } else { String::new() };
+    let reasoning =
+        if reasoning > 0 { format!("  ↻{}", compact_tokens(reasoning)) } else { String::new() };
     // "length" means the model was cut off rather than finished.
     let cut = if app.last_finish_reason.as_deref() == Some("length") { "  ⚠cut" } else { "" };
     // Sum request-time prices; switching models must not reprice past calls.
@@ -104,13 +105,23 @@ pub(super) fn footer_status(app: &App) -> String {
     }
 }
 
+fn footer_paragraph<'a>(width: u16, left: &'a str, status: &'a str) -> Paragraph<'a> {
+    let metrics = Span::styled(left, Style::default().fg(Color::Black).bg(Color::Cyan));
+    let status = Span::styled(status, Style::default().fg(Color::DarkGray));
+    let lines = if metrics.width() + 2 + status.width() <= width as usize {
+        vec![Line::from(vec![metrics, Span::raw("  "), status])]
+    } else {
+        vec![Line::from(metrics), Line::from(status)]
+    };
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+pub(super) fn footer_height(width: u16, left: &str, status: &str) -> u16 {
+    footer_paragraph(width, left, status).line_count(width).min(u16::MAX as usize) as u16
+}
+
 pub(super) fn render_footer(f: &mut Frame, area: Rect, left: &str, status: &str) {
-    let line = Line::from(vec![
-        Span::styled(left, Style::default().fg(Color::Black).bg(Color::Cyan)),
-        Span::raw("  "),
-        Span::styled(status, Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(footer_paragraph(area.width, left, status), area);
 }
 
 /// What the footer's glyphs mean, as a legend. A strict glyph→meaning table:
@@ -136,4 +147,29 @@ pub(super) fn footer_legend() -> Vec<OverlayItem> {
         description: description.to_string(),
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn long_status_wraps_and_short_status_stays_on_one_row() {
+        assert_eq!(footer_height(80, "model", "ready"), 1);
+        let metrics = "qwen/qwen3.8-27b  ctx 0% (0/128000)  ↓0  think:2k";
+        let status =
+            "skill `idiomatic-rust` loaded; applies from the next model request STATUS_END";
+        for width in [30, 60, 80, 120] {
+            let height = footer_height(width, metrics, status);
+            assert!(height > 1);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| render_footer(f, f.area(), metrics, status)).unwrap();
+            let text: String =
+                terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("STATUS_END"), "status clipped at width {width}");
+        }
+        assert_eq!(footer_height(10, "界界界", "ok"), 1);
+        assert_eq!(footer_height(9, "界界界", "ok"), 2);
+    }
 }

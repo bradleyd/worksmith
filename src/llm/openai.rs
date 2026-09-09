@@ -738,6 +738,33 @@ mod thinking_tests {
         assert_eq!(usage.cached_tokens, Some(700));
     }
 
+    #[test]
+    fn transcript_metadata_does_not_rewrite_wire_history() {
+        let mut request = req(None);
+        request.messages = vec![
+            Message::assistant(
+                Some("answer".into()),
+                vec![crate::llm::ToolCall {
+                    id: "original-id".into(),
+                    name: "ls".into(),
+                    arguments: r#"{"path":"."}"#.into(),
+                }],
+            ),
+            Message::tool_result("original-id", "ls", "result"),
+        ];
+        let before = build_request_body(&request, ThinkingDialect::ChatTemplate, None, None);
+        request.messages[0] = request.messages[0].clone().with_trace(
+            Some("private trace".into()),
+            Some("stop".into()),
+            Some("provider/model".into()),
+        );
+        let after = build_request_body(&request, ThinkingDialect::ChatTemplate, None, None);
+        assert_eq!(serde_json::to_vec(&before).unwrap(), serde_json::to_vec(&after).unwrap());
+        assert_eq!(after["messages"][0]["tool_calls"][0]["id"], "original-id");
+        assert_eq!(after["messages"][0]["tool_calls"][0]["function"]["arguments"], r#"{"path":"."}"#);
+        assert_eq!(after["messages"][1]["tool_call_id"], "original-id");
+    }
+
     fn req(thinking: Option<Thinking>) -> ChatRequest {
         ChatRequest {
             model: "m".into(),

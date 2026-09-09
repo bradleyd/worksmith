@@ -36,6 +36,7 @@ mod composer;
 mod footer;
 mod modals;
 mod overlay;
+mod skill_browser;
 mod transcript;
 
 use crate::agent::{ActiveModel, Agent, TurnResult};
@@ -61,11 +62,11 @@ use crate::worker::{WorkerManager, WorkerSummary};
 use composer::Composer;
 #[cfg(test)]
 use composer::{compute_completions, wrap_input};
-use footer::{footer_legend, footer_status, footer_string, render_footer};
+use footer::{footer_height, footer_legend, footer_status, footer_string, render_footer};
 #[cfg(test)]
 use footer::compact_tokens;
 use modals::{ApprovalKey, AskAnswer, Modals};
-use overlay::{Overlay, OverlayItem};
+use overlay::{Overlay, OverlayItem, ReferenceInput, SkillFocus, SkillPreview};
 use transcript::{Item, Kind, Mode, Search, Transcript};
 #[cfg(test)]
 use transcript::{build_rows, row_text};
@@ -398,6 +399,20 @@ impl App {
     /// Scroll toward the newest content; re-enable follow at the bottom.
     fn scroll_down(&mut self, n: u16) {
         self.transcript.scroll_down(n);
+    }
+
+    fn scroll_wheel(&mut self, delta: isize) {
+        if let Some(ov) = self.overlay.as_mut().filter(|ov| !ov.is_picker()) {
+            ov.scroll_by(delta);
+            if ov.reference_input == ReferenceInput::AwaitingTop {
+                ov.reference_input = ReferenceInput::Navigate;
+            }
+        } else if delta < 0 {
+            self.scroll_up(delta.unsigned_abs().min(u16::MAX as usize) as u16);
+        } else {
+            self.scroll_down(delta.min(u16::MAX as isize) as u16);
+        }
+        self.transcript.dirty = true;
     }
 
     fn apply_event(&mut self, ev: Event) {
@@ -802,6 +817,11 @@ async fn run_loop(
         app.agent_spend = workers.token_totals(&app.prices);
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
         app.ensure_rows(width);
+        refresh_skill_overlay(&mut app, &agent);
+        if let Some(ov) = app.overlay.as_mut().filter(|ov| ov.is_skill_catalog()) {
+            let size = terminal.size()?;
+            skill_browser::prepare(ov, Rect::new(0, 0, size.width, size.height), &app.status);
+        }
         terminal.draw(|f| ui(f, &app))?;
 
         tokio::select! {
@@ -825,6 +845,11 @@ async fn run_loop(
                             Flow::Quit => break,
                             Flow::Continue => {}
                             Flow::ExternalEdit => pending_edit = true,
+                            Flow::LoadSkill(name) => load_overlay_skill(&mut app, &agent, &name),
+                            Flow::UnloadSkill(name) => {
+                                app.status = agent.unload_skill(&name);
+                                refresh_skill_overlay(&mut app, &agent);
+                            }
                         }
                         // /memory extract: classify the transcript off the UI task.
                         if app.pending_extract {
@@ -906,8 +931,8 @@ async fn run_loop(
                         }
                     }
                     Some(Ok(CEvent::Mouse(m))) => match m.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
+                        MouseEventKind::ScrollUp => app.scroll_wheel(-3),
+                        MouseEventKind::ScrollDown => app.scroll_wheel(3),
                         _ => {}
                     },
                     // Bracketed paste: insert the whole payload at the cursor
@@ -1194,6 +1219,8 @@ enum Flow {
     Quit,
     /// Suspend the TUI and open the composer in `$EDITOR`.
     ExternalEdit,
+    LoadSkill(String),
+    UnloadSkill(String),
 }
 
 fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
@@ -1216,52 +1243,90 @@ fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow>
 }
 
 fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
-    if app.overlay.as_ref().is_some_and(|ov| !ov.picking) {
-        match key.code {
-            KeyCode::PageUp => {
-                app.scroll_up(10);
-                app.transcript.dirty = true;
-                return Some(Flow::Continue);
-            }
-            KeyCode::PageDown => {
-                app.scroll_down(10);
-                app.transcript.dirty = true;
-                return Some(Flow::Continue);
-            }
-            KeyCode::Char('u') if ctrl => {
-                app.scroll_up(10);
-                app.transcript.dirty = true;
-                return Some(Flow::Continue);
-            }
-            KeyCode::Char('d') if ctrl => {
-                app.scroll_down(10);
-                app.transcript.dirty = true;
-                return Some(Flow::Continue);
-            }
-            _ => {}
-        }
-    }
     let mut close_overlay = false;
     let mut chosen_label = None;
     {
         let ov = app.overlay.as_mut()?;
-        match key.code {
-            KeyCode::Esc => close_overlay = true,
-            KeyCode::Up => ov.move_by(-1),
-            KeyCode::Down => ov.move_by(1),
-            KeyCode::Char('p') if ctrl => ov.move_by(-1),
-            KeyCode::Char('n') if ctrl => ov.move_by(1),
-            KeyCode::Char('c') if ctrl => return Some(Flow::Quit),
-            KeyCode::Backspace => ov.pop_filter(),
-            KeyCode::Enter if ov.picking => {
-                chosen_label = ov.chosen();
-                close_overlay = true;
+        if !ov.is_picker() {
+            let filtering = ov.reference_input == ReferenceInput::Filter;
+            let pending_top = ov.reference_input == ReferenceInput::AwaitingTop;
+            if !filtering {
+                ov.reference_input = ReferenceInput::Navigate;
             }
-            KeyCode::Enter => {}
-            KeyCode::Char(c) if !ctrl => ov.push_filter(c),
-            _ => {}
+            match key.code {
+                KeyCode::Char('c') if ctrl => return Some(Flow::Quit),
+                KeyCode::Esc if filtering => ov.reference_input = ReferenceInput::Navigate,
+                KeyCode::Esc => close_overlay = true,
+                KeyCode::Tab if ov.is_skill_catalog() => {
+                    ov.skill_focus = match ov.skill_focus {
+                        SkillFocus::List => SkillFocus::Preview,
+                        SkillFocus::Preview => SkillFocus::List,
+                    };
+                    ov.reference_input = ReferenceInput::Navigate;
+                }
+                KeyCode::Up => ov.scroll_by(-1),
+                KeyCode::Down => ov.scroll_by(1),
+                KeyCode::PageUp => ov.scroll_by(-10),
+                KeyCode::PageDown => ov.scroll_by(10),
+                KeyCode::Char('u') if ctrl => ov.scroll_by(-10),
+                KeyCode::Char('d') if ctrl => ov.scroll_by(10),
+                KeyCode::Char('p') if ctrl => ov.scroll_by(-1),
+                KeyCode::Char('n') if ctrl => ov.scroll_by(1),
+                KeyCode::Enter if ov.is_skill_catalog() => {
+                    ov.reference_input = ReferenceInput::Navigate;
+                    if let Some(name) = ov.chosen()
+                        && ov.skill_loaded(&name).is_some()
+                    {
+                        return Some(Flow::LoadSkill(name));
+                    }
+                }
+                KeyCode::Enter if filtering => ov.reference_input = ReferenceInput::Navigate,
+                KeyCode::Backspace if filtering => ov.pop_filter(),
+                KeyCode::Char(c) if filtering && !ctrl => ov.push_filter(c),
+                KeyCode::Char('u') if !ctrl && ov.is_skill_catalog() => {
+                    if let Some(name) = ov.chosen()
+                        && ov.skill_loaded(&name).is_some()
+                    {
+                        return Some(Flow::UnloadSkill(name));
+                    }
+                }
+                KeyCode::Char('j') if !ctrl => ov.scroll_by(1),
+                KeyCode::Char('k') if !ctrl => ov.scroll_by(-1),
+                KeyCode::Char('g') if !ctrl => {
+                    if pending_top {
+                        ov.jump(false);
+                    } else {
+                        ov.reference_input = ReferenceInput::AwaitingTop;
+                    }
+                }
+                KeyCode::Char('G') if !ctrl => ov.jump(true),
+                KeyCode::Char('/') if !ctrl => {
+                    ov.skill_focus = SkillFocus::List;
+                    ov.set_filter("");
+                    ov.reference_input = ReferenceInput::Filter;
+                }
+                KeyCode::Char('q') if !ctrl => close_overlay = true,
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => close_overlay = true,
+                KeyCode::Up => ov.scroll_by(-1),
+                KeyCode::Down => ov.scroll_by(1),
+                KeyCode::Char('p') if ctrl => ov.scroll_by(-1),
+                KeyCode::Char('n') if ctrl => ov.scroll_by(1),
+                KeyCode::Char('c') if ctrl => return Some(Flow::Quit),
+                KeyCode::Backspace => ov.pop_filter(),
+                KeyCode::Enter => {
+                    chosen_label = ov.chosen();
+                    close_overlay = true;
+                }
+                KeyCode::Char(c) if !ctrl => ov.push_filter(c),
+                _ => {}
+            }
         }
     }
+
     if close_overlay {
         app.overlay = None;
     }
@@ -1742,7 +1807,7 @@ MEMORY
 
 KNOWLEDGE & SKILLS
   /knowledge [index|search <query>]   the project's own docs and source
-  /skill [name]                       load a skill
+  /skill [name | unload <name>]       browse, load, or unload skills
 
 WORKERS
   /spawn [-n N | --each-files <re>] [--model <spec>] [--until <check>] <task>
@@ -1884,7 +1949,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 None => Some(app.session_path.clone()),
             };
             let Some(path) = path else {
-                app.push(Kind::Error, "no such session".to_string());
+                app.status = "no such session".into();
                 return Ok(true);
             };
             match crate::session::events(&path) {
@@ -1908,28 +1973,16 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 Err(e) => app.push(Kind::Error, format!("history: {e}")),
             }
         }
-        "stats" => {
-            let id = parts.next();
-            if parts.next().is_some() {
-                app.push(Kind::Error, "usage: /stats [session-id]");
-                return Ok(true);
-            }
-            let path = id.map(Session::path_for_id).unwrap_or_else(|| Ok(app.session_path.clone()));
-            match path.and_then(|p| crate::metrics::session_report(&p)) {
-                Ok(lines) => { for line in lines { app.push(Kind::Notice, line); } }
-                Err(e) => app.push(Kind::Error, format!("stats: {e}")),
-            }
-        }
-        "metrics" => {
+        "stats" | "metrics" => {
             let id = parts.next().map(str::to_string);
-            if let Some(extra) = parts.next() {
-                app.push(Kind::Error, format!("usage: /metrics [session-id] (got {extra})"));
-                return Ok(true);
+            if parts.next().is_some() {
+                app.status = format!("usage: /{head} [session-id]");
+            } else {
+                show_accounting_overlay(app, id, head);
             }
-            show_metrics_overlay(app, id);
         }
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
-        "skill" | "skills" => skill_command(app, cwd, parts),
+        "skill" | "skills" => skill_command(app, cwd, agent, parts),
         "fast" | "lucky" => fast_command(app, agent, parts),
         "think" => think_command(app, agent, parts),
         "trust" => trust_command(app, cwd, parts),
@@ -2726,7 +2779,7 @@ fn render_recent(session: &Session, max_messages: usize) -> String {
 }
 
 /// Summarize model-request timings recorded in the append-only session log.
-fn show_metrics_overlay(app: &mut App, id: Option<String>) {
+fn show_accounting_overlay(app: &mut App, id: Option<String>, title: &str) {
     // Same reason as /history: read the append-only file, never the session
     // lock, so this remains usable while work is running.
     let path = match &id {
@@ -2734,7 +2787,7 @@ fn show_metrics_overlay(app: &mut App, id: Option<String>) {
         None => Some(app.session_path.clone()),
     };
     let Some(path) = path else {
-        app.push(Kind::Error, "no such session".to_string());
+        app.status = "no such session".into();
         return;
     };
     match crate::metrics::session_report(&path) {
@@ -2743,10 +2796,10 @@ fn show_metrics_overlay(app: &mut App, id: Option<String>) {
                 .into_iter()
                 .map(|line| OverlayItem { label: line, description: String::new() })
                 .collect();
-            app.overlay = Some(Overlay::reference("metrics · Esc close", items));
+            app.overlay = Some(Overlay::reference(title, items));
             app.transcript.dirty = true;
         }
-        Err(e) => app.push(Kind::Error, format!("metrics: {e}")),
+        Err(e) => app.status = format!("{title}: {e}"),
     }
 }
 
@@ -2813,52 +2866,102 @@ fn memory_used_summary(ids: &[String]) -> String {
     }
 }
 
-/// `/skill [name]` — list installed skills, or load one into the transcript so
-/// it applies to the rest of the session without waiting for the model to ask.
-fn skill_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = &'a str>) {
-    let catalog = crate::skill::SkillCatalog::discover(cwd);
-    match parts.next() {
-        None => {
-            if catalog.is_empty() {
-                app.push(Kind::Notice, "(no skills found). Looked in:".to_string());
-                for (path, exists) in crate::skill::SkillCatalog::searched(cwd) {
-                    let mark = if exists { "" } else { "  (missing)" };
-                    app.push(Kind::Notice, format!("    {}{mark}", path.display()));
-                }
-                // The usual mistake, named rather than left to be guessed.
-                for stray in crate::skill::SkillCatalog::misplaced(cwd) {
-                    app.push(
-                        Kind::Notice,
-                        format!(
-                            "  found {} but skills must live in <dir>/skills/<name>/SKILL.md",
-                            stray.display()
-                        ),
-                    );
-                }
-                app.push(
-                    Kind::Notice,
-                    "  a skill is a directory containing SKILL.md; put it in one of the above"
-                        .to_string(),
-                );
-            }
-            for s in catalog.skills() {
-                app.push(Kind::Notice, format!("{}: {}", s.name, s.description));
-            }
-            for note in catalog.notes() {
-                app.push(Kind::Notice, note.clone());
-            }
-        }
-        Some(name) => match catalog.get(name) {
-            Some(skill) => match skill.body() {
-                Ok(body) => app.push(
-                    Kind::Notice,
-                    format!("skill `{}` ({})\n\n{}", skill.name, skill.dir.display(), body.trim()),
-                ),
-                Err(e) => app.push(Kind::Error, format!("could not read `{name}`: {e}")),
-            },
-            None => app.push(Kind::Error, format!("no skill named `{name}`")),
-        },
+/// `/skill` lists the catalog; `/skill <name>` pins instructions for the model.
+fn skill_command<'a>(
+    app: &mut App,
+    cwd: &Path,
+    agent: &Agent,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
+    let first = parts.next();
+    if first == Some("unload") {
+        app.status = match (parts.next(), parts.next()) {
+            (Some(name), None) => agent.unload_skill(name),
+            _ => "usage: /skill unload <name>".into(),
+        };
+        return;
     }
+    if let Some(name) = first {
+        app.status = if parts.next().is_some() {
+            "usage: /skill [name]".into()
+        } else {
+            match agent.load_skill(name) {
+                Ok(note) => note,
+                Err(e) => format!("skill: {e}"),
+            }
+        };
+        return;
+    }
+    let catalog = crate::skill::SkillCatalog::discover(cwd);
+    let mut items = Vec::new();
+    if catalog.is_empty() {
+        items.push(OverlayItem {
+            label: "(no skills found). Looked in:".into(),
+            description: String::new(),
+        });
+        for (path, exists) in crate::skill::SkillCatalog::searched(cwd) {
+            let mark = if exists { "" } else { "  (missing)" };
+            items.push(OverlayItem {
+                label: format!("{}{mark}", path.display()),
+                description: String::new(),
+            });
+        }
+        for stray in crate::skill::SkillCatalog::misplaced(cwd) {
+            items.push(OverlayItem {
+                label: format!(
+                    "found {} but skills must live in <dir>/skills/<name>/SKILL.md",
+                    stray.display()
+                ),
+                description: String::new(),
+            });
+        }
+    }
+    items.extend(catalog.skills().iter().map(|skill| OverlayItem {
+        label: skill.name.clone(),
+        description: skill.description.clone(),
+    }));
+    items.extend(
+        catalog
+            .notes()
+            .iter()
+            .map(|note| OverlayItem { label: note.clone(), description: String::new() }),
+    );
+    let names = catalog.skills().iter().map(|skill| skill.name.clone()).collect();
+    app.overlay = Some(Overlay::skills(items, names));
+    refresh_skill_overlay(app, agent);
+    app.transcript.dirty = true;
+}
+
+fn refresh_skill_overlay(app: &mut App, agent: &Agent) {
+    if let Some(overlay) = app.overlay.as_mut().filter(|ov| ov.is_skill_catalog()) {
+        overlay.set_loaded_skills(agent.loaded_skill_names().into_iter().collect());
+        let chosen = overlay.chosen().filter(|name| overlay.skill_loaded(name).is_some());
+        if let Some(name) = chosen {
+            let loaded = overlay.skill_loaded(&name) == Some(true);
+            if !overlay.preview.as_ref().is_some_and(|p| p.name == name && p.loaded == loaded) {
+                let text = agent
+                    .preview_skill(&name)
+                    .unwrap_or_else(|e| format!("could not preview `{name}`: {e}"));
+                overlay.preview = Some(SkillPreview { name, loaded, text });
+                overlay.preview_scroll = 0;
+            }
+        } else {
+            overlay.preview = None;
+            overlay.preview_scroll = 0;
+        }
+    }
+}
+
+fn load_overlay_skill(app: &mut App, agent: &Agent, name: &str) {
+    app.status = if agent.loaded_skill_names().iter().any(|loaded| loaded == name) {
+        format!("skill `{name}` is already loaded")
+    } else {
+        match agent.load_skill(name) {
+            Ok(note) => note,
+            Err(e) => format!("skill: {e}"),
+        }
+    };
+    refresh_skill_overlay(app, agent);
 }
 
 /// `/knowledge [index | search <query> | status]` — the project's own text,
@@ -3184,22 +3287,29 @@ const COMPACTION_MAX_WIDTH: u16 = 62;
 const COMPACTION_HEIGHT: u16 = 7;
 
 fn ui(f: &mut Frame, app: &App) {
+    if let Some(ov) = app.overlay.as_ref().filter(|ov| ov.is_skill_catalog()) {
+        skill_browser::render(f, f.area(), ov, &app.status);
+        return;
+    }
     // The composer grows with its content (up to MAX_INPUT_ROWS), + borders.
     let input_height = app.composer.render_height();
+    let footer_left = footer_string(app);
+    let footer_status = footer_status(app);
+    let footer_rows = footer_height(f.area().width, &footer_left, &footer_status)
+        .min(f.area().height.saturating_sub(input_height).saturating_sub(3))
+        .max(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(input_height),
-            Constraint::Length(1),
+            Constraint::Length(footer_rows),
         ])
         .split(f.area());
 
     render_transcript(f, chunks[0], &app.transcript);
     let input_title = input_title(app);
     render_input(f, chunks[1], &app.composer, input_title.as_str());
-    let footer_left = footer_string(app);
-    let footer_status = footer_status(app);
     render_footer(f, chunks[2], footer_left.as_str(), footer_status.as_str());
 
     // The as-you-type hint sits directly above the composer, where you are
@@ -3291,7 +3401,11 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
 /// A centered floating list. `Clear` blanks what is underneath, which is what
 /// makes it read as a window rather than as text drawn over the transcript.
 fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
-    if !ov.picking {
+    if ov.is_skill_catalog() {
+        skill_browser::render(f, area, ov, "");
+        return;
+    }
+    if !ov.is_picker() {
         render_reference_overlay(f, area, ov);
         return;
     }
@@ -3375,27 +3489,41 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     let rendered: Vec<(String, bool)> = matches
         .iter()
         .map(|(_, item)| {
-            if item.description.is_empty() {
+            if let Some(loaded) = ov.skill_loaded(&item.label) {
+                let state = if loaded { "loaded" } else { "available" };
+                (format!("[{state}] {}  {}", item.label, item.description), false)
+            } else if item.description.is_empty() {
                 let heading = is_reference_heading(&item.label);
                 (item.label.clone(), heading)
             } else {
-                (
-                    format!("{:<label_w$}  {}", item.label, item.description),
-                    false,
-                )
+                (format!("{:<label_w$}  {}", item.label, item.description), false)
             }
         })
         .collect();
-    let max_width = area
-        .width
-        .saturating_sub(REFERENCE_HORIZONTAL_MARGIN)
-        .max(REFERENCE_MIN_WIDTH as u16) as usize;
-    let line_width = rendered
-        .iter()
-        .map(|(line, _)| line.chars().count())
-        .max()
-        .unwrap_or(REFERENCE_MIN_WIDTH)
-        + REFERENCE_CONTENT_PADDING;
+    let title = if ov.filter.is_empty() && ov.reference_input != ReferenceInput::Filter {
+        format!(" {} ", ov.title)
+    } else {
+        format!(" {} · /{} ", ov.title, ov.filter)
+    };
+    let hint = if ov.is_skill_catalog() {
+        if ov.reference_input == ReferenceInput::Filter {
+            " Enter load · Esc navigate "
+        } else {
+            " Enter load · jk · /filter · Esc close "
+        }
+    } else if ov.reference_input == ReferenceInput::Filter {
+        " Enter/Esc navigate "
+    } else {
+        " jk · gg/G · /filter · Esc close "
+    };
+    let max_width =
+        area.width.saturating_sub(REFERENCE_HORIZONTAL_MARGIN).max(REFERENCE_MIN_WIDTH as u16)
+            as usize;
+    let line_width =
+        rendered.iter().map(|(line, _)| line.chars().count()).max().unwrap_or(REFERENCE_MIN_WIDTH)
+            + REFERENCE_CONTENT_PADDING;
+    // Short catalogs still need enough room to explain navigation and closing.
+    let line_width = line_width.max(title.chars().count() + 2).max(hint.chars().count() + 2);
     let width = line_width.clamp(REFERENCE_MIN_WIDTH, max_width) as u16;
     let rows = (matches.len() as u16).clamp(OVERLAY_EMPTY_ROWS, REFERENCE_MAX_ROWS);
     let height = (rows + OVERLAY_BORDER_ROWS).min(area.height.saturating_sub(OVERLAY_BORDER_ROWS));
@@ -3405,15 +3533,7 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
 
     f.render_widget(ratatui::widgets::Clear, rect);
 
-    let title = if ov.filter.is_empty() {
-        format!(" {} ", ov.title)
-    } else {
-        format!(" {} · {} ", ov.title, ov.filter)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_bottom(" Esc close ");
+    let block = Block::default().borders(Borders::ALL).title(title).title_bottom(hint);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -3422,24 +3542,22 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     let first = sel.saturating_sub(visible.saturating_sub(1));
     let lines: Vec<Line> = rendered
         .iter()
+        .enumerate()
         .skip(first)
         .take(visible)
-        .map(|(text, heading)| {
+        .map(|(i, (text, heading))| {
+            let mut style = Style::default();
             if *heading {
-                Line::from(Span::styled(
-                    text.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ))
-            } else {
-                Line::from(text.clone())
+                style = style.add_modifier(Modifier::BOLD);
             }
+            if i == sel {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Line::styled(text.clone(), style)
         })
         .collect();
     let body = if lines.is_empty() {
-        vec![Line::from(Span::styled(
-            "(nothing matches)",
-            Style::default().fg(Color::DarkGray),
-        ))]
+        vec![Line::from(Span::styled("(nothing matches)", Style::default().fg(Color::DarkGray)))]
     } else {
         lines
     };
@@ -3886,11 +4004,11 @@ mod tests {
         app.push(Kind::Assistant, "keep this transcript clean");
         let before = app.transcript.items.len();
 
-        show_metrics_overlay(&mut app, None);
+        show_accounting_overlay(&mut app, None, "metrics");
 
         assert_eq!(app.transcript.items.len(), before);
         let overlay = app.overlay.as_ref().expect("metrics should open an overlay");
-        assert!(!overlay.picking);
+        assert!(!overlay.is_picker());
         let labels = overlay
             .matches()
             .iter()
@@ -3963,28 +4081,402 @@ mod tests {
     }
 
     #[test]
-    fn reference_overlay_page_keys_scroll_the_transcript_behind_it() {
+    fn reference_overlay_page_keys_scroll_content_without_moving_transcript() {
         let mut app = app();
         app.overlay = Some(Overlay::reference(
-            "metrics · Esc close",
-            vec![OverlayItem { label: "metrics".into(), description: String::new() }],
+            "metrics",
+            (0..40)
+                .map(|i| OverlayItem { label: format!("line {i}"), description: String::new() })
+                .collect(),
         ));
-
         let flow = handle_overlay_key(
-            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
             &mut app,
             false,
         );
-
         assert!(matches!(flow, Some(Flow::Continue)));
-        assert_eq!(app.transcript.scroll_up, 10);
-        assert!(app.overlay.is_some(), "scrolling should not close the overlay");
-
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 10);
+        assert_eq!(app.transcript.scroll_up, 0);
+        handle_overlay_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut app, false);
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
+        assert_eq!(app.transcript.scroll_up, 0);
         handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
-        assert!(app.overlay.is_some(), "Enter should not close a read-only overlay");
-
+        assert!(app.overlay.is_some(), "Enter must not select a reference row");
         handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app, false);
         assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn reference_navigation_filter_and_wheel_leave_streaming_untouched() {
+        let mut app = app();
+        app.running = true;
+        app.apply_event(Event::Thinking { text: "before".into() });
+        app.overlay = Some(Overlay::reference(
+            "stats",
+            (0..40)
+                .map(|i| OverlayItem { label: format!("row {i} jkgq"), description: String::new() })
+                .collect(),
+        ));
+        let key = |app: &mut App, c| {
+            handle_overlay_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), app, false);
+        };
+        key(&mut app, 'j');
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 1);
+        key(&mut app, 'G');
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 39);
+        key(&mut app, 'g');
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 39, "g waits for its second key");
+        key(&mut app, 'g');
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
+        key(&mut app, 'k');
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 0, "references do not wrap");
+        app.scroll_wheel(3);
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 3);
+        app.scroll_wheel(-3);
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut app,
+            true,
+        );
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 10);
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &mut app,
+            true,
+        );
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
+        key(&mut app, '/');
+        for c in "jkgq".chars() {
+            key(&mut app, c);
+        }
+        assert_eq!(app.overlay.as_ref().unwrap().filter, "jkgq");
+        assert_eq!(app.overlay.as_ref().unwrap().matches().len(), 40);
+        key(&mut app, 'z');
+        assert!(app.overlay.as_ref().unwrap().matches().is_empty());
+        app.scroll_wheel(3);
+        assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
+        handle_overlay_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &mut app, false);
+        handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        key(&mut app, 'q');
+        assert!(app.overlay.is_none());
+        app.apply_event(Event::Thinking { text: " after".into() });
+        assert_eq!(app.transcript.items.len(), 1);
+        assert_eq!(app.transcript.items[0].text, "before after");
+        assert_eq!(app.transcript.scroll_up, 0);
+        assert!(app.composer.input.is_empty());
+    }
+
+    #[test]
+    fn stats_and_skill_commands_keep_output_out_of_a_running_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".worksmith/skills/command-test");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: command-test\ndescription: command fixture\n---\nCOMMAND_BODY",
+        )
+        .unwrap();
+        let agent = test_agent_at(dir.path());
+        let mut app = app();
+        app.session_path = dir.path().join("session.jsonl");
+        // An empty append-only log is a valid zero-call report.
+        std::fs::write(&app.session_path, "").unwrap();
+        app.running = true;
+        app.apply_event(Event::Thinking { text: "thinking".into() });
+        show_accounting_overlay(&mut app, None, "stats");
+        assert_eq!(app.overlay.as_ref().unwrap().title, "stats");
+        assert!(!app.overlay.as_ref().unwrap().is_picker());
+        app.overlay = None;
+        app.session_path = dir.path().join("missing.jsonl");
+        show_accounting_overlay(&mut app, None, "stats");
+        assert!(app.status.starts_with("stats:"));
+        skill_command(&mut app, dir.path(), &agent, std::iter::empty());
+        let overlay = app.overlay.as_ref().unwrap();
+        assert!(!overlay.is_picker());
+        assert!(overlay.items.iter().any(|i| i.label == "command-test"));
+        assert!(!overlay.items.iter().any(|i| i.label.contains("COMMAND_BODY")));
+        app.overlay = None;
+        skill_command(&mut app, dir.path(), &agent, ["command-test"].into_iter());
+        assert!(app.status.contains("loaded; applies from the next model request"));
+        skill_command(&mut app, dir.path(), &agent, ["missing-command-test"].into_iter());
+        assert!(app.status.contains("no skill named"));
+        skill_command(&mut app, dir.path(), &agent, ["command-test", "extra"].into_iter());
+        assert_eq!(app.status, "usage: /skill [name]");
+        app.apply_event(Event::Thinking { text: " continues".into() });
+        assert_eq!(app.transcript.items.len(), 1);
+        assert_eq!(app.transcript.items[0].text, "thinking continues");
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn skill_catalog_loads_the_filtered_selection_and_tracks_actual_state() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["select-first", "select-second"] {
+            let path = dir.path().join(".worksmith/skills").join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: catalog fixture\n---\nRULE_{name}"),
+            )
+            .unwrap();
+        }
+        let agent = test_agent_at(dir.path());
+        let mut app = app();
+        app.running = true;
+        app.apply_event(Event::Thinking { text: "before".into() });
+        skill_command(&mut app, dir.path(), &agent, std::iter::empty());
+        assert!(agent.loaded_skill_names().is_empty(), "browsing does not load anything");
+        assert_eq!(app.overlay.as_ref().unwrap().skill_loaded("select-second"), Some(false));
+        for c in "/select-second".chars() {
+            handle_overlay_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut app,
+                false,
+            );
+        }
+        let action =
+            handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        let Some(Flow::LoadSkill(name)) = action else {
+            panic!("Enter must load the highlighted skill")
+        };
+        assert_eq!(name, "select-second");
+        load_overlay_skill(&mut app, &agent, &name);
+        assert_eq!(agent.loaded_skill_names(), vec!["select-second"]);
+        let overlay = app.overlay.as_ref().unwrap();
+        assert_eq!(overlay.filter, "select-second");
+        assert_eq!(overlay.chosen().as_deref(), Some("select-second"));
+        assert_eq!(overlay.skill_loaded("select-second"), Some(true));
+        assert_eq!(overlay.skill_loaded("select-first"), Some(false));
+        load_overlay_skill(&mut app, &agent, &name);
+        assert!(app.status.contains("already loaded"));
+        assert_eq!(agent.loaded_skill_names().len(), 1);
+        // A load outside the picker (including the model's tool) appears on refresh.
+        agent.load_skill("select-first").unwrap();
+        refresh_skill_overlay(&mut app, &agent);
+        assert_eq!(app.overlay.as_ref().unwrap().skill_loaded("select-first"), Some(true));
+        app.apply_event(Event::Thinking { text: " after".into() });
+        assert_eq!(app.transcript.items.len(), 1);
+        assert_eq!(app.transcript.items[0].text, "before after");
+        assert!(app.composer.input.is_empty());
+    }
+
+    #[test]
+    fn skill_preview_focus_scroll_and_unload_do_not_touch_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".worksmith/skills/preview-fixture");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!(
+                "---\nname: preview-fixture\ndescription: preview description\n---\n{}",
+                "instruction\n".repeat(100)
+            ),
+        )
+        .unwrap();
+        let agent = test_agent_at(dir.path());
+        let mut app = app();
+        skill_command(&mut app, dir.path(), &agent, std::iter::empty());
+        app.overlay.as_mut().unwrap().set_filter("preview-fixture");
+        refresh_skill_overlay(&mut app, &agent);
+        skill_browser::prepare(app.overlay.as_mut().unwrap(), Rect::new(0, 0, 120, 30), "");
+        assert!(app.overlay.as_ref().unwrap().preview.as_ref().unwrap().text.contains("instruction"));
+        for key in [KeyCode::Tab, KeyCode::Char('G')] {
+            handle_overlay_key(KeyEvent::new(key, KeyModifiers::NONE), &mut app, false);
+        }
+        let ov = app.overlay.as_ref().unwrap();
+        assert_eq!(ov.skill_focus, SkillFocus::Preview);
+        assert_eq!(ov.preview_scroll, ov.preview_max_scroll);
+        assert!(ov.preview_scroll > 0);
+        assert!(agent.loaded_skill_names().is_empty());
+        load_overlay_skill(&mut app, &agent, "preview-fixture");
+        let action =
+            handle_overlay_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), &mut app, false);
+        let Some(Flow::UnloadSkill(name)) = action else {
+            panic!("u must unload the highlighted skill")
+        };
+        agent.unload_skill(&name);
+        refresh_skill_overlay(&mut app, &agent);
+        assert!(!app.overlay.as_ref().unwrap().preview.as_ref().unwrap().loaded);
+        app.overlay.as_mut().unwrap().set_filter("no-such-preview");
+        refresh_skill_overlay(&mut app, &agent);
+        assert!(app.overlay.as_ref().unwrap().preview.is_none());
+        assert_eq!(app.overlay.as_ref().unwrap().preview_scroll, 0);
+        assert!(app.transcript.items.is_empty());
+    }
+
+    #[test]
+    fn escape_leaves_filter_editing_before_closing_reference_overlays() {
+        for skills in [false, true] {
+            for query in ["", "rust"] {
+                let mut app = app();
+                let items = vec![
+                    OverlayItem { label: "rust-one".into(), description: String::new() },
+                    OverlayItem { label: "rust-two".into(), description: String::new() },
+                ];
+                app.overlay = Some(if skills {
+                    Overlay::skills(items, ["rust-one".into(), "rust-two".into()].into_iter().collect())
+                } else {
+                    Overlay::reference("stats", items)
+                });
+                for c in format!("/{query}").chars() {
+                    handle_overlay_key(
+                        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                        &mut app,
+                        false,
+                    );
+                }
+                let action = handle_overlay_key(
+                    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                    &mut app,
+                    false,
+                );
+                assert!(matches!(action, Some(Flow::Continue)));
+                let ov = app.overlay.as_ref().unwrap();
+                assert_eq!(ov.reference_input, ReferenceInput::Navigate);
+                assert_eq!(ov.filter, query);
+                assert_eq!(ov.matches().len(), 2);
+                handle_overlay_key(
+                    KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                    &mut app,
+                    false,
+                );
+                let ov = app.overlay.as_ref().unwrap();
+                assert_eq!(ov.chosen().as_deref(), Some("rust-two"));
+                assert_eq!(ov.filter, query, "navigation must not append to the query");
+                handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app, false);
+                assert!(app.overlay.is_none());
+                assert!(app.transcript.items.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn skill_filter_from_preview_returns_focus_to_the_list() {
+        let mut app = app();
+        app.overlay = Some(Overlay::skills(vec![], Default::default()));
+        app.overlay.as_mut().unwrap().skill_focus = SkillFocus::Preview;
+        for c in "/rust".chars() {
+            handle_overlay_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), &mut app, false);
+        }
+        let ov = app.overlay.as_ref().unwrap();
+        assert_eq!(ov.skill_focus, SkillFocus::List);
+        assert_eq!(ov.reference_input, ReferenceInput::Filter);
+        assert_eq!(ov.filter, "rust");
+        assert!(app.transcript.items.is_empty());
+    }
+
+    #[test]
+    fn long_footer_status_keeps_its_tail_and_composer_visible() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for width in [40, 60, 100] {
+            let mut app = app();
+            app.composer.set_input("COMPOSER_SENTINEL".into());
+            app.status =
+                "skill `idiomatic-rust` loaded; applies from the next model request STATUS_END".into();
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal.draw(|f| ui(f, &app)).unwrap();
+            let text: String =
+                terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("COMPOSER_SENTINEL"));
+            assert!(text.contains("STATUS_END"), "status clipped at width {width}");
+        }
+    }
+
+    #[test]
+    fn skill_screen_reserves_wrapped_help_and_status_without_composer_bleed() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for (width, height) in [(60, 20), (80, 24), (100, 30), (140, 40)] {
+            let mut app = app();
+            app.composer.set_input("COMPOSER_SENTINEL".into());
+            app.status = "Skill instructions activated for the next model request. This deliberately long status must remain readable through STATUS_END".into();
+            app.overlay = Some(Overlay::skills(
+                vec![OverlayItem { label: "fixture".into(), description: "fixture".into() }],
+                ["fixture".into()].into_iter().collect(),
+            ));
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            term.draw(|f| ui(f, &app)).unwrap();
+            let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+            assert!(!text.contains("COMPOSER_SENTINEL"));
+            assert!(text.contains("[catalog] fixture"));
+            assert!(text.contains("STATUS_END"), "status clipped at {width}x{height}");
+            assert!(text.contains("back/close"), "controls clipped at {width}x{height}");
+        }
+    }
+
+    #[test]
+    fn skill_catalog_renders_states_and_does_not_mark_failed_loads_as_loaded() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".worksmith/skills/vanishing-skill");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            "---\nname: vanishing-skill\ndescription: fixture\n---\nBODY",
+        )
+        .unwrap();
+        let agent = test_agent_at(dir.path());
+        let mut app = app();
+        skill_command(&mut app, dir.path(), &agent, std::iter::empty());
+        app.overlay.as_mut().unwrap().set_filter("vanishing-skill");
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap())).unwrap();
+        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("[catalog] vanishing-skill"));
+        assert!(text.contains("Enter activate"));
+        std::fs::remove_file(path.join("SKILL.md")).unwrap();
+        load_overlay_skill(&mut app, &agent, "vanishing-skill");
+        assert!(app.status.starts_with("skill:"));
+        assert!(agent.loaded_skill_names().is_empty());
+        assert_eq!(app.overlay.as_ref().unwrap().skill_loaded("vanishing-skill"), Some(false));
+        // Rendering reads explicit state rather than inferring it from the label.
+        app.overlay
+            .as_mut()
+            .unwrap()
+            .set_loaded_skills(["vanishing-skill".to_string()].into_iter().collect());
+        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap())).unwrap();
+        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("[active] vanishing-skill"));
+        app.overlay.as_mut().unwrap().set_filter("no-match-for-this-query");
+        let action =
+            handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        assert!(matches!(action, Some(Flow::Continue)));
+        assert!(app.overlay.is_some());
+        assert!(app.transcript.items.is_empty());
+    }
+
+    #[test]
+    fn reference_cursor_is_visible_and_picker_typing_still_filters() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let items = vec![
+            OverlayItem { label: "jkgq-first".into(), description: String::new() },
+            OverlayItem { label: "second".into(), description: String::new() },
+        ];
+        let mut app = app();
+        app.overlay = Some(Overlay::reference("test", items.clone()));
+        app.overlay.as_mut().unwrap().selected = 1;
+        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap())).unwrap();
+        let buf = term.backend().buffer();
+        let at = buf
+            .content()
+            .windows(6)
+            .position(|cells| cells.iter().map(|c| c.symbol()).collect::<String>() == "second")
+            .unwrap();
+        assert!(buf.content()[at].modifier.contains(Modifier::REVERSED));
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("jk · gg/G · /filter · Esc close"));
+        app.overlay = Some(Overlay::new("picker", items));
+        for c in "jkgq".chars() {
+            handle_overlay_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut app,
+                false,
+            );
+        }
+        assert_eq!(app.overlay.as_ref().unwrap().filter, "jkgq");
+        handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        assert!(app.overlay.is_none());
+        assert_eq!(app.composer.input, "jkgq-first ");
     }
 
     fn project_with_config(config: &str) -> tempfile::TempDir {
@@ -4009,6 +4501,10 @@ mod tests {
     }
 
     fn test_agent() -> Agent {
+        test_agent_at(Path::new("."))
+    }
+
+    fn test_agent_at(cwd: &Path) -> Agent {
         Agent::new(
             Arc::new(SilentClient),
             Arc::new(crate::tools::ToolRegistry::with_builtins()),
@@ -4021,7 +4517,7 @@ mod tests {
             3,
             32_000,
             6,
-            crate::tools::ToolContext::default(),
+            crate::tools::ToolContext { cwd: cwd.to_path_buf(), ..Default::default() },
         )
     }
 

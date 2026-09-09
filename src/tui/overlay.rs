@@ -1,3 +1,31 @@
+use std::collections::HashSet;
+
+pub(super) enum OverlayKind {
+    Picker,
+    Reference,
+    Skills { names: HashSet<String>, loaded: HashSet<String> },
+}
+
+/// Reference navigation is separate from typing so queries may contain j/k/q.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReferenceInput {
+    Navigate,
+    AwaitingTop,
+    Filter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SkillFocus {
+    List,
+    Preview,
+}
+
+pub(super) struct SkillPreview {
+    pub(super) name: String,
+    pub(super) loaded: bool,
+    pub(super) text: String,
+}
+
 /// A floating list: a filter line and a scrollable set of choices. One
 /// component, because everything awkward in this UI is picking an opaque thing
 /// — a command, a model, a session, a worker id.
@@ -8,9 +36,13 @@ pub(super) struct Overlay {
     matched: Vec<usize>,
     pub(super) selected: usize,
     /// A picker lets you select a row (Enter puts it in the composer). A
-    /// reference — like the footer legend — has nothing to pick, so Enter is
-    /// ignored.
-    pub(super) picking: bool,
+    /// reference has no action; a skill catalog loads the selected instructions.
+    kind: OverlayKind,
+    pub(super) reference_input: ReferenceInput,
+    pub(super) skill_focus: SkillFocus,
+    pub(super) preview: Option<SkillPreview>,
+    pub(super) preview_scroll: usize,
+    pub(super) preview_max_scroll: usize,
 }
 
 #[derive(Clone)]
@@ -28,7 +60,12 @@ impl Overlay {
             filter: String::new(),
             matched,
             selected: 0,
-            picking: true,
+            kind: OverlayKind::Picker,
+            reference_input: ReferenceInput::Navigate,
+            skill_focus: SkillFocus::List,
+            preview: None,
+            preview_scroll: 0,
+            preview_max_scroll: 0,
         }
     }
 
@@ -42,7 +79,47 @@ impl Overlay {
             filter: String::new(),
             matched,
             selected: 0,
-            picking: false,
+            kind: OverlayKind::Reference,
+            reference_input: ReferenceInput::Navigate,
+            skill_focus: SkillFocus::List,
+            preview: None,
+            preview_scroll: 0,
+            preview_max_scroll: 0,
+        }
+    }
+
+    pub(super) fn skills(items: Vec<OverlayItem>, names: HashSet<String>) -> Self {
+        let mut overlay = Self::reference("skills", items);
+        overlay.kind = OverlayKind::Skills { names, loaded: HashSet::new() };
+        overlay
+    }
+
+    pub(super) fn is_picker(&self) -> bool {
+        matches!(self.kind, OverlayKind::Picker)
+    }
+
+    pub(super) fn is_skill_catalog(&self) -> bool {
+        matches!(self.kind, OverlayKind::Skills { .. })
+    }
+
+    /// None identifies informational rows, which must not trigger loading.
+    pub(super) fn skill_loaded(&self, name: &str) -> Option<bool> {
+        match &self.kind {
+            OverlayKind::Skills { names, loaded } if names.contains(name) => {
+                Some(loaded.contains(name))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn set_loaded_skills(&mut self, current: HashSet<String>) {
+        if let OverlayKind::Skills { names, loaded } = &mut self.kind {
+            self.title = format!(
+                "skills · {} active / {} discovered",
+                names.intersection(&current).count(),
+                names.len()
+            );
+            *loaded = current;
         }
     }
 
@@ -51,9 +128,9 @@ impl Overlay {
         self.matched.iter().map(|&i| (i, &self.items[i])).collect()
     }
 
-    #[cfg(test)]
     pub(super) fn set_filter(&mut self, filter: impl Into<String>) {
         self.filter = filter.into();
+        self.selected = 0;
         self.rebuild_matches();
     }
 
@@ -84,14 +161,35 @@ impl Overlay {
             .collect()
     }
 
+    pub(super) fn scroll_by(&mut self, delta: isize) {
+        if self.is_skill_catalog() && self.skill_focus == SkillFocus::Preview {
+            self.preview_scroll =
+                self.preview_scroll.saturating_add_signed(delta).min(self.preview_max_scroll);
+        } else {
+            self.move_by(delta);
+        }
+    }
+
+    pub(super) fn jump(&mut self, bottom: bool) {
+        if self.is_skill_catalog() && self.skill_focus == SkillFocus::Preview {
+            self.preview_scroll = if bottom { self.preview_max_scroll } else { 0 };
+        } else {
+            self.selected = if bottom { self.matched.len().saturating_sub(1) } else { 0 };
+        }
+    }
+
     pub(super) fn move_by(&mut self, delta: isize) {
-        let n = self.matches().len();
+        let n = self.matched.len();
         if n == 0 {
             self.selected = 0;
             return;
         }
         let cur = self.selected.min(n - 1) as isize;
-        self.selected = (cur + delta).rem_euclid(n as isize) as usize;
+        self.selected = if self.is_picker() {
+            (cur + delta).rem_euclid(n as isize) as usize
+        } else {
+            cur.saturating_add(delta).clamp(0, n as isize - 1) as usize
+        };
     }
 
     /// Which row is highlighted, clamped to the current matches. Typing narrows

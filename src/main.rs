@@ -965,7 +965,7 @@ async fn handle_command(
                  /memory pending | /memory approve <id>   review proposals\n  \
                  /memory supersede <new> <old>  accept a correction\n  \
                  /knowledge [index|search <query>|status]  the project's own text\n  \
-                 /skill [name]            list skills, or load one\n  \
+                 /skill [name | unload <name>]  list, load, or unload skills\n  \
                  /spawn [-n N | --each-files <regex>] <task>   background worker(s)\n  \
                  /agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]\n  \
                  /validate <cmd|off>      success check for a turn\n  \
@@ -995,7 +995,7 @@ async fn handle_command(
             CommandResult::Handled
         }
         "skill" | "skills" => {
-            handle_skill(parts, cwd);
+            handle_skill(parts, cwd, agent);
             CommandResult::Handled
         }
         "spawn" => {
@@ -1174,10 +1174,14 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
     }
 }
 
-/// `/skill [name]` — list installed skills, or print one's instructions.
-fn handle_skill<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
+/// `/skill [name]` — list installed skills, or pin one for subsequent requests.
+fn handle_skill<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path, agent: &Agent) {
     let catalog = worksmith::skill::SkillCatalog::discover(cwd);
     match parts.next() {
+        Some("unload") => match (parts.next(), parts.next()) {
+            (Some(name), None) => println!("{}", agent.unload_skill(name)),
+            _ => eprintln!("usage: /skill unload <name>"),
+        },
         None => {
             if catalog.is_empty() {
                 println!("(no skills — add one under .worksmith/skills/<name>/SKILL.md)");
@@ -1189,20 +1193,16 @@ fn handle_skill<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
                 println!("({note})");
             }
         }
-        Some(name) => match catalog.get(name) {
-            Some(skill) => match skill.body() {
-                Ok(body) => {
-                    println!(
-                        "skill `{}` ({})\n\n{}",
-                        skill.name,
-                        skill.dir.display(),
-                        body.trim()
-                    )
+        Some(name) => {
+            if parts.next().is_some() {
+                eprintln!("usage: /skill [name]");
+            } else {
+                match agent.load_skill(name) {
+                    Ok(note) => println!("{note}"),
+                    Err(e) => eprintln!("skill: {e}"),
                 }
-                Err(e) => eprintln!("could not read `{name}`: {e}"),
-            },
-            None => eprintln!("no skill named `{name}`"),
-        },
+            }
+        }
     }
 }
 

@@ -371,6 +371,46 @@ impl Agent {
         self
     }
 
+    /// Names currently pinned in the model's standing instructions.
+    pub fn loaded_skill_names(&self) -> Vec<String> {
+        self.tool_ctx.loaded_skills.lock().unwrap().iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    /// Inspect pinned text when loaded, otherwise preview the current file.
+    /// Previewing never changes prompts or makes a model request.
+    pub fn preview_skill(&self, name: &str) -> Result<String> {
+        if let Some((_, text)) =
+            self.tool_ctx.loaded_skills.lock().unwrap().iter().find(|(n, _)| n == name)
+        {
+            return Ok(text.clone());
+        }
+        let catalog = crate::skill::SkillCatalog::discover(&self.tool_ctx.cwd);
+        let skill = catalog.get(name).ok_or_else(|| anyhow::anyhow!("no skill named `{name}`"))?;
+        crate::tools::preview_skill_instructions(skill)
+    }
+
+    /// Remove standing instructions from subsequent requests, not past messages.
+    pub fn unload_skill(&self, name: &str) -> String {
+        let mut loaded = self.tool_ctx.loaded_skills.lock().unwrap();
+        let before = loaded.len();
+        loaded.retain(|(n, _)| n != name);
+        if loaded.len() == before {
+            format!("skill `{name}` is not loaded")
+        } else {
+            format!("skill `{name}` unloaded; applies from the next model request")
+        }
+    }
+
+    /// Load standing instructions for the next request, including mid-turn.
+    /// Uses the same pinned state and reference map as the model's skill tool.
+    pub fn load_skill(&self, name: &str) -> Result<String> {
+        let catalog = crate::skill::SkillCatalog::discover(&self.tool_ctx.cwd);
+        let skill =
+            catalog.get(name.trim()).ok_or_else(|| anyhow::anyhow!("no skill named `{name}`"))?;
+        crate::tools::load_skill_instructions(skill, &self.tool_ctx)?;
+        Ok(format!("skill `{}` loaded; applies from the next model request", skill.name))
+    }
+
     pub fn set_session_path(&self, path: std::path::PathBuf) {
         *self.accounting_path.lock().unwrap() = Some(path);
     }
@@ -517,14 +557,13 @@ impl Agent {
     /// Fork onto a different model — the cheap-workers/smart-parent split. The
     /// override carries its own client, since a cheaper model often lives
     /// behind a different provider rather than just a different name.
-    pub fn fork_with(
-        &self,
-        bus: EventBus,
-        session_id: String,
-        model: Option<ModelOverride>,
-    ) -> Agent {
+    pub fn fork_with(&self, bus: EventBus, session_id: String, model: Option<ModelOverride>) -> Agent {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.session_id = session_id;
+        // Workers inherit a snapshot; another agent's load/unload must not
+        // rewrite their standing instructions mid-request.
+        tool_ctx.loaded_skills =
+            Arc::new(Mutex::new(self.tool_ctx.loaded_skills.lock().unwrap().clone()));
         tool_ctx.is_worker = true;
         // A worker never checkpoints. Nobody is watching a background task —
         // `/agents tail` is opt-in — so a blocking question would stall it
@@ -1704,9 +1743,7 @@ fn tokens_per_second(tokens: u32, ms: u64) -> f64 {
 
 /// The system prompt plus any skills loaded this session.
 ///
-/// Bounded: a project with many large skills should not be able to crowd out
-/// the conversation, so past the cap the oldest loads are dropped and the model
-/// can reload one if it still needs it.
+/// Request assembly never silently evicts or reorders active skills.
 struct RequestParts {
     messages: Vec<Message>,
     breakdown: ContextBreakdown,
@@ -1719,7 +1756,6 @@ struct SystemPromptParts {
 }
 
 fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> SystemPromptParts {
-    const MAX_PINNED_CHARS: usize = 12_000;
     let loaded = ctx.loaded_skills.lock().unwrap();
     if loaded.is_empty() {
         return SystemPromptParts {
@@ -1728,20 +1764,11 @@ fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> SystemPromptPar
             loaded_skill_tokens: 0,
         };
     }
-    let mut packs: Vec<&(String, String)> = Vec::new();
-    let mut used = 0usize;
-    for entry in loaded.iter().rev() {
-        if used + entry.1.len() > MAX_PINNED_CHARS && !packs.is_empty() {
-            break;
-        }
-        used += entry.1.len();
-        packs.push(entry);
-    }
-    packs.reverse();
+    let used: usize = loaded.iter().map(|(_, text)| text.len()).sum();
 
     let mut skills = String::with_capacity(used + 48);
     skills.push_str("<SKILLS-LOADED>\n");
-    for (_, text) in packs {
+    for (_, text) in loaded.iter() {
         skills.push_str(text);
         skills.push_str("\n\n");
     }

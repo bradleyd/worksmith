@@ -1,6 +1,6 @@
 # What to do next
 
-Updated after the M9 accounting review fixes on 2026-09-08. `LOOSE_ENDS.md`
+Updated during the command-output fix on 2026-09-08. `LOOSE_ENDS.md`
 keeps the longer forensic notes; this file is the short operational list.
 
 ## Current stopping point
@@ -14,8 +14,8 @@ keeps the longer forensic notes; this file is the short operational list.
 - a manual compaction progress overlay so `/compact` no longer looks frozen;
 - current README, quickstart, guide index, and `config.example.toml` updates.
 
-The planning-doc refresh is committed. Current implementation branch:
-`codex/m9-metrics-second-pass`.
+M9 metrics is committed as `c4268f7` and merged into `main`. Current branch:
+`codex/command-output-fix`.
 
 Known unrelated local files remain outside this work:
 
@@ -24,9 +24,16 @@ Known unrelated local files remain outside this work:
 
 ## Checks for this slice
 
-Verified on 2026-09-08: 426 Rust tests, three Python metrics tests,
+Verified on 2026-09-08: 445 Rust tests, three Python metrics tests,
 warning-clean Clippy, the Zola docs build, and `git diff --check` all pass.
-The command-output fix and its PTY dogfood check remain pending.
+A PTY smoke test used a local mock provider to exercise stats/catalog overlays,
+keyboard and mouse navigation, filtering, mid-turn skill selection/loading,
+repeat-load handling, preview focus, unloading/reloading, streaming, and exit.
+Catalog tests also cover loaded markers, external loads, empty filters, and failed
+loads. A separate plain-REPL smoke test verified that loading and unloading a skill
+change the following model request. The opt-in LAN cache probe also passed; it is
+ignored by the normal test suite. Responsive browser tests cover 60×20 through 140×40 terminals, including long
+status text and composer isolation. The command-output changes remain uncommitted.
 
 - `cargo test`
 - `cargo clippy --all-targets -- -D warnings`
@@ -36,7 +43,7 @@ The command-output fix and its PTY dogfood check remain pending.
 
 ## 2. M9 metrics, second pass
 
-Implemented on the feature branch: request-time model/cost/cache records,
+Merged into main: request-time model/cost/cache records,
 shared accounting in `src/metrics.rs`, per-turn history and context attribution,
 helper spend, durable worker links, `/stats`, and offline text/JSON reports.
 The eval harness reads Worksmith's own combined totals to report dollars per
@@ -49,10 +56,31 @@ unpriced; background helper jobs retain their originating session and late
 metrics cannot charge a new footer; eval stats failures no longer skip validation
 or overwrite task outcomes. Regression tests cover these cases.
 
-The implementation and documentation remain uncommitted. The next separate bug
-is tracked in `COMMAND_OUTPUT_PLAN.md`: transcript-printing commands interleave
-with a running turn, and `/skill <name>` displays rather than loads the skill.
-That command-output work is still pending. Finish it and dogfood before M12. Historical sessions cannot
+The command-output fix from `COMMAND_OUTPUT_PLAN.md` is implemented on its own
+branch: `/stats` and the skill catalog use reference overlays; keyboard/wheel
+navigation stays inside them. The skill catalog distinguishes active instructions from discovered catalog
+entries. The two-pane browser previews instructions without loading; Tab switches
+panes, Enter loads, and `u` unloads without closing the catalog.
+`/skill <name>` pins instructions through the
+same loader as the model's tool in both frontends. `/skill unload <name>` removes
+standing instructions from subsequent requests. The separate 12 KB skill cap has been removed;
+active instructions remain subject to the model context window without silent
+eviction. The browser now occupies a dedicated screen with wrapped controls and
+status, and distinguishes discovered catalog entries from active instructions. Workers inherit independent loaded-skill snapshots. Status messages and errors
+for these commands stay out of the streaming transcript. Other commands that
+print transcript notices have not been migrated to overlays.
+
+Prompt/cache validation now compares request prefixes, skill lifecycle changes,
+wire metadata, memory changes, and compaction. The opt-in synthetic LAN probe
+showed ~1.7s first output for repeats versus ~3.3s after changing early memory;
+changing tail memory stayed ~1.6s. Cached-token telemetry was unavailable, so this
+is not a measured hit rate. The user also confirmed concurrent server load, so
+latency comparisons are inconclusive and require an isolated rerun. Production memory placement
+is unchanged. See `docs/content/guide/prompt-cache.md` for the reproduction command
+and full results. Next: compare task quality with memory near the latest turn
+before changing its placement. The skill/browser/cache work remains uncommitted.
+
+Review and dogfood this change before M12. Historical sessions cannot
 recover missing prices or worker links; cache-discount billing remains outside
 this pass. Failed or interrupted requests with no returned usage are not billed
 by this accounting.

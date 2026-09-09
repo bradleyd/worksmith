@@ -1735,3 +1735,239 @@ async fn explicitly_reported_zero_usage_has_known_zero_cost() {
     assert_eq!(stats.combined.unpriced_calls, 0);
     assert_eq!(stats.combined.known_cost_usd, 0.0);
 }
+
+#[tokio::test]
+async fn a_manually_loaded_skill_reaches_the_next_request_in_a_running_turn() {
+    struct PausedClient {
+        started: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        requests: Mutex<Vec<ChatRequest>>,
+    }
+    #[async_trait]
+    impl LlmClient for PausedClient {
+        async fn stream(
+            &self,
+            req: ChatRequest,
+            _sink: mpsc::Sender<StreamEvent>,
+            _cancel: CancellationToken,
+        ) -> anyhow::Result<Completion> {
+            let first = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(req);
+                requests.len() == 1
+            };
+            if first {
+                self.started.notify_one();
+                self.resume.notified().await;
+                // The model also loading it must not duplicate the pinned body.
+                Ok(tool_call("skill", r#"{"name":"manual-test"}"#))
+            } else {
+                Ok(done("finished"))
+            }
+        }
+    }
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join(".worksmith/skills/manual-test");
+    std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: manual-test\ndescription: fixture\n---\nPINNED_MANUAL_RULE",
+    )
+    .unwrap();
+    std::fs::write(skill_dir.join("references/style.md"), "# Sentence rules\nBe concise.").unwrap();
+    let client = Arc::new(PausedClient {
+        started: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent = Arc::new(build_agent_with_client(client.clone(), dir.path(), 3));
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+    let running = agent.clone();
+    let turn = tokio::spawn(async move {
+        running
+            .run_turn(&mut session, "work", "system", None, CancellationToken::new())
+            .await
+            .unwrap();
+        session
+    });
+    tokio::time::timeout(Duration::from_secs(5), client.started.notified()).await.unwrap();
+    assert!(agent.load_skill("missing-manual-test").is_err());
+    agent.load_skill("manual-test").unwrap();
+    agent.load_skill("manual-test").unwrap();
+    client.resume.notify_one();
+    let session = tokio::time::timeout(Duration::from_secs(5), turn).await.unwrap().unwrap();
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].messages[0].content.as_ref().unwrap().contains("PINNED_MANUAL_RULE"));
+    let system = requests[1].messages[0].content.as_ref().unwrap();
+    assert_eq!(system.matches("PINNED_MANUAL_RULE").count(), 1);
+    assert!(system.contains("<SKILLS-LOADED>"));
+    assert!(system.contains("Sentence rules"), "the reference map is pinned too");
+    assert!(
+        session
+            .messages()
+            .iter()
+            .any(|m| m.content.as_deref().is_some_and(|text| text.contains("already loaded")))
+    );
+}
+
+
+#[tokio::test]
+async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
+    struct Recorder(Mutex<Vec<ChatRequest>>);
+    #[async_trait]
+    impl LlmClient for Recorder {
+        async fn stream(
+            &self,
+            req: ChatRequest,
+            _: mpsc::Sender<StreamEvent>,
+            _: CancellationToken,
+        ) -> anyhow::Result<Completion> {
+            self.0.lock().unwrap().push(req);
+            Ok(done("finished"))
+        }
+    }
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [("cache-first", "A".repeat(6500)), ("cache-second", "B".repeat(6500))] {
+        let path = dir.path().join(".worksmith/skills").join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test\n---\n{body}"),
+        )
+        .unwrap();
+    }
+    let client = Arc::new(Recorder(Mutex::new(Vec::new())));
+    let agent = build_agent_with_client(client.clone(), dir.path(), 3);
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+    agent
+        .run_turn(&mut session, "first", "stable system", None, CancellationToken::new())
+        .await
+        .unwrap();
+    let preview = agent.preview_skill("cache-first").unwrap();
+    assert!(agent.loaded_skill_names().is_empty());
+    assert!(agent.load_skill("missing-cache-skill").is_err());
+    assert!(agent.unload_skill("cache-first").contains("not loaded"));
+    agent
+        .run_turn(&mut session, "second", "stable system", None, CancellationToken::new())
+        .await
+        .unwrap();
+    agent.load_skill("cache-first").unwrap();
+    let worker = agent.fork(EventBus::new(), "worker".into());
+    agent.load_skill("cache-second").unwrap();
+    assert_eq!(agent.loaded_skill_names(), ["cache-first", "cache-second"]);
+    assert_eq!(agent.loaded_skill_names(), ["cache-first", "cache-second"]);
+    agent.load_skill("cache-first").unwrap();
+    std::fs::write(
+        dir.path().join(".worksmith/skills/cache-first/SKILL.md"),
+        "---\nname: cache-first\ndescription: test\n---\nchanged",
+    )
+    .unwrap();
+    assert_eq!(
+        agent.preview_skill("cache-first").unwrap(),
+        preview,
+        "loaded previews show the pinned snapshot"
+    );
+    agent
+        .run_turn(&mut session, "third", "stable system", None, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(agent.unload_skill("cache-first").contains("unloaded"));
+    agent.unload_skill("cache-second");
+    assert_eq!(worker.loaded_skill_names(), ["cache-first"]);
+    worker.load_skill("cache-first").unwrap();
+    assert!(agent.loaded_skill_names().is_empty());
+    agent
+        .run_turn(&mut session, "fourth", "stable system", None, CancellationToken::new())
+        .await
+        .unwrap();
+    let requests = client.0.lock().unwrap();
+    let messages = |i: usize| serde_json::to_value(&requests[i].messages).unwrap();
+    assert_eq!(messages(0)[0], messages(1)[0]);
+    assert_eq!(messages(0)[1], messages(1)[1], "ordinary followups keep earlier history unchanged");
+    assert!(requests[2].messages[0].content.as_ref().unwrap().contains(&preview));
+    assert!(requests[2].messages[0].content.as_ref().unwrap().contains(&"B".repeat(6500)));
+    assert_eq!(messages(0)[0], messages(3)[0], "unload restores the original system bytes");
+    for request in requests.iter().skip(1) {
+        assert_eq!(
+            serde_json::to_value(&requests[0].tools).unwrap(),
+            serde_json::to_value(&request.tools).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn turn_memory_changes_the_prefix_but_compaction_keeps_standing_instructions() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let agent = build_agent_with_client(
+        Arc::new(MessageRecordingClient { seen: seen.clone() }),
+        dir.path(),
+        3,
+    );
+    let mut session = Session::create_at(&dir.path().join("memory.jsonl"), dir.path()).unwrap();
+    for memory in ["memory A", "memory A", "memory B"] {
+        agent
+            .run_turn_with_context(
+                &mut session,
+                "next",
+                "stable system",
+                Some(worksmith::memory::MemoryContext { text: memory.into(), ids: vec![] }),
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    session.compact("summary", 2).unwrap();
+    agent
+        .run_turn_with_context(
+            &mut session,
+            "next",
+            "stable system",
+            Some(worksmith::memory::MemoryContext { text: "memory B".into(), ids: vec![] }),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    let wire = |i: usize| serde_json::to_value(&seen[i]).unwrap();
+    assert_eq!(wire(0), serde_json::to_value(&seen[1][..seen[0].len()]).unwrap());
+    assert_eq!(wire(1)[0], wire(2)[0]);
+    assert_ne!(wire(1)[1], wire(2)[1], "changing memory ends the common prefix before history");
+    assert_eq!(wire(1)[2], wire(2)[2]);
+    assert_eq!(wire(2)[0], wire(3)[0]);
+    assert_eq!(wire(2)[1], wire(3)[1]);
+    assert_ne!(wire(2)[2], wire(3)[2], "compaction deliberately rewrites history");
+}
+
+#[test]
+fn multiple_large_skills_remain_active_until_explicitly_unloaded() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        ("oversize-fixture", "x".repeat(13_000)),
+        ("small-fixture", "small".into()),
+        ("third-fixture", "y".repeat(10_000)),
+    ] {
+        let path = dir.path().join(".worksmith/skills").join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n{body}"),
+        )
+        .unwrap();
+    }
+    let agent = build_agent(MockClient::new(vec![]), dir.path(), 3);
+    agent.load_skill("oversize-fixture").unwrap();
+    agent.load_skill("small-fixture").unwrap();
+    agent.load_skill("third-fixture").unwrap();
+    assert_eq!(agent.loaded_skill_names(), ["oversize-fixture", "small-fixture", "third-fixture"]);
+    agent.unload_skill("oversize-fixture");
+    agent.load_skill("small-fixture").unwrap();
+    assert_eq!(agent.loaded_skill_names(), ["small-fixture", "third-fixture"]);
+}

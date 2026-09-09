@@ -510,7 +510,10 @@ but the feature reference below is the current source of truth for what ships.
   cache coverage, and estimated cost by model. Helper calls (compaction,
   planning, memory extraction) contribute spend separately from conversation
   context. Linked workers have separate totals, plus a combined spend figure.
-  `/stats [session-id]` dumps the same report in the TUI or plain REPL.
+  `/stats [session-id]` opens the same report as an overlay in the TUI and
+  prints it in the plain REPL. Reference overlays use `j`/`k`, `gg`/`G`, page
+  keys, or the mouse wheel to scroll; `/` starts filtering, Enter returns to
+  navigation, and Esc closes. They remain usable while a turn is running.
   `worksmith stats <session-id> --json` exports structured accounting without
   loading a model or contacting a provider; omit `--json` for a text report.
   Costs use configured `[models]` standard input/output rates captured at
@@ -566,7 +569,22 @@ but the feature reference below is the current source of truth for what ships.
   `~/.worksmith/skills/`, and the project-local versions of both, nearest
   winning. Only each skill's one-line description sits in the prompt; the model
   calls the `skill` tool to load the rest, and reads `references/` itself.
-  `/skill` lists them, `/skill <name>` loads one.
+  `/skill` opens the catalog in the TUI with `[active]` and `[catalog]` markers.
+  The left pane filters names/descriptions; the right previews instructions.
+  Press Tab to switch panes, arrows or `j/k` to move/scroll, `gg`/`G` for
+  top/bottom, `/` to filter, Enter to load, `u` to unload, and Esc to leave filter editing (preserving results), then Esc again to close.
+  Narrow terminals stack the panes. Browsing never loads instructions.
+  `/skill <name>` loads and `/skill unload <name>` unloads in both frontends;
+  plain `/skill` lists the catalog. Changes apply to the next model request,
+  including the next step of a running turn; they cannot change an in-flight
+  request or erase past tool results. Loaded previews show the pinned snapshot;
+  unload and reload to pick up file edits. Workers inherit independent snapshots.
+  `[catalog]` means automatically discovered; `[active]` means full instructions
+  are pinned. Fresh processes start with the catalog; the model can activate skills
+  on demand. There is no separate byte/count cap on skills; all active instructions
+  consume model context and remain until explicitly unloaded. The browser uses a
+  dedicated screen with word-wrapped preview, controls, and status text.
+  See [prompt and cache behavior](docs/content/guide/prompt-cache.md).
 - **Typed event stream** → `--mode json` and JSONL session files.
 - **Sessions** under `~/.worksmith/sessions/` with `--resume`/`--continue`.
   `WORKSMITH_HOME` relocates the whole global directory (config, sessions,
@@ -658,12 +676,12 @@ normal mode, mouse mode, pairing toggles, and trust prompts.
 /quit                     exit
 /new                      start a new session
 /compact                  summarize the session now
-/stats [session-id]       dump usage, costs, and workers (/metrics also works)
+/stats [session-id]       show usage, costs, and workers (/metrics also works)
 /memory [list|global|project|show <id>|forget <id>|add <scope> <kind> <subject> <content...>]
 /memory search <query> | /memory extract | /memory mine [n]
 /memory pending | /memory approve <id|all> | /memory supersede <new> <old>
 /knowledge [index|search <query>|status]
-/skill [name]
+/skill [name | unload <name>]
 /spawn [-n N | --each-files <regex>] <task>
 /agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]
 /validate <cmd|off>       success check for a turn
