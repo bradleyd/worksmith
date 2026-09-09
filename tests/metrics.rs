@@ -51,6 +51,7 @@ fn separates_turns_prices_cache_coverage_and_validation() {
             reason: "retry".into(),
         }),
         timed(Event::Validation {
+            report: None,
             ok: true,
             detail: "passed".into(),
         }),

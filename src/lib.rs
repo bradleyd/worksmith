@@ -11,6 +11,7 @@ pub mod fanout;
 pub mod knowledge;
 pub mod llm;
 pub mod memory;
+pub mod mcp;
 pub mod mining;
 pub mod metrics;
 pub mod prompt;
@@ -23,3 +24,6 @@ pub mod trust;
 pub mod tui;
 pub mod validation;
 pub mod worker;
+
+mod process;
+pub mod workspace;

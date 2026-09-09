@@ -62,6 +62,11 @@ pub struct TrustPrompt {
 
 /// Why a particular key deserves a warning rather than a plain listing.
 fn consequence(key: &str) -> Option<&'static str> {
+    if key.starts_with("mcp.") && key.ends_with(".command") {
+        return Some(
+            "an executable MCP program; it can act immediately when launched after approval",
+        );
+    }
     if key == "agent.validate" {
         return Some("runs as a shell command on your machine, after every turn");
     }

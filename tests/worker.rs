@@ -95,8 +95,11 @@ async fn worker_runs_task_to_completion() {
     let dir = tempfile::tempdir().unwrap();
     // Workers create their own session files under the global sessions dir, but
     // that's fine — we only assert on manager state here.
-    let agent = Arc::new(template_agent(vec![done("worker finished the job")], dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+    let agent = Arc::new(template_agent(
+        vec![done("worker finished the job")],
+        dir.path(),
+    ));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_shared_workspace();
 
     let id = started(&mut mgr, "do the thing");
     assert_eq!(mgr.running_count(), 1);
@@ -115,7 +118,7 @@ async fn newly_finished_reports_once() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(template_agent(vec![done("all done")], dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_shared_workspace();
 
     let id = started(&mut mgr, "task");
     let _ = wait_terminal(&mgr, &id).await;
@@ -139,7 +142,7 @@ async fn worker_records_changed_files() {
         ],
         dir.path(),
     ));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_shared_workspace();
 
     let id = started(&mut mgr, "make out.txt");
     let _ = wait_terminal(&mgr, &id).await;
@@ -164,7 +167,7 @@ async fn worker_records_absolute_changed_files_relative_to_the_project() {
         vec![tool_call("write", &args), done("wrote the file")],
         dir.path(),
     ));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_shared_workspace();
 
     let id = started(&mut mgr, "make out.txt");
     let _ = wait_terminal(&mgr, &id).await;
@@ -194,7 +197,7 @@ async fn worker_respects_concurrency_cap() {
         })
         .collect();
     let agent = Arc::new(template_agent(busy, dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1);
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1).with_shared_workspace();
 
     let _id = started(&mut mgr, "busy");
     // At the cap, a second spawn queues instead of starting.
@@ -226,7 +229,8 @@ async fn a_checked_worker_replans_until_the_check_passes() {
         ],
         dir.path(),
     );
-    let mut mgr = WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4);
+    let mut mgr =
+        WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4).with_shared_workspace();
 
     let outcome = mgr
         .spawn_checked(
@@ -259,7 +263,8 @@ async fn an_unchecked_worker_still_stops_when_the_model_says_so() {
         vec![tool_call("write", r#"{"path":"out.txt","content":"bad"}"#), done("all finished")],
         dir.path(),
     );
-    let mut mgr = WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4);
+    let mut mgr =
+        WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4).with_shared_workspace();
 
     let id = started(&mut mgr, "make out.txt say good");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
@@ -281,7 +286,8 @@ async fn a_workers_activity_can_be_followed_while_it_runs() {
         ],
         dir.path(),
     );
-    let mut mgr = WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4);
+    let mut mgr =
+        WorkerManager::new(Arc::new(agent), dir.path().to_path_buf(), 4).with_shared_workspace();
     let id = started(&mut mgr, "write two files");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
 
@@ -307,8 +313,11 @@ async fn queued_workers_keep_their_original_parent_session() {
     let dir = tempfile::tempdir().unwrap();
     let parent = worksmith::session::Session::create(dir.path()).unwrap();
     let next = worksmith::session::Session::create(dir.path()).unwrap();
-    let agent = Arc::new(template_agent(vec![done("first"), done("second")], dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1);
+    let agent = Arc::new(template_agent(
+        vec![done("first"), done("second")],
+        dir.path(),
+    ));
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1).with_shared_workspace();
     mgr.set_parent_session(parent.path().to_path_buf());
     let first = started(&mut mgr, "first");
     assert!(matches!(mgr.spawn("second".into(), "system".into()).unwrap(), worksmith::worker::SpawnOutcome::Queued(_)));

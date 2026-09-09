@@ -29,9 +29,22 @@ pub enum Approval {
 /// Something that can answer "may I run this?".
 #[async_trait]
 pub trait Approver: Send + Sync {
+    fn has_scope(&self, _scope: &str) -> bool {
+        false
+    }
+    fn forget_scope(&self, _scope: &str) {}
     /// `reason` is the human-readable why-we-asked from the policy layer, and
     /// doubles as the category remembered by [`Approval::AlwaysThisSession`].
     async fn ask(&self, command: &str, reason: &str) -> Approval;
+
+    /// A separate permission namespace for an exact operation identity.
+    /// Implementations without a scoped cache may only grant one call.
+    async fn ask_scoped(&self, command: &str, reason: &str, _scope: &str) -> Approval {
+        match self.ask(command, reason).await {
+            Approval::AlwaysThisSession => Approval::Once,
+            answer => answer,
+        }
+    }
 }
 
 /// Approves everything. For the eval harness and for an explicit
@@ -80,6 +93,30 @@ impl RememberingApprover {
 
 #[async_trait]
 impl Approver for RememberingApprover {
+    fn forget_scope(&self, scope: &str) {
+        self.allowed
+            .lock()
+            .unwrap()
+            .remove(&format!("operation:{scope}"));
+    }
+    fn has_scope(&self, scope: &str) -> bool {
+        self.allowed
+            .lock()
+            .unwrap()
+            .contains(&format!("operation:{scope}"))
+    }
+    async fn ask_scoped(&self, command: &str, reason: &str, scope: &str) -> Approval {
+        let key = format!("operation:{scope}");
+        if self.allowed.lock().unwrap().contains(&key) {
+            return Approval::Once;
+        }
+        let answer = self.inner.ask(command, reason).await;
+        if answer == Approval::AlwaysThisSession {
+            self.allowed.lock().unwrap().insert(key);
+        }
+        answer
+    }
+
     async fn ask(&self, command: &str, reason: &str) -> Approval {
         if self.allowed.lock().unwrap().contains(reason) {
             return Approval::Once;

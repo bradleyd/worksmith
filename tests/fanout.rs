@@ -104,7 +104,7 @@ async fn fanout_beyond_the_cap_queues_and_drains() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(agent_with(Arc::new(DoneClient), dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 2);
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 2).with_shared_workspace();
 
     let tasks: Vec<String> = (1..=5).map(|i| format!("task {i}")).collect();
     let report = mgr.spawn_many(tasks, "system".into(), "the original ask".into());
@@ -149,7 +149,7 @@ async fn planner_splits_a_request_into_workers() {
     let tasks: Vec<String> = text.lines().map(str::to_string).collect();
     assert_eq!(tasks.len(), 3);
 
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4);
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_shared_workspace();
     let report = mgr.spawn_many(tasks, "system".into(), "the original ask".into());
     assert_eq!(report.started.len(), 3);
     assert_eq!(report.queued, 0);
@@ -252,6 +252,7 @@ async fn workers_run_on_the_overridden_model() {
 
     let over = over(cheap.clone(), "cheap-model");
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
         .with_default_model(Some(over.clone()));
 
     let id = mgr
@@ -292,6 +293,7 @@ async fn a_per_spawn_model_beats_the_default_and_queued_work_keeps_it() {
 
     // Cap of 1 so the second and third tasks queue and must carry the override.
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1)
+        .with_shared_workspace()
         .with_default_model(Some(over(default_m.clone(), "default-model")));
 
     let report = mgr.spawn_many_on(

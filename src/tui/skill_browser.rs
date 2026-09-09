@@ -10,10 +10,10 @@ fn wrapped(text: String) -> Paragraph<'static> {
     Paragraph::new(text).wrap(Wrap { trim: false })
 }
 
-fn panes(area: Rect, status: &str, heading: &str) -> [Rect; 4] {
+fn panes(area: Rect, status: &str, heading: &str, mcp: bool) -> [Rect; 4] {
     let inner = area.inner(Margin::new(1, 0));
     let header_rows = wrapped(heading.into()).line_count(inner.width) as u16;
-    let footer_rows = wrapped(footer_text(status)).line_count(inner.width) as u16;
+    let footer_rows = wrapped(footer_text(status, mcp)).line_count(inner.width) as u16;
     let sections = Layout::vertical([
         Constraint::Length(header_rows),
         Constraint::Min(4),
@@ -30,15 +30,34 @@ fn panes(area: Rect, status: &str, heading: &str) -> [Rect; 4] {
 }
 
 fn heading_text(ov: &Overlay) -> String {
-    if ov.filter.is_empty() && ov.reference_input != ReferenceInput::Filter {
-        EXPLANATION.into()
+    let explanation = if ov.is_mcp_catalog() {
+        "MCP: parent only. Connection, activation and authorization are separate."
     } else {
-        format!("{EXPLANATION}\nFilter skills: /{}", ov.filter)
+        EXPLANATION
+    };
+    let noun = if ov.is_mcp_catalog() {
+        "tools"
+    } else {
+        "skills"
+    };
+    if ov.filter.is_empty() && ov.reference_input != ReferenceInput::Filter {
+        explanation.into()
+    } else {
+        format!("{explanation}\nFilter {noun}: /{}", ov.filter)
     }
 }
 
-fn footer_text(status: &str) -> String {
-    if status.is_empty() { CONTROLS.into() } else { format!("{CONTROLS}\n{status}") }
+fn footer_text(status: &str, mcp: bool) -> String {
+    let controls = if mcp {
+        "Enter activate / refresh server · u deactivate · r refresh\nTab panes · / filter · j/k scroll · Esc back/close"
+    } else {
+        CONTROLS
+    };
+    if status.is_empty() {
+        controls.into()
+    } else {
+        format!("{controls}\n{status}")
+    }
 }
 
 fn preview_text(ov: &Overlay) -> String {
@@ -52,13 +71,17 @@ fn preview_text(ov: &Overlay) -> String {
                 .unwrap_or("");
             format!("{description}\n\n{}", preview.text)
         }
+        None if ov.is_mcp_catalog() => {
+            "No configured MCP servers. Add an explicitly enabled server to trusted configuration."
+                .into()
+        }
         None => "Highlight a skill to preview its instructions.".into(),
     };
     text.replace('\t', "    ")
 }
 
 pub(super) fn prepare(ov: &mut Overlay, area: Rect, status: &str) {
-    let [_, preview, _, _] = panes(area, status, &heading_text(ov));
+    let [_, preview, _, _] = panes(area, status, &heading_text(ov), ov.is_mcp_catalog());
     let rows = wrapped(preview_text(ov)).line_count(preview.width.saturating_sub(2));
     ov.preview_max_scroll =
         rows.saturating_sub(preview.height.saturating_sub(2) as usize).min(u16::MAX as usize);
@@ -78,7 +101,8 @@ fn pane_title(title: impl Into<String>, focused: bool) -> Line<'static> {
 }
 
 pub(super) fn render(f: &mut Frame, area: Rect, ov: &Overlay, status: &str) {
-    let [list, preview, header, footer] = panes(area, status, &heading_text(ov));
+    let [list, preview, header, footer] =
+        panes(area, status, &heading_text(ov), ov.is_mcp_catalog());
     f.render_widget(Clear, area);
     f.render_widget(wrapped(heading_text(ov)), header);
     let border = |focused| {
@@ -101,7 +125,17 @@ pub(super) fn render(f: &mut Frame, area: Rect, ov: &Overlay, status: &str) {
         .map(|(i, (_, item))| {
             let text = match ov.skill_loaded(&item.label) {
                 Some(loaded) => {
-                    format!("[{}] {}", if loaded { "active" } else { "catalog" }, item.label)
+                    format!(
+                        "[{}] {}",
+                        if loaded {
+                            "active"
+                        } else if ov.is_mcp_catalog() {
+                            "available"
+                        } else {
+                            "catalog"
+                        },
+                        item.label
+                    )
                 }
                 None => item.label.clone(),
             };
@@ -119,7 +153,9 @@ pub(super) fn render(f: &mut Frame, area: Rect, ov: &Overlay, status: &str) {
         rows.push(Line::from("(nothing matches)"));
     }
     f.render_widget(Paragraph::new(rows), inner);
-    let title = if ov.preview.as_ref().is_some_and(|p| p.loaded) {
+    let title = if ov.is_mcp_catalog() {
+        "Tool details and permission"
+    } else if ov.preview.as_ref().is_some_and(|p| p.loaded) {
         "Active instructions"
     } else {
         "Preview — catalog only"
@@ -131,7 +167,7 @@ pub(super) fn render(f: &mut Frame, area: Rect, ov: &Overlay, status: &str) {
     let inner = block.inner(preview);
     f.render_widget(block, preview);
     f.render_widget(wrapped(preview_text(ov)).scroll((ov.preview_scroll as u16, 0)), inner);
-    f.render_widget(wrapped(footer_text(status)), footer);
+    f.render_widget(wrapped(footer_text(status, ov.is_mcp_catalog())), footer);
 }
 
 #[cfg(test)]
@@ -144,7 +180,7 @@ mod tests {
         for width in [70, 120] {
             let mut ov = Overlay::skills(vec![], Default::default());
             let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
-            let [list, preview, _, _] = panes(Rect::new(0, 0, width, 30), "", EXPLANATION);
+            let [list, preview, _, _] = panes(Rect::new(0, 0, width, 30), "", EXPLANATION, false);
             for focus in [SkillFocus::List, SkillFocus::Preview] {
                 ov.skill_focus = focus;
                 terminal.draw(|f| render(f, f.area(), &ov, "")).unwrap();
@@ -166,7 +202,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
             terminal.draw(|f| render(f, f.area(), &ov, "")).unwrap();
             let [list, preview, header, _] =
-                panes(Rect::new(0, 0, width, 30), "", &heading_text(&ov));
+                panes(Rect::new(0, 0, width, 30), "", &heading_text(&ov), false);
             assert!(header.bottom() <= list.y && header.bottom() <= preview.y);
             let text: String = (header.y..header.bottom())
                 .flat_map(|y| (header.x..header.right()).map(move |x| (x, y)))
@@ -179,10 +215,10 @@ mod tests {
 
     #[test]
     fn narrow_terminals_stack_preview_below_list() {
-        let [list, preview, _, _] = panes(Rect::new(0, 0, 120, 30), "", EXPLANATION);
+        let [list, preview, _, _] = panes(Rect::new(0, 0, 120, 30), "", EXPLANATION, false);
         assert_eq!(list.y, preview.y);
         assert_eq!(list.right(), preview.x);
-        let [list, preview, _, _] = panes(Rect::new(0, 0, 70, 30), "", EXPLANATION);
+        let [list, preview, _, _] = panes(Rect::new(0, 0, 70, 30), "", EXPLANATION, false);
         assert_eq!(list.x, preview.x);
         assert_eq!(list.bottom(), preview.y);
     }

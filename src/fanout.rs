@@ -13,6 +13,7 @@ use crate::worker::{FanOutReport, SpawnOutcome};
 /// A fan-out waiting on the planner. Held by the front-end and run off the UI
 /// task, because the planner is a model call and must not block rendering.
 pub struct PendingFanOut {
+    pub workspace: crate::worker::WorkerWorkspace,
     pub task: String,
     /// Model the resulting workers run on, already resolved.
     pub model: Option<crate::llm::ModelOverride>,
@@ -65,6 +66,7 @@ pub enum FanOut {
 }
 
 pub struct SpawnRequest {
+    pub shared: bool,
     pub fanout: FanOut,
     pub task: String,
     /// `--model provider/model` — run these workers on something else.
@@ -74,18 +76,17 @@ pub struct SpawnRequest {
     pub validate: Option<String>,
 }
 
-pub const SPAWN_USAGE: &str =
-    "usage: /spawn [-n N | --each-files <regex>] [--model <provider/model>] \
-     [--until <check>] <task>\n\
-     Quote a multi-word check: --until \"cargo test\". A fan-out's check runs in \
-     every worker at once, in one directory, so it must be read-only — \
-     `zola check`, not `zola build`.";
+pub const SPAWN_USAGE: &str = "usage: /spawn [-n N | --each-files <regex>] [--model <provider/model>] \
+     [--until <check>] [--shared] <task>\n\
+     Isolated workers require a clean Git checkout. --shared explicitly permits \
+     workers to edit the parent directory concurrently. Quote checks: --until \"cargo test\".";
 
 /// Parse leading flags off a `/spawn` line; everything after them is the task,
 /// verbatim. Flags take a single token, so no quoting rules are needed.
 pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, String> {
     let mut fanout = if default_auto { FanOut::Auto } else { FanOut::Count(1) };
     let mut explicit = false;
+    let mut shared = false;
     let mut model: Option<String> = None;
     let mut validate: Option<String> = None;
     let mut rest = args.trim();
@@ -102,6 +103,11 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
         if flag == "--" {
             rest = after;
             break;
+        }
+        if flag == "--shared" {
+            shared = true;
+            rest = after;
+            continue;
         }
         let (value, after) = take_value(after).map_err(|e| format!("/spawn: {flag} {e}"))?;
         let value = value.as_str();
@@ -158,7 +164,13 @@ pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, Strin
     if rest.trim().is_empty() {
         return Err(SPAWN_USAGE.to_string());
     }
-    Ok(SpawnRequest { fanout, task: rest.trim().to_string(), model, validate })
+    Ok(SpawnRequest {
+        shared,
+        fanout,
+        task: rest.trim().to_string(),
+        model,
+        validate,
+    })
 }
 
 /// Is this a self-contained instruction, or the wreckage of a model that
@@ -279,7 +291,7 @@ pub async fn plan_fanout(
     // model gives a worse fan-out: Kimi K3 split a request into read → write →
     // review, which is a correct decomposition and useless here, because all
     // three would run at once and the reviewer would find nothing to review.
-    let rules = "The tasks all run AT THE SAME TIME, in the same directory, and cannot talk \
+    let rules = "The tasks all run AT THE SAME TIME and cannot talk \
                  to each other. So: no task may depend on another task's output, no task may \
                  be a step that only makes sense after another finishes, and no two tasks may \
                  write the same file. If the work is a sequence of phases rather than parallel \

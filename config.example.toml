@@ -279,3 +279,33 @@ insert-escape-ms = 300
 #
 # [models."vllm/Qwen/Qwen3.5-9B"]
 # context = 32768
+
+# --- Parent MCP (local stdio only) -----------------------------------------
+# USE MCP AT YOUR OWN RISK: servers are not sandboxed. They run with your user
+# permissions, can access files/network, and bypass command checks internally.
+# Only launch trusted servers. OS-enforced sandboxing is planned, not implemented.
+# See docs/mcp.md for the trust boundary and setup instructions.
+# Disabled unless explicitly enabled. An entry in project config must first be
+# trusted; refresh then asks to launch the program. Activation is not permission.
+# Use an installed executable by absolute path; Worksmith never installs servers.
+# [mcp.issues]
+# enabled = true
+# command = "/absolute/path/to/issues-mcp"
+# args = ["--stdio"]
+# timeout-ms = 30000
+# frame-bytes = 1048576
+# catalog-bytes = 262144
+# max-pages = 16
+# schema-bytes = 16384
+# active-bytes = 32768
+# [mcp.issues.env]
+# API_TOKEN = "ISSUES_API_TOKEN" # reference to a parent env var, not its value
+#
+# /mcp opens the TUI browser. Plain REPL equivalents:
+# /mcp refresh issues
+# /mcp list
+# /mcp activate mcp__issues__read_issue
+# /mcp inspect mcp__issues__read_issue
+# /mcp deactivate mcp__issues__read_issue
+# Results larger than the prompt budget have session handles; retrieve pages
+# with /mcp read <handle> <byte-offset>. No remote operation is repeated.

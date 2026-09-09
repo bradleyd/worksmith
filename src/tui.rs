@@ -73,6 +73,8 @@ use transcript::{build_rows, row_text};
 
 /// A planner call in flight, plus the inputs the resulting workers need.
 struct PlannedFanOut {
+    parent_session: std::path::PathBuf,
+    workspace: crate::worker::WorkerWorkspace,
     planner: JoinHandle<crate::fanout::FanOutPlan>,
     system: String,
     request: String,
@@ -128,8 +130,12 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/memory", "what is remembered — search, mine, review"),
     ("/knowledge", "the project's own docs and source"),
     ("/skill", "load a skill"),
+    ("/mcp", "browse and activate parent MCP tools"),
     ("/spawn", "run a task in background workers"),
-    ("/agents", "list workers, or tail one live"),
+    (
+        "/agents",
+        "list workers, tail live activity, or review retained changes",
+    ),
     ("/validate", "the check a turn must pass"),
     ("/metrics", "model latency, token rates, and context trend"),
     ("/stats", "dump recorded usage, costs, and workers"),
@@ -207,6 +213,8 @@ struct App {
     pending_fanout: Option<PendingFanOut>,
     /// Set by `/memory extract`; run_loop runs the classifier off the UI task.
     pending_extract: bool,
+    pending_mcp: Option<serde_json::Value>,
+    pending_review: Option<(String, Option<String>, bool)>,
     /// Set by `/memory mine [n]`; run_loop does the model half off the UI task.
     /// Carries the cap on how many sessions to read in this run.
     pending_mine: Option<usize>,
@@ -261,6 +269,8 @@ impl App {
             synthetic_user_message: None,
             pending_fanout: None,
             pending_extract: false,
+            pending_mcp: None,
+            pending_review: None,
             pending_mine: None,
             insert_escape: Some(('j', 'j', Duration::from_millis(300))),
             pending_escape: None,
@@ -306,6 +316,11 @@ impl App {
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
         self.transcript.push(kind, text);
+    }
+
+    fn show_workspace_review(&mut self, action: &str, text: String) {
+        let kind = if action == "diff" { Kind::ReviewDiff } else { Kind::Notice };
+        self.push(kind, text);
     }
 
     fn show_session_id(&mut self, id: &str) {
@@ -503,11 +518,11 @@ impl App {
                 self.push(Kind::Pair, format!("{head}\n  {detail}"));
             }
             Event::Nudge { reason } => self.push(Kind::Notice, format!("↻ {reason}")),
-            Event::Validation { ok, detail } => {
+            Event::Validation { ok, detail, .. } => {
                 if ok {
-                    self.push(Kind::Notice, format!("✓ validation passed: {detail}"));
+                    self.push(Kind::Notice, detail);
                 } else {
-                    self.push(Kind::Error, format!("✗ validation failed: {detail}"));
+                    self.push(Kind::Error, detail);
                 }
             }
             Event::MemoryUsed { ids } => {
@@ -544,6 +559,7 @@ impl App {
             Event::Error { message } => self.push(Kind::Error, message),
             Event::SessionStarted { id } => self.show_session_id(&id),
             Event::TurnComplete { .. } => {}
+            Event::McpOperation { .. } => {}
         }
     }
 }
@@ -719,6 +735,8 @@ async fn run_loop(
 
     let mut turn: Option<JoinHandle<Result<TurnResult>>> = None;
     let mut cancel = CancellationToken::new();
+    let mut review_job: Option<JoinHandle<anyhow::Result<(String, String)>>> = None;
+    let mut mcp_job: Option<JoinHandle<crate::tools::ToolOutput>> = None;
     // A planner call in flight, with the system prompt its workers will use.
     let mut fanout: Option<PlannedFanOut> = None;
     // Fan-out groups still collecting their members' results.
@@ -818,7 +836,8 @@ async fn run_loop(
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
         app.ensure_rows(width);
         refresh_skill_overlay(&mut app, &agent);
-        if let Some(ov) = app.overlay.as_mut().filter(|ov| ov.is_skill_catalog()) {
+        refresh_mcp_overlay(&mut app, &agent);
+        if let Some(ov) = app.overlay.as_mut().filter(|ov| ov.is_two_pane()) {
             let size = terminal.size()?;
             skill_browser::prepare(ov, Rect::new(0, 0, size.width, size.height), &app.status);
         }
@@ -850,6 +869,32 @@ async fn run_loop(
                                 app.status = agent.unload_skill(&name);
                                 refresh_skill_overlay(&mut app, &agent);
                             }
+                            Flow::Mcp(args) => {
+                                if app.running { app.status = "MCP controls are busy; wait for the current operation".into(); }
+                                else { app.pending_mcp = Some(args); }
+                            }
+                        }
+                        if let Some((action, id, confirmed)) = app.pending_review.take() {
+                            let root = cwd.clone();
+                            app.running = true;
+                            app.status = "reviewing worker workspace; wait for the operation to finish".into();
+                            review_job = Some(tokio::spawn(async move {
+                                let text = crate::workspace::review(&root, &action, id.as_deref(), confirmed).await?;
+                                Ok((action, text))
+                            }));
+                        }
+                        if let Some(args) = app.pending_mcp.take() {
+                            let a = agent.clone();
+                            let s = session.clone();
+                            cancel = CancellationToken::new();
+                            let token = cancel.clone();
+                            app.running = true;
+                            app.status = "MCP operation in progress; Esc cancels".into();
+                            app.overlay = None;
+                            mcp_job = Some(tokio::spawn(async move {
+                                let mut session = s.lock().await;
+                                a.mcp_command(&mut session, args, token).await
+                            }));
                         }
                         // /memory extract: classify the transcript off the UI task.
                         if app.pending_extract {
@@ -920,6 +965,8 @@ async fn run_loop(
                             let max = agents_max;
                             let request = pf.task.clone();
                             fanout = Some(PlannedFanOut {
+                                parent_session: app.session_path.clone(),
+                                workspace: pf.workspace,
                                 planner: tokio::spawn(async move {
                                     plan_fanout(a, pf.task, pf.want, max).await
                                 }),
@@ -990,10 +1037,36 @@ async fn run_loop(
                 if app.transcript.follow { app.transcript.scroll_up = 0; }
             }
 
+            result = async { review_job.as_mut().unwrap().await }, if review_job.is_some() => {
+                review_job = None;
+                app.running = false;
+                match result {
+                    Ok(Ok((action, text))) => app.show_workspace_review(&action, text),
+                    Ok(Err(e)) => app.push(Kind::Error, e.to_string()),
+                    Err(e) => app.push(Kind::Error, format!("workspace operation failed: {e}")),
+                }
+                app.status = "/help for keys and commands".into();
+            }
+
+            result = async { mcp_job.as_mut().unwrap().await }, if mcp_job.is_some() => {
+                mcp_job = None;
+                app.running = false;
+                app.status = match result {
+                    Ok(out) => out.content,
+                    Err(error) => format!("MCP operation failed: {error}"),
+                };
+                if app.status.len() > 500 {
+                    let items = app.status.lines().map(|line| OverlayItem { label: line.into(), description: String::new() }).collect();
+                    app.overlay = Some(Overlay::reference("MCP result", items));
+                    app.status = "MCP result available for inspection".into();
+                } else { open_mcp_overlay(&mut app, &agent); }
+            }
+
             // The agent is asking whether it may do something outward-facing.
             // It is blocked until this loop answers, so nothing else matters
             // until the user decides.
             Some(req) = approvals.recv(), if !app.modals.approval_pending() => {
+                app.overlay = None;
                 app.push(
                     Kind::Error,
                     format!("⚠ approve? {}\n  {}", req.reason, req.command),
@@ -1053,8 +1126,12 @@ async fn run_loop(
 
             // Fan-out planning finished.
             res = join_planned_fanout(&mut fanout), if fanout.is_some() => {
-                let PlannedFanOut { system, request, model, validate, .. } = fanout.take().unwrap();
+                let PlannedFanOut { system, request, model, validate, workspace, parent_session, .. } = fanout.take().unwrap();
                 app.status = "/help for keys and commands".into();
+                if app.session_path != parent_session {
+                    app.push(Kind::Notice, "discarded worker plan belonging to the previous session");
+                    continue;
+                }
                 match res {
                     Ok(plan) if plan.tasks.is_empty() => {
                         app.push(Kind::Error, "fan-out planning produced no tasks".to_string());
@@ -1110,6 +1187,7 @@ async fn run_loop(
                                     .to_string(),
                             },
                         );
+                        workers.set_workspace(workspace);
                         let report =
                             workers.spawn_many_checked(plan.tasks, system, request, model, validate);
                         app.push(Kind::Notice, fanout_notice(&report));
@@ -1205,12 +1283,24 @@ async fn run_loop(
 
     // If a turn is still running on quit, cancel and let it wind down.
     cancel.cancel();
+    if let Some(job) = fanout.take() {
+        job.planner.abort();
+        let _ = job.planner.await;
+    }
+    if let Some(job) = mcp_job.take() {
+        let _ = job.await;
+    }
     if let Some(t) = turn.take() {
         let _ = t.await;
     }
     if let Some(c) = compact.take() {
         let _ = c.await;
     }
+    if let Some(job) = review_job.take() {
+        let _ = job.await;
+    }
+    workers.shutdown().await;
+    agent.close_mcp(&mut *session.lock().await).await;
     Ok(())
 }
 
@@ -1221,6 +1311,7 @@ enum Flow {
     ExternalEdit,
     LoadSkill(String),
     UnloadSkill(String),
+    Mcp(serde_json::Value),
 }
 
 fn handle_approval_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
@@ -1257,7 +1348,7 @@ fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> 
                 KeyCode::Char('c') if ctrl => return Some(Flow::Quit),
                 KeyCode::Esc if filtering => ov.reference_input = ReferenceInput::Navigate,
                 KeyCode::Esc => close_overlay = true,
-                KeyCode::Tab if ov.is_skill_catalog() => {
+                KeyCode::Tab if ov.is_two_pane() => {
                     ov.skill_focus = match ov.skill_focus {
                         SkillFocus::List => SkillFocus::Preview,
                         SkillFocus::Preview => SkillFocus::List,
@@ -1272,6 +1363,35 @@ fn handle_overlay_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> 
                 KeyCode::Char('d') if ctrl => ov.scroll_by(10),
                 KeyCode::Char('p') if ctrl => ov.scroll_by(-1),
                 KeyCode::Char('n') if ctrl => ov.scroll_by(1),
+                KeyCode::Enter if ov.is_mcp_catalog() => {
+                    if let Some(name) = ov.chosen() {
+                        let args = match name.strip_prefix("server:") {
+                            Some(server) => serde_json::json!({"action":"refresh","server":server}),
+                            None => serde_json::json!({"action":"activate","tool":name}),
+                        };
+                        return Some(Flow::Mcp(args));
+                    }
+                }
+                KeyCode::Char('r') if !filtering && !ctrl && ov.is_mcp_catalog() => {
+                    if let Some(name) = ov.chosen() {
+                        let server = name.strip_prefix("server:").or_else(|| {
+                            name.strip_prefix("mcp__")
+                                .and_then(|rest| rest.split_once("__").map(|(server, _)| server))
+                        });
+                        if let Some(server) = server {
+                            return Some(Flow::Mcp(
+                                serde_json::json!({"action":"refresh","server":server}),
+                            ));
+                        }
+                    }
+                }
+                KeyCode::Char('u') if !filtering && !ctrl && ov.is_mcp_catalog() => {
+                    if let Some(name) = ov.chosen().filter(|name| !name.starts_with("server:")) {
+                        return Some(Flow::Mcp(
+                            serde_json::json!({"action":"deactivate","tool":name}),
+                        ));
+                    }
+                }
                 KeyCode::Enter if ov.is_skill_catalog() => {
                     ov.reference_input = ReferenceInput::Navigate;
                     if let Some(name) = ov.chosen()
@@ -1735,6 +1855,19 @@ async fn handle_command(input: &str, app: &mut App, ctx: &mut CommandContext<'_>
     let mut parts = input.trim_start_matches('/').split_whitespace();
     let head = parts.next().unwrap_or("");
     match head {
+        "mcp" => {
+            let words = parts.collect::<Vec<_>>();
+            if words.is_empty() {
+                open_mcp_overlay(app, agent);
+            } else if app.running {
+                app.status = "MCP controls are busy; wait for the current operation".into();
+            } else {
+                match crate::mcp::command_args(&words) {
+                    Ok(args) => app.pending_mcp = Some(args),
+                    Err(error) => app.status = error.to_string(),
+                }
+            }
+        }
         "help" | "h" if parts.clone().next().is_none() => {
             // The command list as something you can filter and read, rather than
             // a wall you scroll back through. `/help keys` still prints it all.
@@ -1841,7 +1974,9 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 app.status = "can't start a new session while compacting history".into();
                 return Ok(true);
             }
+            workers.shutdown().await;
             let mut s = session.lock().await;
+            agent.close_mcp(&mut s).await;
             *s = Session::create(cwd)?;
             app.reset_for_new_session(s.path().to_path_buf());
             workers.set_parent_session(app.session_path.clone());
@@ -1876,6 +2011,13 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             match parse_spawn(args, app.fanout_auto) {
                 Err(msg) => app.push(Kind::Notice, msg),
                 Ok(req) => {
+                    if let Err(e) = workers.prepare_spawn(req.shared).await {
+                        app.push(Kind::Error, format!("spawn: {e}"));
+                        return Ok(true);
+                    }
+                    if req.shared {
+                        app.push(Kind::Notice, "shared workers edit the parent directory; concurrent writes can collide");
+                    }
                     let system = build_worker_prompt(cwd, mem);
                     // `--model` overrides `agents.model` for this spawn only.
                     let over = match req.model.as_deref() {
@@ -1897,8 +2039,8 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                                 _ => None,
                             };
                             app.status = "planning fan-out…".into();
-                            app.pending_fanout =
-                                Some(PendingFanOut {
+                            app.pending_fanout = Some(PendingFanOut {
+                                workspace: workers.workspace(),
                                 task: req.task,
                                 want,
                                 system,
@@ -1935,7 +2077,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                 }
             }
         }
-        "agents" | "workers" => agents_command(app, workers, parts),
+        "agents" | "workers" => agents_command(app, workers, parts).await,
         // What the loop did, and when. Reconstructing this from messages meant
         // reading the provider's logs and correlating timestamps by hand.
         "history" | "trace" => {
@@ -2842,7 +2984,7 @@ fn describe(ev: &Event) -> String {
             format!("◆ checkpoint ({kind}): {}", truncate(subject.trim(), 50))
         }
         Event::Nudge { reason } => format!("↻ nudge: {}", truncate(reason.trim(), 60)),
-        Event::Validation { ok, detail } => {
+        Event::Validation { ok, detail, .. } => {
             format!("{} validation: {detail}", if *ok { "✓" } else { "✗" })
         }
         Event::MemoryUsed { ids } => memory_used_summary(ids),
@@ -2853,6 +2995,15 @@ fn describe(ev: &Event) -> String {
         Event::Error { message } => format!("error: {}", truncate(message.trim(), 60)),
         Event::TurnComplete { outcome } => format!("turn complete: {outcome}"),
         Event::SessionStarted { id } => format!("session {id}"),
+        Event::McpOperation {
+            server,
+            tool,
+            phase,
+            ..
+        } => format!(
+            "MCP {server} {}: {phase}",
+            tool.as_deref().unwrap_or("server")
+        ),
         Event::MessageDelta { .. } | Event::Thinking { .. } => String::new(),
     }
 }
@@ -2949,6 +3100,63 @@ fn refresh_skill_overlay(app: &mut App, agent: &Agent) {
             overlay.preview = None;
             overlay.preview_scroll = 0;
         }
+    }
+}
+
+fn open_mcp_overlay(app: &mut App, agent: &Agent) {
+    let rows = agent.mcp_browser();
+    let items = rows
+        .iter()
+        .map(|row| OverlayItem {
+            label: row.name.clone(),
+            description: row.description.clone(),
+        })
+        .collect();
+    let active = rows
+        .iter()
+        .filter(|row| row.active)
+        .map(|row| row.name.clone())
+        .collect();
+    app.overlay = Some(Overlay::mcp(items, active));
+    refresh_mcp_overlay(app, agent);
+}
+
+fn refresh_mcp_overlay(app: &mut App, agent: &Agent) {
+    let Some(overlay) = app.overlay.as_mut().filter(|ov| ov.is_mcp_catalog()) else {
+        return;
+    };
+    let rows = agent.mcp_browser();
+    overlay.update_mcp(
+        rows.iter()
+            .map(|row| OverlayItem {
+                label: row.name.clone(),
+                description: row.description.clone(),
+            })
+            .collect(),
+        rows.iter()
+            .filter(|row| row.active)
+            .map(|row| row.name.clone())
+            .collect(),
+    );
+    let chosen = overlay.chosen();
+    if let Some(row) = chosen
+        .as_ref()
+        .and_then(|name| rows.iter().find(|row| &row.name == name))
+    {
+        if !overlay
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.name == row.name && preview.text == row.detail)
+        {
+            overlay.preview = Some(SkillPreview {
+                name: row.name.clone(),
+                loaded: row.active,
+                text: row.detail.clone(),
+            });
+            overlay.preview_scroll = 0;
+        }
+    } else {
+        overlay.preview = None;
     }
 }
 
@@ -3058,12 +3266,25 @@ fn worker_timing(w: &WorkerSummary) -> String {
     }
 }
 
-fn agents_command<'a>(
+async fn agents_command<'a>(
     app: &mut App,
     workers: &mut WorkerManager,
     mut parts: impl Iterator<Item = &'a str>,
 ) {
     match parts.next().unwrap_or("list") {
+        action @ ("retained" | "diff" | "apply" | "discard") => {
+            if app.running || app.compacting {
+                app.push(
+                    Kind::Notice,
+                    "finish or stop the parent turn before reviewing worker workspaces",
+                );
+                return;
+            }
+            let id = parts.next().map(|id| workers.workspace_id(id));
+            let confirmed = parts.next() == Some("--yes");
+            app.pending_review = Some((action.into(), id, confirmed));
+        }
+
         // The one thing `/agents` could not do: show what a worker is doing
         // *now*. `show` dumps a finished result; status is a single line.
         "tail" | "follow" | "watch" => match parts.next() {
@@ -3161,25 +3382,7 @@ fn agents_command<'a>(
         "show" | "result" => match parts.next() {
             Some(id) => match workers.get(id) {
                 Some(w) => {
-                    let mut body = format!("[{}]", w.status.label());
-                    if w.nudges > 0 {
-                        body.push_str(&format!(" · {} supervisor nudges", w.nudges));
-                    }
-                    if let Some(reason) = &w.escalation {
-                        body.push_str(&format!("\nstopped by supervisor: {reason}"));
-                    }
-                    if !w.changed.is_empty() {
-                        body.push_str(&format!("\nchanged: {}", w.changed.join(", ")));
-                    }
-                    if let Ok(p) = Session::path_for_id(&w.session_id) {
-                        body.push_str(&format!("\nsession: {}", p.display()));
-                    }
-                    if w.result.is_empty() {
-                        body.push_str(&format!("\n{}", w.last));
-                    } else {
-                        body.push_str(&format!("\n{}", w.result));
-                    }
-                    app.push(Kind::Notice, format!("{id} {body}"));
+                    app.push(Kind::Notice, crate::report::worker_detail(&w));
                 }
                 None => app.push(Kind::Notice, format!("(no agent {id})")),
             },
@@ -3287,7 +3490,7 @@ const COMPACTION_MAX_WIDTH: u16 = 62;
 const COMPACTION_HEIGHT: u16 = 7;
 
 fn ui(f: &mut Frame, app: &App) {
-    if let Some(ov) = app.overlay.as_ref().filter(|ov| ov.is_skill_catalog()) {
+    if let Some(ov) = app.overlay.as_ref().filter(|ov| ov.is_two_pane()) {
         skill_browser::render(f, f.area(), ov, &app.status);
         return;
     }
@@ -3401,7 +3604,7 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
 /// A centered floating list. `Clear` blanks what is underneath, which is what
 /// makes it read as a window rather than as text drawn over the transcript.
 fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
-    if ov.is_skill_catalog() {
+    if ov.is_two_pane() {
         skill_browser::render(f, area, ov, "");
         return;
     }
@@ -3850,6 +4053,20 @@ mod tests {
 
     fn app() -> App {
         App::new("m".into(), 1000, None)
+    }
+
+    #[test]
+    fn workspace_review_diff_is_colored_and_never_collapsed() {
+        let mut a = app();
+        let patch = format!("Ready\ncheck passed\ndiff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n{}+last addition\n", "+new\n".repeat(40));
+        a.show_workspace_review("diff", patch);
+        let rows = transcript::build_rows(&a.transcript.items, true, true, 100);
+        for (text, color) in [("-old", Color::Red), ("+last addition", Color::Green), ("@@ -1 +1 @@", Color::Cyan)] {
+            assert!(rows.iter().flat_map(|row| &row.spans).any(|span| span.content == text && span.style.fg == Some(color)));
+        }
+        assert!(!rows.iter().any(|row| transcript::row_text(row).contains("more diff lines")));
+        a.show_workspace_review("apply", "applied 1 file".into());
+        assert!(a.transcript.items.last().unwrap().kind == Kind::Notice);
     }
 
     #[test]
@@ -4378,7 +4595,97 @@ mod tests {
             let text: String =
                 terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
             assert!(text.contains("COMPOSER_SENTINEL"));
-            assert!(text.contains("STATUS_END"), "status clipped at width {width}");
+            assert!(
+                text.contains("STATUS_END"),
+                "status clipped at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_browser_filters_both_panes_and_routes_activation_without_loading_skills() {
+        let mut app = app();
+        app.overlay = Some(Overlay::mcp(
+            vec![
+                OverlayItem {
+                    label: "server:fixture".into(),
+                    description: "stopped".into(),
+                },
+                OverlayItem {
+                    label: "mcp__fixture__echo".into(),
+                    description: "echo input".into(),
+                },
+            ],
+            Default::default(),
+        ));
+        let Some(Flow::Mcp(args)) = handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        ) else {
+            panic!("refresh action expected")
+        };
+        assert_eq!(args["action"], "refresh");
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
+        assert_eq!(
+            app.overlay.as_ref().unwrap().skill_focus,
+            SkillFocus::Preview
+        );
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
+        for c in "echo".chars() {
+            handle_overlay_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut app,
+                false,
+            );
+        }
+        assert_eq!(app.overlay.as_ref().unwrap().skill_focus, SkillFocus::List);
+        let Some(Flow::Mcp(args)) = handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        ) else {
+            panic!("activation action expected")
+        };
+        assert_eq!(args["action"], "activate");
+        assert_eq!(args["tool"], "mcp__fixture__echo");
+    }
+
+    #[test]
+    fn mcp_browser_wraps_status_and_keeps_the_composer_out_of_both_panes() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for (width, height) in [(40, 24), (60, 20), (100, 30)] {
+            let mut app = app();
+            app.composer.set_input("COMPOSER_SENTINEL".into());
+            app.status = "Connected to fixture; tool is available and requires explicit activation. STATUS_END".into();
+            app.overlay = Some(Overlay::mcp(
+                vec![OverlayItem {
+                    label: "mcp__fixture__echo".into(),
+                    description: "Echo".into(),
+                }],
+                Default::default(),
+            ));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| ui(f, &app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(!text.contains("COMPOSER_SENTINEL"));
+            assert!(text.contains("[available]"));
+            assert!(text.contains("STATUS_END"));
+            assert!(text.contains("back/close"));
         }
     }
 
@@ -6248,8 +6555,20 @@ mod tests {
         let mut a = app();
         a.composer.set_input("/m".into());
         a.composer.refresh_hint();
-        a.composer.hint.as_mut().unwrap().move_by(2); // highlight /model
-        assert_eq!(a.composer.hint.as_ref().unwrap().chosen().as_deref(), Some("/model"));
+        let index = a
+            .composer
+            .hint
+            .as_ref()
+            .unwrap()
+            .matches()
+            .iter()
+            .position(|(_, item)| item.label == "/model")
+            .unwrap();
+        a.composer.hint.as_mut().unwrap().move_by(index as isize);
+        assert_eq!(
+            a.composer.hint.as_ref().unwrap().chosen().as_deref(),
+            Some("/model")
+        );
 
         // One more character narrows the list; the selection must stay valid
         // rather than pointing past the end or silently resetting.

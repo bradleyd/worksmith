@@ -26,6 +26,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     pub web: WebConfig,
     pub tui: TuiConfig,
+    /// Named, explicitly enabled local MCP programs. Never launched at startup.
+    pub mcp: std::collections::BTreeMap<String, crate::mcp::ServerConfig>,
     /// Per-model settings, keyed by the same `provider/model` spec you put in
     /// `model`. One table because three things want the same key: what a model
     /// costs, how it should be sampled, and (later) which models `/model`
@@ -417,6 +419,9 @@ impl Config {
     /// feature that was switched off. `every_config_field_survives_the_merge`
     /// exists so the next one fails a test instead of a dogfooding session.
     fn merge(&mut self, other: Config) {
+        // A server entry is an executable identity; never mix launch arguments
+        // or credentials from different config layers.
+        self.mcp.extend(other.mcp);
         if other.model.is_some() {
             self.model = other.model;
         }
@@ -904,6 +909,27 @@ pub fn load_project_instructions(start: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_mcp_entries_replace_the_entire_launch_identity() {
+        let mut global: Config = toml::from_str(r#"
+            [mcp.issues]
+            enabled = true
+            command = "/global/server"
+            args = ["--old"]
+            [mcp.issues.env]
+            TOKEN = "OLD_TOKEN"
+        "#).unwrap();
+        let project: Config = toml::from_str(r#"
+            [mcp.issues]
+            enabled = true
+            command = "/project/server"
+        "#).unwrap();
+        global.merge(project);
+        assert_eq!(global.mcp["issues"].command, "/project/server");
+        assert!(global.mcp["issues"].args.is_empty());
+        assert!(global.mcp["issues"].env.is_empty());
+    }
 
     #[test]
     fn loopback_prices_default_to_free_but_hosted_prices_remain_unknown() {

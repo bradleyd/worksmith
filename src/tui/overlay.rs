@@ -2,6 +2,9 @@ use std::collections::HashSet;
 
 pub(super) enum OverlayKind {
     Picker,
+    Mcp {
+        active: HashSet<String>,
+    },
     Reference,
     Skills { names: HashSet<String>, loaded: HashSet<String> },
 }
@@ -45,7 +48,7 @@ pub(super) struct Overlay {
     pub(super) preview_max_scroll: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct OverlayItem {
     pub(super) label: String,
     pub(super) description: String,
@@ -94,6 +97,36 @@ impl Overlay {
         overlay
     }
 
+    pub(super) fn mcp(items: Vec<OverlayItem>, active: HashSet<String>) -> Self {
+        let mut overlay = Self::reference("MCP servers and tools", items);
+        overlay.kind = OverlayKind::Mcp { active };
+        overlay
+    }
+
+    pub(super) fn update_mcp(&mut self, items: Vec<OverlayItem>, active: HashSet<String>) {
+        let chosen = self.chosen();
+        if self.items != items {
+            self.items = items;
+            self.set_filter(self.filter.clone());
+            if let Some(name) = chosen
+                && let Some(index) = self
+                    .matches()
+                    .iter()
+                    .position(|(_, item)| item.label == name)
+            {
+                self.selected = index;
+            }
+        }
+        self.kind = OverlayKind::Mcp { active };
+    }
+
+    pub(super) fn is_mcp_catalog(&self) -> bool {
+        matches!(self.kind, OverlayKind::Mcp { .. })
+    }
+    pub(super) fn is_two_pane(&self) -> bool {
+        self.is_skill_catalog() || self.is_mcp_catalog()
+    }
+
     pub(super) fn is_picker(&self) -> bool {
         matches!(self.kind, OverlayKind::Picker)
     }
@@ -105,6 +138,9 @@ impl Overlay {
     /// None identifies informational rows, which must not trigger loading.
     pub(super) fn skill_loaded(&self, name: &str) -> Option<bool> {
         match &self.kind {
+            OverlayKind::Mcp { active } if !name.starts_with("server:") => {
+                Some(active.contains(name))
+            }
             OverlayKind::Skills { names, loaded } if names.contains(name) => {
                 Some(loaded.contains(name))
             }
@@ -162,7 +198,7 @@ impl Overlay {
     }
 
     pub(super) fn scroll_by(&mut self, delta: isize) {
-        if self.is_skill_catalog() && self.skill_focus == SkillFocus::Preview {
+        if self.is_two_pane() && self.skill_focus == SkillFocus::Preview {
             self.preview_scroll =
                 self.preview_scroll.saturating_add_signed(delta).min(self.preview_max_scroll);
         } else {
@@ -171,7 +207,7 @@ impl Overlay {
     }
 
     pub(super) fn jump(&mut self, bottom: bool) {
-        if self.is_skill_catalog() && self.skill_focus == SkillFocus::Preview {
+        if self.is_two_pane() && self.skill_focus == SkillFocus::Preview {
             self.preview_scroll = if bottom { self.preview_max_scroll } else { 0 };
         } else {
             self.selected = if bottom { self.matched.len().saturating_sub(1) } else { 0 };

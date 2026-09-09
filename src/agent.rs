@@ -554,10 +554,20 @@ impl Agent {
         self.fork_with(bus, session_id, None)
     }
 
-    /// Fork onto a different model — the cheap-workers/smart-parent split. The
-    /// override carries its own client, since a cheaper model often lives
-    /// behind a different provider rather than just a different name.
-    pub fn fork_with(&self, bus: EventBus, session_id: String, model: Option<ModelOverride>) -> Agent {
+    /// Point worker tools at their checkout while retaining project memory identity.
+    pub fn with_worker_cwd(mut self, cwd: std::path::PathBuf, project: std::path::PathBuf) -> Self {
+        self.tool_ctx.cwd = cwd;
+        self.tool_ctx.memory_cwd = Some(project);
+        self
+    }
+
+    /// Fork onto a different model, with an independent tool context.
+    pub fn fork_with(
+        &self,
+        bus: EventBus,
+        session_id: String,
+        model: Option<ModelOverride>,
+    ) -> Agent {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.session_id = session_id;
         // Workers inherit a snapshot; another agent's load/unload must not
@@ -795,101 +805,97 @@ impl Agent {
                         break TurnOutcome::Done;
                     };
 
-                    match v.validate().await {
-                        Ok(()) => {
-                            self.emit(
-                                session,
-                                Event::Validation {
-                                    ok: true,
-                                    detail: v.describe(),
-                                },
-                            );
-                            break TurnOutcome::Done;
+                    let check = crate::validation::CheckReport::record(
+                        v.describe(),
+                        v.validate().await,
+                        session.path(),
+                    )
+                    .await;
+                    let passed = check.passed;
+                    let reason = check.failure_reason();
+                    self.emit(session, Event::Validation {
+                        ok: passed,
+                        detail: check.display(),
+                        report: Some(Box::new(check)),
+                    });
+                    if passed {
+                        break TurnOutcome::Done;
+                    } else {
+                        if retries_left == 0 {
+                            break TurnOutcome::ValidationFailed(reason);
                         }
-                        Err(reason) => {
-                            self.emit(
+                        retries_left -= 1;
+                        let same_failure_count = validation_failures.record(&reason);
+                        // One failure is the loop working — that is the
+                        // whole differentiator. Two different failures can
+                        // still be progress. The same failure twice means
+                        // the re-plan did not move the check at all, and a
+                        // second identical directive is unlikely to be what
+                        // turns it around. Ask once, here, and only here.
+                        let steer = if same_failure_count == 2 {
+                            self.harness_checkpoint(
                                 session,
-                                Event::Validation {
-                                    ok: false,
-                                    detail: reason.clone(),
-                                },
-                            );
-                            if retries_left == 0 {
-                                break TurnOutcome::ValidationFailed(reason);
-                            }
-                            retries_left -= 1;
-                            let same_failure_count = validation_failures.record(&reason);
-                            // One failure is the loop working — that is the
-                            // whole differentiator. Two different failures can
-                            // still be progress. The same failure twice means
-                            // the re-plan did not move the check at all, and a
-                            // second identical directive is unlikely to be what
-                            // turns it around. Ask once, here, and only here.
-                            let steer = if same_failure_count == 2 {
-                                self.harness_checkpoint(
-                                    session,
-                                    &format!("`{}` has failed twice the same way", v.describe()),
-                                    &format!(
-                                        "The check keeps failing:\n\n{}\n\nRe-planning has not \
-                                         moved it. What should it do differently? (Enter to \
-                                         answer, Esc to let it keep trying.)",
-                                        truncate_reason(&reason)
-                                    ),
+                                &format!("`{}` has failed twice the same way", v.describe()),
+                                &format!(
+                                    "The check keeps failing:\n\n{}\n\nRe-planning has not \
+                                     moved it. What should it do differently? (Enter to \
+                                     answer, Esc to let it keep trying.)",
+                                    truncate_reason(&reason)
+                                ),
+                            )
+                            .await
+                        } else {
+                            None
+                        };
+                        let directive = match steer {
+                            Some(a) => {
+                                format!(
+                                    "The validation check {} failed twice with the same \
+                                     normalized failure:\n\n{}\n\nThe user was asked what \
+                                     to do differently and said:\n\n{}\n\nFollow that. Do \
+                                     not summarize success from a different command; make \
+                                     this required check pass.",
+                                    v.describe(),
+                                    reason,
+                                    a
                                 )
-                                .await
+                            }
+                            None if same_failure_count > 1 => {
+                                format!(
+                                    "The validation check {} failed again with the same \
+                                     normalized failure ({} times):\n\n{}\n\nDo not \
+                                     summarize success from a different command. Inspect why \
+                                     this required check is still failing, fix the underlying \
+                                     problem, then make this required check pass.",
+                                    v.describe(),
+                                    same_failure_count,
+                                    reason
+                                )
+                            }
+                            None => {
+                                format!(
+                                    "The validation check {} did not pass:\n\n{}\n\nRevise \
+                                     your approach and fix the underlying problem, then \
+                                     finish.",
+                                    v.describe(),
+                                    reason
+                                )
+                            }
+                        };
+                        self.emit(session, Event::Nudge {
+                            reason: if same_failure_count > 1 {
+                                format!(
+                                    "validation failed the same way; re-planning \
+                                     ({retries_left} retries left)"
+                                )
                             } else {
-                                None
-                            };
-                            let directive = match steer {
-                                Some(a) => {
-                                    format!(
-                                        "The validation check {} failed twice with the same \
-                                         normalized failure:\n\n{}\n\nThe user was asked what \
-                                         to do differently and said:\n\n{}\n\nFollow that. Do \
-                                         not summarize success from a different command; make \
-                                         this required check pass.",
-                                        v.describe(),
-                                        reason,
-                                        a
-                                    )
-                                }
-                                None if same_failure_count > 1 => {
-                                    format!(
-                                        "The validation check {} failed again with the same \
-                                         normalized failure ({} times):\n\n{}\n\nDo not \
-                                         summarize success from a different command. Inspect why \
-                                         this required check is still failing, fix the underlying \
-                                         problem, then make this required check pass.",
-                                        v.describe(),
-                                        same_failure_count,
-                                        reason
-                                    )
-                                }
-                                None => {
-                                    format!(
-                                        "The validation check {} did not pass:\n\n{}\n\nRevise \
-                                         your approach and fix the underlying problem, then \
-                                         finish.",
-                                        v.describe(),
-                                        reason
-                                    )
-                                }
-                            };
-                            self.emit(session, Event::Nudge {
-                                reason: if same_failure_count > 1 {
-                                    format!(
-                                        "validation failed the same way; re-planning \
-                                         ({retries_left} retries left)"
-                                    )
-                                } else {
-                                    format!(
-                                        "validation failed; re-planning ({retries_left} retries \
-                                         left)"
-                                    )
-                                },
-                            });
-                            session.append_message(Message::user(directive))?;
-                        }
+                                format!(
+                                    "validation failed; re-planning ({retries_left} retries \
+                                     left)"
+                                )
+                            },
+                        });
+                        session.append_message(Message::user(directive))?;
                     }
                 }
             }
@@ -917,6 +923,10 @@ impl Agent {
         active: &ActiveModel,
         edits: &std::sync::Arc<AtomicUsize>,
     ) -> Result<IdleReason> {
+        let mut tool_ctx = self.tool_ctx.clone();
+        tool_ctx.cancel = cancel.clone();
+        tool_ctx.session_id = session.id.clone();
+        tool_ctx.mcp_session_path = Some(session.path().to_path_buf());
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut nudged: HashSet<String> = HashSet::new();
         let mut empty_completions = 0u32;
@@ -995,14 +1005,14 @@ impl Agent {
             // chases its own tail. One shrink, then compact, then stop.
             let mut shrunk = false;
             let mut compacted_here = false;
+            let tools = self.advertised_tools();
             let completion = loop {
-                let tools = self.advertised_tools();
                 request_parts.breakdown.tool_schema_tokens =
                     tokens_u32(estimate_tool_schema_tokens(&tools));
                 let req = ChatRequest {
                     model: active.model.clone(),
                     messages: request_parts.messages.clone(),
-                    tools,
+                    tools: tools.clone(),
                     context_breakdown: Some(request_parts.breakdown),
                     temperature: active.temperature,
                     top_p: active.top_p,
@@ -1217,7 +1227,15 @@ impl Agent {
                 let (ok, fatal, raw) =
                     match serde_json::from_str::<serde_json::Value>(&call.arguments) {
                         Ok(v) => {
-                            let o = self.registry.run(&call.name, v, &self.tool_ctx).await;
+                            let o = self
+                                .run_tool_recorded(
+                                    session,
+                                    &call.name,
+                                    v,
+                                    &tool_ctx,
+                                    tools.iter().find(|def| def.name == call.name),
+                                )
+                                .await;
                             (!o.is_error, o.fatal, o.content)
                         }
                         Err(e) => {
@@ -1396,11 +1414,79 @@ impl Agent {
     /// on — not advertising it is what makes `/pair off` free rather than
     /// merely polite.
     pub fn advertised_tools(&self) -> Vec<crate::llm::ToolDef> {
-        let mut defs = self.registry.defs();
+        let ctx = self.current_tool_context();
+        let mut defs = self.registry.defs_for(&ctx);
         if !self.pairing_on() {
             defs.retain(|d| d.name != "checkpoint");
         }
         defs
+    }
+
+    fn current_tool_context(&self) -> ToolContext {
+        let mut ctx = self.tool_ctx.clone();
+        if let Some(path) = self.accounting_path.lock().unwrap().as_ref()
+            && let Some(id) = path.file_stem().and_then(|id| id.to_str())
+        {
+            ctx.session_id = id.to_string();
+            ctx.mcp_session_path = Some(path.clone());
+        }
+        ctx
+    }
+
+    /// Inspect cached MCP state without activating tools or contacting servers.
+    pub fn mcp_browser(&self) -> Vec<crate::mcp::BrowserItem> {
+        self.registry.mcp_browser(&self.current_tool_context())
+    }
+
+    /// End session-owned MCP processes while recording their shutdown.
+    pub async fn close_mcp(&self, session: &mut Session) {
+        let _ = self
+            .mcp_command(
+                session,
+                serde_json::json!({"action":"disconnect"}),
+                CancellationToken::new(),
+            )
+            .await;
+    }
+
+    /// Frontend controls use the same approval and recorded execution path.
+    pub async fn mcp_command(
+        &self,
+        session: &mut Session,
+        args: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> crate::tools::ToolOutput {
+        let mut ctx = self.current_tool_context();
+        ctx.session_id = session.id.clone();
+        ctx.mcp_session_path = Some(session.path().to_path_buf());
+        ctx.cancel = cancel;
+        self.run_tool_recorded(session, "mcp", args, &ctx, None)
+            .await
+    }
+
+    async fn run_tool_recorded(
+        &self,
+        session: &mut Session,
+        name: &str,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+        advertised: Option<&crate::llm::ToolDef>,
+    ) -> crate::tools::ToolOutput {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ctx = ctx.clone();
+        ctx.mcp_events = Some(tx);
+        let run = self.registry.run_snapshot(name, args, &ctx, advertised);
+        tokio::pin!(run);
+        let out = loop {
+            tokio::select! {
+                event = rx.recv() => if let Some(event) = event { self.emit(session, event); },
+                out = &mut run => break out,
+            }
+        };
+        while let Ok(event) = rx.try_recv() {
+            self.emit(session, event);
+        }
+        out
     }
 
     /// One model call: forwards stream events to the bus and brackets it with
@@ -2498,7 +2584,7 @@ mod checkpoint_tests {
 
     #[async_trait]
     impl Validator for AlwaysFails {
-        async fn validate(&self) -> Result<(), String> {
+        async fn validate(&self) -> Result<crate::validation::CheckOutput, String> {
             Err(self.0.to_string())
         }
         fn describe(&self) -> String {
@@ -2510,7 +2596,7 @@ mod checkpoint_tests {
 
     #[async_trait]
     impl Validator for FailsInOrder {
-        async fn validate(&self) -> Result<(), String> {
+        async fn validate(&self) -> Result<crate::validation::CheckOutput, String> {
             let mut failures = self.0.lock().unwrap();
             if failures.len() > 1 {
                 Err(failures.remove(0).to_string())

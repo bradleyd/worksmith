@@ -50,6 +50,7 @@ impl WorkerStatus {
 
 #[derive(Default)]
 struct Runtime {
+    workspace: Option<String>,
     accounting: crate::metrics::Totals,
     status: WorkerStatus,
     last: String,
@@ -80,6 +81,7 @@ struct Runtime {
     /// check ran, which is a much weaker claim than a passing one: a worker
     /// with no validator reports Done merely because the model stopped talking.
     check_passed: Option<bool>,
+    validation: Option<crate::validation::CheckReport>,
     /// When this worker reached a terminal state. Recorded where the status is
     /// set rather than where a reader notices, so it is when the work ended and
     /// not when someone last looked.
@@ -92,6 +94,7 @@ const EMPTY_RESULT_CHARS: usize = 40;
 /// A point-in-time view of a worker for display.
 #[derive(Clone)]
 pub struct WorkerSummary {
+    pub workspace: Option<String>,
     pub id: String,
     pub task: String,
     pub status: WorkerStatus,
@@ -117,6 +120,7 @@ pub struct WorkerSummary {
     /// important fact about a finished worker and, until now, the only one that
     /// never reached the transcript.
     pub check_passed: Option<bool>,
+    pub validation: Option<crate::validation::CheckReport>,
     /// When it was spawned, and when it reached a terminal state.
     pub started: SystemTime,
     pub finished: Option<SystemTime>,
@@ -141,7 +145,7 @@ struct Worker {
     /// whether it landed a second ago or half an hour ago, which is the
     /// difference between "act on this" and "this is history".
     started: SystemTime,
-    _handle: JoinHandle<()>,
+    _handle: Option<JoinHandle<()>>,
 }
 
 impl WorkerSummary {
@@ -175,6 +179,7 @@ impl Worker {
     fn summary(&self) -> WorkerSummary {
         let r = self.runtime.lock().unwrap();
         WorkerSummary {
+            workspace: r.workspace.clone(),
             id: self.id.clone(),
             task: self.task.clone(),
             status: r.status,
@@ -190,6 +195,7 @@ impl Worker {
             group: self.group,
             model: self.model.clone(),
             check_passed: r.check_passed,
+            validation: r.validation.clone(),
             started: self.started,
             finished: r.finished,
         }
@@ -209,8 +215,18 @@ pub struct WorkerSpend {
     pub cost: f64,
 }
 
+/// Selected explicitly before a spawn request; queued tasks retain this value.
+#[derive(Debug, Clone, Default)]
+pub enum WorkerWorkspace {
+    #[default]
+    Unprepared,
+    Shared,
+    Isolated(crate::workspace::Base),
+}
+
 /// A task waiting for a free worker slot.
 struct PendingTask {
+    workspace: WorkerWorkspace,
     parent_session: Option<PathBuf>,
     task: String,
     system: String,
@@ -254,6 +270,7 @@ pub struct FanOutReport {
 
 /// Tracks spawned workers and enforces the concurrency cap.
 pub struct WorkerManager {
+    workspace: WorkerWorkspace,
     parent_session: Option<PathBuf>,
     template: Arc<Agent>,
     cwd: PathBuf,
@@ -281,6 +298,7 @@ impl WorkerManager {
         Self {
             template,
             cwd,
+            workspace: WorkerWorkspace::Unprepared,
             max,
             supervisor: SupervisorConfig::default(),
             default_model: None,
@@ -294,6 +312,67 @@ impl WorkerManager {
             retired_tokens: HashMap::new(),
             parent_session: None,
         }
+    }
+
+    /// Validate a request before accepting it. There is no implicit shared fallback.
+    pub async fn prepare_spawn(&mut self, shared: bool) -> anyhow::Result<()> {
+        self.workspace = WorkerWorkspace::Unprepared;
+        self.workspace = if shared {
+            WorkerWorkspace::Shared
+        } else {
+            WorkerWorkspace::Isolated(crate::workspace::Base::capture(&self.cwd).await?)
+        };
+        Ok(())
+    }
+
+    /// Explicit shared execution, primarily for callers already owning their workspace.
+    pub fn with_shared_workspace(mut self) -> Self {
+        self.workspace = WorkerWorkspace::Shared;
+        self
+    }
+
+    pub fn workspace(&self) -> WorkerWorkspace {
+        self.workspace.clone()
+    }
+    pub fn set_workspace(&mut self, workspace: WorkerWorkspace) {
+        self.workspace = workspace;
+    }
+
+    /// Stop and join before a parent session is replaced or shut down.
+    pub async fn shutdown(&mut self) {
+        self.drop_queued();
+        for worker in &self.workers {
+            worker.cancel.cancel();
+        }
+        for worker in &mut self.workers {
+            if let Some(handle) = worker._handle.take() {
+                let _ = handle.await;
+            }
+        }
+    }
+
+    pub fn workspace_id(&self, id: &str) -> String {
+        self.workers
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.session_id.clone())
+            .unwrap_or_else(|| id.into())
+    }
+
+    pub async fn review(
+        &self,
+        action: &str,
+        id: Option<&str>,
+        confirmed: bool,
+    ) -> anyhow::Result<String> {
+        let durable = id.map(|id| {
+            self.workers
+                .iter()
+                .find(|w| w.id == id)
+                .map(|w| w.session_id.as_str())
+                .unwrap_or(id)
+        });
+        crate::workspace::review(&self.cwd, action, durable, confirmed).await
     }
 
     pub fn set_parent_session(&mut self, path: PathBuf) {
@@ -379,13 +458,25 @@ impl WorkerManager {
         model: Option<ModelOverride>,
         validate: Option<String>,
     ) -> Result<SpawnOutcome, String> {
-        let model = model.or_else(|| self.default_model.clone());
-        let validate = validate.or_else(|| self.default_validate.clone());
+        if matches!(self.workspace, WorkerWorkspace::Unprepared) {
+            return Err(
+                "prepare an isolated spawn first or explicitly select shared execution".into(),
+            );
+        }
+        let pending = PendingTask {
+            task,
+            system,
+            group,
+            model: model.or_else(|| self.default_model.clone()),
+            validate: validate.or_else(|| self.default_validate.clone()),
+            parent_session: self.parent_session.clone(),
+            workspace: self.workspace.clone(),
+        };
         if self.running_count() >= self.max {
-            self.queued.push_back(PendingTask { task, system, group, model, validate, parent_session: self.parent_session.clone() });
+            self.queued.push_back(pending);
             return Ok(SpawnOutcome::Queued(self.queued.len()));
         }
-        self.start(task, system, group, model, validate, self.parent_session.clone()).map(SpawnOutcome::Started)
+        self.start(pending).map(SpawnOutcome::Started)
     }
 
     /// Spawn one worker per task. More than one becomes a *group*: they're
@@ -460,7 +551,7 @@ impl WorkerManager {
             let Some(p) = self.queued.pop_front() else {
                 break;
             };
-            match self.start(p.task, p.system, p.group, p.model, p.validate, p.parent_session) {
+            match self.start(p) {
                 Ok(id) => started.push(id),
                 Err(_) => continue, // couldn't create a session; skip this one
             }
@@ -486,20 +577,27 @@ impl WorkerManager {
     }
 
     /// Actually launch a worker. Callers gate on the concurrency cap.
-    fn start(
-        &mut self,
-        task: String,
-        system: String,
-        group: Option<u64>,
-        model: Option<ModelOverride>,
-        validate: Option<String>,
-        parent_session: Option<PathBuf>,
-    ) -> Result<String, String> {
+    fn start(&mut self, pending: PendingTask) -> Result<String, String> {
+        let PendingTask {
+            task,
+            system,
+            group,
+            model,
+            validate,
+            parent_session,
+            workspace,
+        } = pending;
         self.counter += 1;
         let id = format!("w{}", self.counter);
 
         let session = Session::create(&self.cwd).map_err(|e| format!("session: {e}"))?;
         let session_id = session.id.clone();
+        let parent_id = parent_session
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or(&session_id)
+            .to_owned();
         if let Some(path) = parent_session {
             crate::session::link_worker(&path, &crate::session::WorkerLink {
                 id: id.clone(), session_id: session_id.clone(),
@@ -530,6 +628,7 @@ impl WorkerManager {
         drop(bus); // the forked agent keeps a sender clone
 
         let runtime = Arc::new(Mutex::new(Runtime {
+            workspace: None,
             status: WorkerStatus::Running,
             last: "starting…".into(),
             tool_calls: 0,
@@ -543,6 +642,7 @@ impl WorkerManager {
             finished: None,
             prompt_tokens: 0,
             check_passed: None,
+            validation: None,
             accounting: Default::default(),
         }));
 
@@ -551,31 +651,100 @@ impl WorkerManager {
         let cancel_task = cancel.clone();
         let cancel_sup = cancel.clone();
         let task_run = task.clone();
-        // A worker validates in the same tree it edits. That is fine for a lone
-        // worker and a known hazard for a fan-out — N workers running the same
-        // check concurrently in one cwd is the collision M11 exists to fix — so
-        // this is opt-in rather than inherited from the session.
-        let validator = validate
-            .as_ref()
-            .map(|c| CommandValidator::new(c.clone(), self.cwd.clone(), self.bash_timeout));
+        let bash_timeout = self.bash_timeout;
         let mut supervisor = Supervisor::new(self.supervisor.clone());
         let steer_sup = steering.clone();
         let cwd = self.cwd.clone();
         let handle = tokio::spawn(async move {
             let mut session = session;
-            let agent = agent;
-            let memory_context = crate::memory::MemoryStore::open(Some(&cwd))
-                .ok()
-                .and_then(|mem| mem.turn_context(&task_run, agent.context_limit()).ok().flatten());
-            let turn =
-                agent.run_turn_with_context(
-                    &mut session,
-                    &task_run,
-                    &system,
-                    memory_context,
-                    validator.as_ref().map(|v| v as &dyn crate::validation::Validator),
-                    cancel_task,
-                );
+            let mut agent = agent;
+            let mut retained = match workspace {
+                WorkerWorkspace::Isolated(base) => match crate::workspace::Workspace::new(
+                    base,
+                    &parent_id,
+                    &session.id,
+                    validate.clone(),
+                ) {
+                    Ok(workspace) => Some(workspace),
+                    Err(e) => {
+                        fail_setup(&rt, &e.to_string());
+                        return;
+                    }
+                },
+                WorkerWorkspace::Shared => None,
+                WorkerWorkspace::Unprepared => {
+                    fail_setup(&rt, "workspace not prepared");
+                    return;
+                }
+            };
+            rt.lock().unwrap().workspace = retained.as_ref().map(|w| w.id.clone());
+            let _workspace_lock = if let Some(workspace) = &retained {
+                match workspace.lock() {
+                    Ok(lock) => Some(lock),
+                    Err(e) => {
+                        fail_setup(&rt, &e.to_string());
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let project_cwd = cwd;
+            let cwd = if let Some(workspace) = &mut retained {
+                rt.lock().unwrap().last = "preparing worktree…".into();
+                if let Err(e) = workspace.create(&cancel_task).await {
+                    fail_setup(&rt, &e.to_string());
+                    return;
+                }
+                match workspace.cwd() {
+                    Ok(path) => path,
+                    Err(e) => {
+                        fail_setup(&rt, &e.to_string());
+                        return;
+                    }
+                }
+            } else {
+                project_cwd.clone()
+            };
+            agent = agent.with_worker_cwd(cwd.clone(), project_cwd.clone());
+            let validator = validate.as_ref().map(|c| {
+                CommandValidator::new(c.clone(), cwd.clone(), bash_timeout)
+                    .with_cancel(cancel_task.clone())
+            });
+            let memory = crate::memory::MemoryStore::open(Some(&project_cwd)).ok();
+            let system =
+                if retained.is_some() && system.starts_with(crate::prompt::BASE_SYSTEM_PROMPT) {
+                    memory
+                        .as_ref()
+                        .map(|mem| crate::prompt::build_worker_prompt(&cwd, mem))
+                        .unwrap_or(system)
+                } else {
+                    system
+                };
+            let system = format!(
+                "{system}\nWorker execution directory: {}. Use relative paths here. {}",
+                cwd.display(),
+                if retained.is_some() {
+                    "Isolated changes await explicit parent review; do not apply them to the parent checkout."
+                } else {
+                    "Shared execution: edits change the parent's files directly."
+                }
+            );
+            let memory_context = memory.and_then(|mem| {
+                mem.turn_context(&task_run, agent.context_limit())
+                    .ok()
+                    .flatten()
+            });
+            let turn = agent.run_turn_with_context(
+                &mut session,
+                &task_run,
+                &system,
+                memory_context,
+                validator
+                    .as_ref()
+                    .map(|v| v as &dyn crate::validation::Validator),
+                cancel_task,
+            );
             tokio::pin!(turn);
             // Absolute deadline for the idle rule, pushed out by every event.
             let idle = supervisor.idle_timeout();
@@ -615,31 +784,52 @@ impl WorkerManager {
                         while let Ok(e) = rx.try_recv() {
                             pending.push(e);
                         }
-                        let mut g = rt.lock().unwrap();
-                        for e in pending {
-                            update_last(&mut g, e, &cwd);
-                        }
-                        match res {
-                            Ok(r) => {
-                                g.result = r.text.clone();
-                                if r.outcome.is_success() {
-                                    g.status = WorkerStatus::Done;
-                                    g.last = "done".into();
-                                } else {
-                                    g.status = WorkerStatus::Stopped;
-                                    g.last = r.outcome.label();
+                        let (mut status, passed, note) = {
+                            let mut g = rt.lock().unwrap();
+                            for e in pending {
+                                update_last(&mut g, e, &cwd);
+                            }
+                            match res {
+                                Ok(r) => {
+                                    g.result = r.text.clone();
+                                    if r.outcome.is_success() {
+                                        g.status = WorkerStatus::Done;
+                                        g.last = "done".into();
+                                    } else {
+                                        g.status = WorkerStatus::Stopped;
+                                        g.last = r.outcome.label();
+                                    }
+                                }
+                                Err(e) => {
+                                    g.status = WorkerStatus::Failed;
+                                    let msg = e.to_string();
+                                    g.last = first_line(&msg);
+                                    g.result = msg;
                                 }
                             }
-                            Err(e) => {
-                                g.status = WorkerStatus::Failed;
-                                let msg = e.to_string();
-                                g.last = first_line(&msg);
-                                g.result = msg;
+                            apply_escalation(&mut g);
+                            // Every terminal path above lands here, so one stamp
+                            // covers done, stopped, failed and escalated alike.
+                            let status = g.status;
+                            let passed = g.check_passed;
+                            let note = g.last.clone();
+                            g.status = WorkerStatus::Running;
+                            g.last = "capturing worker result…".into();
+                            (status, passed, note)
+                        };
+                        if let Some(workspace) = &mut retained {
+                            workspace.validation = rt.lock().unwrap().validation.clone();
+                            let result = workspace.finish(passed, note.clone()).await;
+                            let mut g = rt.lock().unwrap();
+                            match result {
+                                Ok(paths) => g.changed = paths,
+                                Err(e) => { status = WorkerStatus::Failed; g.result.push_str(&format!("\nResult capture failed: {e}")); },
                             }
+
                         }
-                        apply_escalation(&mut g);
-                        // Every terminal path above lands here, so one stamp
-                        // covers done, stopped, failed and escalated alike.
+                        let mut g = rt.lock().unwrap();
+                        g.status = status;
+                        g.last = if retained.is_some() { "stopped; result retained for review".into() } else { note };
                         g.finished = Some(SystemTime::now());
                         break;
                     }
@@ -657,7 +847,7 @@ impl WorkerManager {
             cancel,
             steering,
             reported: false,
-            _handle: handle,
+            _handle: Some(handle),
             started: SystemTime::now(),
             model_prices,
         });
@@ -768,6 +958,22 @@ impl WorkerManager {
     }
 }
 
+impl Drop for WorkerManager {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            worker.cancel.cancel();
+        }
+    }
+}
+
+fn fail_setup(runtime: &Mutex<Runtime>, message: &str) {
+    let mut state = runtime.lock().unwrap();
+    state.status = WorkerStatus::Failed;
+    state.last = format!("workspace setup failed: {message}");
+    state.result = state.last.clone();
+    state.finished = Some(SystemTime::now());
+}
+
 /// Carry out a supervisor decision: nudge = steer the worker's next step;
 /// escalate = pull it off the floor (cancel) and record why.
 fn apply(
@@ -847,7 +1053,7 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
             }
         }
         Event::Nudge { reason } => log_line(g, format!("↻ {reason}")),
-        Event::Validation { ok, detail } => {
+        Event::Validation { ok, detail, .. } => {
             log_line(g, format!("{} {detail}", if *ok { "✓" } else { "✗" }))
         }
         Event::Warning { message } => log_line(g, format!("⚠ {message}")),
@@ -880,7 +1086,8 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
             g.prompt_tokens += prompt_tokens as u64;
         }
         Event::Nudge { reason } => g.last = format!("↻ {reason}"),
-        Event::Validation { ok, .. } => {
+        Event::Validation { ok, report, .. } => {
+            g.validation = report.map(|report| *report);
             g.check_passed = Some(ok);
             g.last = if ok { "✓ validated".into() } else { "✗ validation failed".into() }
         }
@@ -1001,6 +1208,7 @@ mod log_tests {
     #[test]
     fn the_log_keeps_only_its_last_lines() {
         let mut rt = Runtime {
+            workspace: None,
             status: WorkerStatus::Running,
             last: String::new(),
             tool_calls: 0,
@@ -1014,6 +1222,7 @@ mod log_tests {
             finished: None,
             prompt_tokens: 0,
             check_passed: None,
+            validation: None,
             accounting: Default::default(),
         };
         for i in 0..(LOG_LINES + 50) {

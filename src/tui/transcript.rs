@@ -29,6 +29,8 @@ pub(super) enum Kind {
     Tool,
     ToolResult,
     Diff,
+    /// Explicit review stays expanded even when tool previews are collapsed.
+    ReviewDiff,
     Notice,
     Error,
     /// A pairing checkpoint. Its own channel on purpose: rendered as a notice
@@ -318,8 +320,8 @@ fn item_rows(
         if item.kind == Kind::Thinking && !show_thinking {
             return;
         }
-        if item.kind == Kind::Diff {
-            render_diff(rows, &item.text, collapse_tools, width);
+        if matches!(item.kind, Kind::Diff | Kind::ReviewDiff) {
+            render_diff(rows, &item.text, collapse_tools && item.kind == Kind::Diff, width);
             rows.push(Line::from(""));
             return;
         }
@@ -385,7 +387,7 @@ fn kind_style(kind: Kind) -> (Style, &'static str) {
             (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
         }
         Kind::Error => (Style::default().fg(Color::Red), "! "),
-        Kind::Diff => unreachable!("diffs are rendered before kind styling"),
+        Kind::Diff | Kind::ReviewDiff => unreachable!("diffs are rendered before kind styling"),
     }
 }
 

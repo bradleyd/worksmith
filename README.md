@@ -11,6 +11,15 @@ The model stops when the test passes, not when it says so.
 The [docs](https://worksmith.sh/) go over the same ground in more depth. The
 loop, the evals, and the configuration reference are all there.
 
+> **Use MCP at your own risk. MCP servers are not sandboxed.** An approved
+> server runs with your user account's permissions and can read, modify, or delete
+> accessible files and make network requests, including during startup. Commands
+> it runs internally bypass Worksmith's command safety checks. Only launch servers
+> you trust. OS-enforced process sandboxing is planned future work; it is not
+> implemented today. Approval prompts, timeouts, and worktrees do not provide it.
+
+See the [MCP setup and limitations](docs/mcp.md) before enabling a server.
+
 ## Why I built this
 
 There is a lot of room between one-shotting a prompt and turning an agent loose
@@ -370,12 +379,18 @@ One table, because prices, sampling, and window all want the same key.
 
 ## Status
 
-Everything in the next section works today. MCP and a real sandbox are still
-ahead. [`PLAN.md`](PLAN.md) records the loose roadmap and
+Everything in the next section works today. Parent-only local stdio MCP is
+available; OS-enforced process sandboxing remains planned future work. [`PLAN.md`](PLAN.md) records the loose roadmap and
 [`worksmith-memory-v1.md`](worksmith-memory-v1.md) records the memory design,
 but the feature reference below is the current source of truth for what ships.
 
 ## What works today
+
+Workers use detached Git worktrees by default and require a clean checkout.
+Review with `/agents diff <id>`, then explicitly `/agents apply <id>`.
+`/spawn --shared` opts into editing the parent's directory directly.
+See [worker worktrees](docs/worktrees.md) for prerequisites, retained results,
+conflict handling, and headless commands. Worktrees are not a security sandbox.
 
 - **Streaming, tool-calling agent loop** against any OpenAI-compatible endpoint
   (vLLM/Qwen, OpenRouter, RunPod, local).

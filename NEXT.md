@@ -1,7 +1,18 @@
 # What to do next
 
-Updated after prompt/cache validation on 2026-09-08. `LOOSE_ENDS.md`
+Updated after MCP, worktree, and worker-result implementation on 2026-09-09. `LOOSE_ENDS.md`
 keeps the longer forensic notes; this file is the short operational list.
+
+## Implementation update
+
+Parent-only MCP, the first M11 worker-worktree slice, and readable worker validation
+results are implemented in this change. Usage is in
+[`docs/mcp.md`](docs/mcp.md) and [`docs/worktrees.md`](docs/worktrees.md).
+Worktrees require a clean starting checkout unless `--shared` is explicitly used.
+They do not provide OS sandboxing; that design is tracked in GitHub issue #2.
+The release history and earlier validation baseline below describe the prior
+merged state before this change. The next priority is session storage cleanup;
+do not create another tag until it is complete.
 
 ## Current stopping point
 
@@ -15,9 +26,14 @@ keeps the longer forensic notes; this file is the short operational list.
 - current README, quickstart, guide index, and `config.example.toml` updates.
 
 M9 metrics (`c4268f7`) and command overlays/skill management (`9a6ba4a`) are
-merged into `main` and pushed. Current branch: `codex/prompt-cache-validation`.
-This branch contains provider probes, captured results, and documentation only;
-production memory placement remains unchanged.
+merged into `main` and pushed. The prompt/cache validation pass is also merged;
+production memory placement remains unchanged. MCP was documentation-only at that
+merged baseline; see the working-tree update above for subsequent implementation.
+
+Fresh-start handoff: `FRESH_START.md`. Suggested first slice: **parent-only MCP**.
+M11 worker isolation is a separate priority and a prerequisite for worker MCP,
+not for parent-only MCP. Both precede expanded worker integration; M12 follows.
+See `MCP_PLAN.md` for the product design and acceptance gates.
 
 ## Checks for this slice
 
@@ -73,10 +89,9 @@ with different failures. A tool-enabled exploratory sample did not execute retur
 tool calls and cannot establish completed-agent quality. Production placement stays
 unchanged. Next gate: completed tool-loop fixture tasks with observed/fixed provider
 routing, followed by cross-turn, compaction, and resume coverage if placement moves.
-See `docs/content/guide/prompt-cache-results.md`. This validation branch remains
-uncommitted.
+See `docs/content/guide/prompt-cache-results.md`. The validation pass is merged into `main`.
 
-Review and dogfood this change before M12. Historical sessions cannot
+Review and dogfood the merged changes while implementing M11. Historical sessions cannot
 recover missing prices or worker links; cache-discount billing remains outside
 this pass. Failed or interrupted requests with no returned usage are not billed
 by this accounting.
@@ -110,9 +125,46 @@ Success criteria:
 - the metrics display stays out of the transcript and does not block transcript
   scrolling.
 
-## 3. M12 per-role model routing
+## 3. M11 worker worktrees
 
-Do this after the metrics second pass, because routing needs measurement.
+Implemented in the working tree: [`WORKTREE_PLAN.md`](WORKTREE_PLAN.md). Clean-commit
+detached worktrees, retained results, and explicit guarded apply are available.
+See [`docs/worktrees.md`](docs/worktrees.md) for usage. Dirty snapshots
+and non-Git copies are deferred; OS sandboxing is tracked separately in issue #2.
+
+This is a priority before expanding worker tools and role routing. Parent-only
+MCP can proceed independently, as described in `MCP_PLAN.md`. Keep these as
+separate implementation slices; worker MCP waits for both.
+
+Each worker should be able to run in its own git worktree or scratch overlay,
+then report a diff for the parent to accept. That fixes fan-out collisions,
+makes worker undo real, and lets write-heavy validation run without leaving
+failed attempts in the user's live tree.
+
+Do not call it a full security sandbox. It is filesystem isolation and review
+semantics first.
+
+## 4. Session store cleanup — required before the next tag
+
+The real session store has been polluted by test and eval runs, and
+`most_recent_for_cwd` still crawls a flat directory. This matters more now that
+`/history`, `/metrics <session-id>`, `--resume`, workers, and evals all depend
+on sessions.
+
+Do not create another tagged release until this cleanup is complete. Include the
+new per-session validation logs in the storage and retention design.
+
+Cheap first cut:
+
+- make tests and evals default to an isolated `WORKSMITH_HOME`;
+- keep real user sessions out of temp/eval storage;
+- add enough indexing or directory structure that resume does not parse every
+  session file.
+
+## 5. M12 per-role model routing
+
+Do this after M11 and the initial MCP integration. Metrics now provide the
+measurement foundation; isolated worker execution takes priority.
 
 The harness already makes model calls that are not the user's main turn:
 compaction, memory extraction/classification, fan-out planning, and synthesis or
@@ -131,33 +183,6 @@ judge = "openrouter/qwen/qwen3.8-27b"
 
 Keep this mechanical: call-site role -> configured model -> existing
 `client_for` path. Avoid task-kind auto-classification for now.
-
-## 4. Session store cleanup
-
-The real session store has been polluted by test and eval runs, and
-`most_recent_for_cwd` still crawls a flat directory. This matters more now that
-`/history`, `/metrics <session-id>`, `--resume`, workers, and evals all depend
-on sessions.
-
-Cheap first cut:
-
-- make tests and evals default to an isolated `WORKSMITH_HOME`;
-- keep real user sessions out of temp/eval storage;
-- add enough indexing or directory structure that resume does not parse every
-  session file.
-
-## 5. M11 worker worktrees
-
-This is the next large safety/usefulness project, but it is larger than the
-metrics and routing work.
-
-Each worker should be able to run in its own git worktree or scratch overlay,
-then report a diff for the parent to accept. That fixes fan-out collisions,
-makes worker undo real, and lets write-heavy validation run without leaving
-failed attempts in the user's live tree.
-
-Do not call it a full security sandbox. It is filesystem isolation and review
-semantics first.
 
 ## 6. TUI command/run-loop refactor
 

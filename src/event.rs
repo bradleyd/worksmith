@@ -61,6 +61,15 @@ pub enum Event {
     AssistantMessage { text: String },
     ToolCall { id: String, name: String, arguments: String },
     ToolResult { id: String, name: String, ok: bool, output: String },
+    /// MCP lifecycle evidence. Arguments, credentials and remote results stay out.
+    McpOperation {
+        server: String,
+        tool: Option<String>,
+        phase: String,
+        revision: Option<String>,
+        elapsed_ms: u64,
+        result_bytes: usize,
+    },
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -87,7 +96,12 @@ pub enum Event {
         tokens_after: usize,
     },
     /// Result of running the task's validation check.
-    Validation { ok: bool, detail: String },
+    Validation {
+        ok: bool,
+        detail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<Box<crate::validation::CheckReport>>,
+    },
     /// Which durable memories were injected into the current turn's dynamic
     /// request context.
     MemoryUsed { ids: Vec<String> },

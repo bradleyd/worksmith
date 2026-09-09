@@ -151,9 +151,13 @@ async fn repeated_calls_are_nudged_into_the_worker() {
             ..Default::default()
         },
     ));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
-        SupervisorConfig { repeat_threshold: 3, max_nudges: 5, ..Default::default() },
-    );
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
+            repeat_threshold: 3,
+            max_nudges: 5,
+            ..Default::default()
+        });
 
     let id = started(&mut mgr, "look around");
     // Only the supervisor's directive can end this run.
@@ -189,8 +193,9 @@ async fn worker_is_escalated_after_its_nudges_run_out() {
         seen: Mutex::new(Vec::new()),
     });
     let agent = Arc::new(template_agent(client, dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
-        SupervisorConfig {
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
             repeat_threshold: 2,
             max_nudges: 1,
             token_budget: Some(250), // blown by the third step
@@ -259,8 +264,9 @@ async fn a_slow_request_is_not_mistaken_for_a_stuck_worker() {
     ));
     // The call takes 300ms; the idle deadline is 100ms, so it passes three
     // times while the model is simply working.
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
-        SupervisorConfig {
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
             idle_timeout: Duration::from_millis(100),
             max_nudges: 10,
             ..Default::default()
@@ -317,8 +323,9 @@ async fn a_hung_request_is_stopped_rather_than_nudged() {
     ));
     // 20ms deadline against a 300ms call: well past the multiple that separates
     // "slow" from "hung".
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
-        SupervisorConfig {
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
             idle_timeout: Duration::from_millis(20),
             max_nudges: 10,
             // A call may take this long before it counts as hung; the 300ms
@@ -350,8 +357,9 @@ async fn supervisor_off_leaves_the_worker_alone() {
         seen: Mutex::new(Vec::new()),
     });
     let agent = Arc::new(template_agent(client, dir.path()));
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
-        SupervisorConfig {
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
             mode: Mode::Off,
             repeat_threshold: 2,
             idle_timeout: Duration::from_millis(1),
@@ -378,7 +386,11 @@ async fn manual_nudge_reaches_a_running_worker() {
     });
     let agent = Arc::new(template_agent(client.clone(), dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
-        .with_supervisor(SupervisorConfig { mode: Mode::Off, ..Default::default() });
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
+            mode: Mode::Off,
+            ..Default::default()
+        });
 
     let id = started(&mut mgr, "busy work");
     assert!(mgr.nudge(&id, "check the README instead").is_ok());
@@ -430,7 +442,11 @@ async fn nudging_a_finished_worker_is_refused() {
     });
     let agent = Arc::new(template_agent(client.clone(), dir.path()));
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
-        .with_supervisor(SupervisorConfig { mode: Mode::Off, ..Default::default() });
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
+            mode: Mode::Off,
+            ..Default::default()
+        });
 
     let id = started(&mut mgr, "busy work");
 
@@ -497,8 +513,9 @@ async fn a_worker_inside_a_slow_tool_call_is_not_nudged() {
 
     // 200ms idle, 2 nudges. The 2s sleep is ten ticks, so under the old
     // behaviour this is nudge, nudge, escalate several times over.
-    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4).with_supervisor(
-        SupervisorConfig {
+    let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 4)
+        .with_shared_workspace()
+        .with_supervisor(SupervisorConfig {
             idle_timeout: Duration::from_millis(200),
             max_nudges: 2,
             request_timeout: Duration::from_secs(60),

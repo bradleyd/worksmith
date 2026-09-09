@@ -66,7 +66,7 @@ impl Tool for MemoryTool {
     }
 
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolOutput {
-        let store = match MemoryStore::open(Some(&ctx.cwd)) {
+        let store = match MemoryStore::open(Some(ctx.memory_cwd.as_deref().unwrap_or(&ctx.cwd))) {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(format!("memory unavailable: {e}")),
         };
@@ -170,7 +170,14 @@ impl Tool for KnowledgeTool {
     }
 
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolOutput {
-        let store = match KnowledgeStore::open(&ctx.cwd) {
+        let opened = if ctx.is_worker {
+            crate::session::Session::path_for_id(&ctx.session_id).and_then(|path| {
+                KnowledgeStore::open_at(&path.with_extension("knowledge.db"), &ctx.cwd)
+            })
+        } else {
+            KnowledgeStore::open(&ctx.cwd)
+        };
+        let store = match opened {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(format!("knowledge unavailable: {e}")),
         };

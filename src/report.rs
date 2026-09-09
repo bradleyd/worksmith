@@ -153,7 +153,11 @@ pub fn worker_headline(w: &WorkerSummary) -> String {
     // the two things a reader wants are the diff and the full result.
     let mut next: Vec<String> = Vec::new();
     if !w.changed.is_empty() {
-        next.push(format!("git diff {}", w.changed.join(" ")));
+        next.push(if w.workspace.is_some() {
+            format!("/agents diff {}", w.id)
+        } else {
+            format!("git diff {}", w.changed.join(" "))
+        });
     }
     next.push(format!("/agents show {}", w.id));
     if w.check_passed == Some(false) || w.escalation.is_some() {
@@ -175,12 +179,63 @@ pub fn worker_headline(w: &WorkerSummary) -> String {
     )
 }
 
+/// Human-facing result shared by the TUI, REPL, and headless CLI.
+pub fn worker_detail(w: &WorkerSummary) -> String {
+    let mut out = format!("{} · {}\nTask: {}", w.id, w.status.label(), w.task);
+    if w.workspace.is_some() {
+        out.push_str("\nChanges retained for review");
+    }
+    if !w.changed.is_empty() {
+        out.push_str(&format!("\nChanged: {}", w.changed.join(", ")));
+    }
+    if let Some(reason) = &w.escalation {
+        out.push_str(&format!("\nStopped by supervisor: {reason}"));
+    }
+    if w.result.is_empty() {
+        out.push_str(&format!("\n\nActivity\n{}", w.last));
+    } else {
+        out.push_str(&format!("\n\nWorker summary\n{}", w.result));
+    }
+    out.push_str(&format!("\n\n{}", validation_detail(w.validation.as_ref(), None, w.check_passed)));
+    if let Ok(path) = crate::session::Session::path_for_id(&w.session_id) {
+        out.push_str(&format!("\n\nSession: {}", path.display()));
+    }
+    out
+}
+
+/// Old records still render a readable outcome without inventing output.
+pub fn validation_detail(report: Option<&crate::validation::CheckReport>, command: Option<&str>, passed: Option<bool>) -> String {
+    if let Some(report) = report {
+        return report.display();
+    }
+    let mut text = match passed {
+        Some(true) => "Validation · Passed (output not recorded)",
+        Some(false) => "Validation · Failed (output not recorded)",
+        None => "Validation · No recorded result",
+    }.to_string();
+    if let Some(command) = command {
+        text.push_str(&format!("\n$ {command}"));
+    }
+    text
+}
+
 /// What a worker actually produced, as the parent model should see it. Results
 /// are capped: several verbose workers must not blow the parent's context.
 pub fn worker_block(w: &WorkerSummary) -> String {
     let mut out = format!("[{}] {} — task: {}", w.id, w.status.label(), w.task);
     if !w.changed.is_empty() {
-        out.push_str(&format!("\nfiles changed: {}", w.changed.join(", ")));
+        out.push_str(&format!(
+            "\n{}: {}",
+            if w.workspace.is_some() {
+                "worker files awaiting review"
+            } else {
+                "files changed"
+            },
+            w.changed.join(", ")
+        ));
+    }
+    if let Some(workspace) = &w.workspace {
+        out.push_str(&format!("\nretained worker session: {workspace}; edits await explicit review/apply, parent source files unchanged"));
     }
     if let Some(reason) = &w.escalation {
         out.push_str(&format!("\nstopped by supervisor: {reason}"));
@@ -345,6 +400,7 @@ mod tests {
 
     fn summary(id: &str, task: &str, result: &str) -> WorkerSummary {
         WorkerSummary {
+            workspace: None,
             id: id.into(),
             task: task.into(),
             status: crate::worker::WorkerStatus::Done,
@@ -362,7 +418,19 @@ mod tests {
             finished: None,
             prompt_tokens: 0,
             check_passed: None,
+            validation: None,
         }
+    }
+
+    #[test]
+    fn explicit_worker_detail_keeps_the_full_summary() {
+        let text = format!("{}END_OF_SUMMARY", "long summary ".repeat(1000));
+        let worker = summary("w1", "task", &text);
+        let detail = worker_detail(&worker);
+        assert!(detail.contains(&text));
+        assert!(detail.contains("Worker summary"));
+        assert!(detail.contains("Validation · No recorded result"));
+        assert!(!worker_block(&worker).contains("END_OF_SUMMARY"));
     }
 
     #[test]
@@ -454,6 +522,7 @@ mod headline_tests {
 
     fn worker() -> WorkerSummary {
         WorkerSummary {
+            workspace: None,
             id: "w1".into(),
             task: "fix /pair".into(),
             status: WorkerStatus::Stopped,
@@ -469,6 +538,7 @@ mod headline_tests {
             group: None,
             model: None,
             check_passed: Some(true),
+            validation: None,
             started: SystemTime::now() - Duration::from_secs(492),
             finished: Some(SystemTime::now()),
         }

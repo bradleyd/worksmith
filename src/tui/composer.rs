@@ -324,10 +324,19 @@ fn arg_completions(
     config: &Config,
 ) -> Option<Vec<String>> {
     let opts: &[&str] = match first.trim_start_matches('/') {
-        "agents" | "workers" if prev == 1 => {
-            &["list", "show", "tail", "kill", "nudge", "drop-queued"]
-        }
-        "spawn" if prev == 1 => &["-n", "--each-files", "--model"],
+        "agents" | "workers" if prev == 1 => &[
+            "list",
+            "show",
+            "tail",
+            "kill",
+            "nudge",
+            "drop-queued",
+            "retained",
+            "diff",
+            "apply",
+            "discard",
+        ],
+        "spawn" if prev == 1 => &["-n", "--each-files", "--model", "--until", "--shared"],
         "knowledge" | "know" if prev == 1 => &["index", "search", "status"],
         "skill" | "skills" if prev == 1 => return Some(skill_names(token, cwd)),
         "fast" | "lucky" if prev == 1 => &["on", "off", "auto"],

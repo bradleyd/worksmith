@@ -31,7 +31,12 @@ pub use bash::dangerous_command;
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
+    /// Original project identity for worker memory proposals.
+    pub memory_cwd: Option<PathBuf>,
     pub session_id: String,
+    /// Per-invocation structural MCP events, drained and recorded by Agent::emit.
+    pub mcp_events: Option<tokio::sync::mpsc::UnboundedSender<crate::event::Event>>,
+    pub mcp_session_path: Option<PathBuf>,
     pub bash_timeout: Duration,
     /// Set while a tool is blocked on an approval prompt.
     ///
@@ -84,7 +89,10 @@ impl Default for ToolContext {
     fn default() -> Self {
         Self {
             cwd: PathBuf::from("."),
+            memory_cwd: None,
             session_id: String::new(),
+            mcp_events: None,
+            mcp_session_path: None,
             bash_timeout: Duration::from_secs(120),
             awaiting_approval: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -222,11 +230,16 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     order: Vec<String>,
+    mcp: Option<std::sync::Arc<crate::mcp::Manager>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: HashMap::new(), order: Vec::new() }
+        Self {
+            tools: HashMap::new(),
+            order: Vec::new(),
+            mcp: None,
+        }
     }
 
     /// All built-in tools: read/write/edit/bash/grep/find/ls.
@@ -254,6 +267,40 @@ impl ToolRegistry {
             self.order.push(name.clone());
         }
         self.tools.insert(name, tool);
+    }
+
+    pub fn with_mcp(mut self, manager: std::sync::Arc<crate::mcp::Manager>) -> Self {
+        self.mcp = Some(manager);
+        self
+    }
+
+    pub fn defs_for(&self, ctx: &ToolContext) -> Vec<ToolDef> {
+        let mut defs = self.defs();
+        if let Some(manager) = &self.mcp {
+            defs.extend(manager.definitions(ctx));
+        }
+        defs
+    }
+
+    pub fn mcp_browser(&self, ctx: &ToolContext) -> Vec<crate::mcp::BrowserItem> {
+        self.mcp
+            .as_ref()
+            .map_or_else(Vec::new, |manager| manager.browser(ctx))
+    }
+
+    pub async fn run_snapshot(
+        &self,
+        name: &str,
+        args: Value,
+        ctx: &ToolContext,
+        advertised: Option<&ToolDef>,
+    ) -> ToolOutput {
+        if (name == "mcp" || name.starts_with("mcp__"))
+            && let Some(manager) = &self.mcp
+        {
+            return manager.run(name, args, ctx, advertised).await;
+        }
+        self.run(name, args, ctx).await
     }
 
     /// Tool definitions to advertise to the model, in registration order.

@@ -260,6 +260,13 @@ file describes it; `bash` runs it. This covers 90% of what pi npm packages
 do, with zero plugin API to maintain. (pi's own docs recommend exactly this.)
 
 **Tier 3 — MCP servers (the dynamic layer, in core)**
+
+**Updated 2026-09-09:** `MCP_PLAN.md` supersedes the initial sketch below.
+Parent-only MCP and M11 isolation are independent initial tracks. Worker MCP
+requires both; M12 routing follows. MCP uses selected tools, scoped permissions,
+bounded results, and validation.
+The sketch is historical scope, not an implementation contract.
+
 Because our compiled plugins are heavier to write/distribute than pi's npm
 extensions, MCP fills the gap: a huge existing ecosystem of ready-made
 tool servers, fully dynamic (add/remove per project without rebuilding
@@ -727,9 +734,12 @@ Caching cuts the other way: memory belongs after the stable prefix as a small
 dynamic message. Measure both — a cache hit is cheaper than a token not sent.
 Get the numbers before tuning the caps.
 
-**M11 — Sandbox each worker** *(future; now evidence-backed)*: every worker
-edits the user's real working tree, and a fan-out of N workers edits it
-*concurrently*. This is no longer hypothetical — a three-worker newsletter
+**M11 — Isolate each worker** *(priority; evidence-backed)*:
+First slice implemented in the working tree: [`WORKTREE_PLAN.md`](WORKTREE_PLAN.md).
+It starts from clean commits; dirty-tree mirroring is deferred.
+
+Before M11, every worker edited the user's real working tree, and a fan-out of N
+workers edited it *concurrently*. This is no longer hypothetical — a three-worker newsletter
 fan-out had all three workers write `bluecollar-newsletter/draft-1.md`, last
 writer wins, two drafts lost. The planner's bias toward a single worker is
 partly a workaround for a missing isolation boundary.
@@ -738,15 +748,15 @@ Isolation solves three things at once, which is why it's worth more than the
 per-worker output paths that would patch the collision:
 - **Collision** — each worker gets its own tree, so N workers can touch the
   same filenames without clobbering each other.
-- **Security** — a worker is the least trusted thing in the system: a model
-  running unattended, often a cheap one, on a task the parent wrote. Today it
-  has the same filesystem reach as the user. PLAN's safety guard is explicitly
-  "best-effort, not a sandbox"; this is where a real boundary belongs.
-- **Undo** — a bad worker edit is currently only recoverable by hand through
-  git. Borrow rustopedia's `scratch.rs` (`ScratchOverlay`): `git worktree
-add --detach <tmp> HEAD`, then mirror uncommitted tracked changes and
-untracked-but-not-ignored files so the copy matches what the user is actually
-editing, not just the last commit. Removed on drop.
+- **Reviewable changes** — validation and diffs belong to the worker workspace.
+  Worktrees do not restrict process authority or external actions; an OS-level
+  security boundary remains separate. See `MCP_PLAN.md` for the workspace contract.
+- **Discard** — a worker's rejected result can be removed without reverting
+  the parent's files. Worktrees and validation evidence are retained until explicit
+  discard, including after cancellation and application. Rustopedia's scratch
+  creation pattern informed this implementation, but its delete-on-drop lifecycle
+  and dirty-tree mirroring were not carried over.
+
 
 What it buys, in order of value:
 - **Safe fan-out.** Each worker gets its own overlay, so three workers can edit
@@ -759,11 +769,9 @@ What it buys, in order of value:
   git by hand.
 
 Costs to weigh: a worktree per worker is disk and setup time (rustopedia's
-mirroring step is the expensive part), it needs a git repo (so degrade
-gracefully to today's behavior when there isn't one), and the parent needs a
-merge/apply step that doesn't exist yet. Non-code work (the newsletter fan-out)
-doesn't need any of this, so it should be opt-in per spawn or inferred from
-whether the task touches tracked files.
+mirroring step is the expensive part). Git worktrees need a repository; non-Git
+scratch copies need a separate design. The parent also needs a reviewed apply step. Non-code files can collide too. If isolated execution cannot
+be established, fail clearly rather than silently sharing a writable directory.
 
 **M12 — Per-role model routing** *(future)*: the harness already makes several
 model calls that are not the user's turn — the fan-out planner, the compaction
@@ -983,6 +991,12 @@ would have prevented the invented third task.
 
 ## 10a. Working order (decided 2026-08-20)
 
+**Ordering update, 2026-09-09:** approvals and M9 have landed. Parent-only MCP
+and M11 worker isolation can proceed independently; worker MCP requires both,
+and M12 role routing follows. `MCP_PLAN.md` defines the new MCP scope. The dated rationale below
+is retained as history; “MCP last because there is no permission model” is stale,
+and existing shell approval rules still need explicit integration for MCP tools.
+
 Milestones above are the map; this is the route, most valuable first. Written
 down because the ordering is an argument, not a preference, and the argument is
 easy to lose.
@@ -1086,7 +1100,7 @@ fraction of the work), and more eval runs of things already answered.
    The eval harness can compute these only because it parses `--mode json` from
    outside; a person in the TUI has no way to see any of it.
 
-6. **M11 worktree sandbox.** Already evidence-backed by the three-worker
+6. **M11 worker worktrees.** Already evidence-backed by the three-worker
    `draft-1.md` collision. Collision and undo — *not* a security boundary; that
    is item 4's job.
 

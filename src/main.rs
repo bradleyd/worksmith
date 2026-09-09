@@ -100,6 +100,14 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Review retained worker worktrees without starting a model.
+    Agents {
+        #[arg(default_value = "retained")]
+        action: String,
+        worker_session: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Report recorded metrics without loading a model or contacting a provider.
     Stats {
         session_id: String,
@@ -112,6 +120,9 @@ enum Cmd {
     /// worker, then (unless --no-synthesis) has the session's model combine
     /// the results into one answer.
     Spawn {
+        /// Explicitly let workers edit the parent's directory without isolation.
+        #[arg(long)]
+        shared: bool,
         /// Exactly N workers. Omit to let a planner decide how many.
         #[arg(short = 'n', long = "count")]
         count: Option<usize>,
@@ -201,6 +212,25 @@ async fn run(args: Args) -> Result<()> {
         .await;
     }
 
+    if let Some(Cmd::Agents {
+        action,
+        worker_session,
+        yes,
+    }) = &args.cmd
+    {
+        println!(
+            "{}",
+            worksmith::workspace::review(
+                &std::env::current_dir()?,
+                action,
+                worker_session.as_deref(),
+                *yes
+            )
+            .await?
+        );
+        return Ok(());
+    }
+
     if let Some(Cmd::Stats { session_id, json }) = &args.cmd {
         let path = Session::path_for_id(session_id)?;
         if *json || args.mode.as_deref() == Some("json") {
@@ -219,7 +249,8 @@ async fn run(args: Args) -> Result<()> {
     // keychain — 8 seconds cold, with the runtime blocked throughout.
     let (client, http) = worksmith::llm::client_and_http(&resolved)?;
 
-    let registry = Arc::new(ToolRegistry::with_builtins());
+    let mcp = Arc::new(worksmith::mcp::Manager::new(config.mcp.clone())?);
+    let registry = Arc::new(ToolRegistry::with_builtins().with_mcp(mcp.clone()));
     let bus = EventBus::new();
 
     let mut session = open_session(&args, &cwd)?;
@@ -260,7 +291,10 @@ async fn run(args: Args) -> Result<()> {
     // can put the question on screen; a --print run cannot, and defaults to no.
     let (approver, approvals): (Arc<dyn worksmith::tools::approval::Approver>, _) =
         if args.approve_all {
-            (Arc::new(worksmith::tools::approval::AutoApprove), None)
+            // The TUI still owns an approval receiver even when calls bypass it.
+            let rx = (mode == OutputMode::Tui)
+                .then(|| worksmith::tools::approval::ChannelApprover::new().1);
+            (Arc::new(worksmith::tools::approval::AutoApprove), rx)
         } else if mode == OutputMode::Tui {
             let (a, rx) = worksmith::tools::approval::ChannelApprover::new();
             (
@@ -361,7 +395,7 @@ async fn run(args: Args) -> Result<()> {
 
     // ownership of the agent/session, so handle it before wiring the renderer.
     if mode == OutputMode::Tui {
-        return run_tui(
+        let outcome = run_tui(
             agent,
             session,
             bus,
@@ -388,6 +422,8 @@ async fn run(args: Args) -> Result<()> {
             asks.expect("the TUI branch always builds a checkpoint channel"),
         )
         .await;
+        mcp.shutdown().await;
+        return outcome;
     }
 
     // Workers need a shared handle to the agent; the TUI path already owns it.
@@ -441,7 +477,9 @@ async fn run(args: Args) -> Result<()> {
     // renderer sees the channel close, drains buffered events, and exits.
     // Without dropping `agent`, its bus clone keeps the channel open and
     // `renderer.await` hangs forever (the /quit hang).
+    agent.close_mcp(&mut session).await;
     drop(agent);
+    mcp.shutdown().await;
     drop(bus);
     let _ = renderer.await;
     outcome
@@ -471,12 +509,20 @@ async fn run_spawn(
         each_files,
         worker_model: model,
         no_synthesis,
+        shared,
         task,
     }) = &args.cmd
     else {
         unreachable!("run_spawn is only called for the spawn subcommand");
     };
     let json = args.mode.as_deref() == Some("json");
+    let workspace = if *shared {
+        worksmith::worker::WorkerWorkspace::Shared
+    } else {
+        worksmith::worker::WorkerWorkspace::Isolated(
+            worksmith::workspace::Base::capture(cwd).await?,
+        )
+    };
 
     let tool_ctx = ToolContext {
         cwd: cwd.to_path_buf(),
@@ -564,6 +610,10 @@ async fn run_spawn(
         )
         .with_supervisor(config.supervisor());
     workers.set_parent_session(session.path().to_path_buf());
+    workers.set_workspace(workspace);
+    if *shared {
+        eprintln!("shared workers edit the parent directory; concurrent writes can collide");
+    }
     let report = workers.spawn_many_on(tasks, system, task.clone(), over);
     let expected = report.started.len() + report.queued;
     if expected == 0 {
@@ -580,14 +630,21 @@ async fn run_spawn(
         }
         for w in workers.take_newly_finished() {
             if !json {
-                eprintln!("{}", worksmith::report::worker_headline(&w));
+                println!("{}\n", worksmith::report::worker_detail(&w));
             }
             done.push(w);
         }
         if done.len() < expected {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {},
+                _ = tokio::signal::ctrl_c() => {
+                    workers.shutdown().await;
+                    bail!("workers cancelled; retained results are available with worksmith agents retained");
+                }
+            }
         }
     }
+    workers.shutdown().await;
 
     // Workers run on their own buses, so their spend never reaches this
     // process's event stream. Re-emit the total so `--mode json` consumers
@@ -620,7 +677,7 @@ async fn run_spawn(
         .filter(|w| w.status == WorkerStatus::Done)
         .count();
     if succeeded == 0 {
-        let _ = writeln!(stdout(), "{body}");
+        if json { let _ = writeln!(stdout(), "{body}"); }
         // Name the reasons here rather than pointing at output above: worker
         // headlines are only printed when *not* in --mode json, so in the mode
         // an eval harness uses there was nothing above at all. Three separate
@@ -644,7 +701,7 @@ async fn run_spawn(
     }
 
     if *no_synthesis || !config.synthesize() || succeeded < 2 {
-        let _ = writeln!(stdout(), "{body}");
+        if json { let _ = writeln!(stdout(), "{body}"); }
         return Ok(());
     }
 
@@ -827,22 +884,23 @@ async fn repl(
 
         // Ctrl+C aborts the current turn (not the program).
         let cancel = CancellationToken::new();
-        let result = tokio::select! {
-            r = agent.run_turn_with_context(
+        let result = {
+            let turn = agent.run_turn_with_context(
                 session,
                 &message,
                 &system,
                 memory_context,
                 validator.as_ref().map(|v| v as _),
                 cancel.clone(),
-            ) => r,
-            _ = tokio::signal::ctrl_c() => {
-                cancel.cancel();
-                println!("\n(aborted)");
-                Ok(worksmith::agent::TurnResult {
-                    text: String::new(),
-                    outcome: worksmith::agent::TurnOutcome::Aborted,
-                })
+            );
+            tokio::pin!(turn);
+            tokio::select! {
+                result = &mut turn => result,
+                _ = tokio::signal::ctrl_c() => {
+                    cancel.cancel();
+                    // Let tools cancel requests and reap children before dropping the turn.
+                    turn.await
+                }
             }
         };
         match result {
@@ -860,6 +918,7 @@ async fn repl(
         drain_workers(&mut workers, session);
     }
 
+    workers.shutdown().await;
     Ok(())
 }
 
@@ -934,6 +993,18 @@ async fn handle_command(
     let mut parts = cmd.split_whitespace();
     let head = parts.next().unwrap_or("");
     match head {
+        "mcp" => {
+            match worksmith::mcp::command_args(&parts.collect::<Vec<_>>()) {
+                Ok(args) => {
+                    let out = agent
+                        .mcp_command(session, args, CancellationToken::new())
+                        .await;
+                    println!("{}", out.content);
+                }
+                Err(error) => eprintln!("{error}"),
+            }
+            CommandResult::Handled
+        }
         "quit" | "exit" | "q" => CommandResult::Quit,
         "stats" | "metrics" => {
             let id = parts.next();
@@ -965,9 +1036,10 @@ async fn handle_command(
                  /memory pending | /memory approve <id>   review proposals\n  \
                  /memory supersede <new> <old>  accept a correction\n  \
                  /knowledge [index|search <query>|status]  the project's own text\n  \
+                 /mcp [list | refresh <server> | activate <tool>]  parent MCP tools\n  \
                  /skill [name | unload <name>]  list, load, or unload skills\n  \
                  /spawn [-n N | --each-files <regex>] <task>   background worker(s)\n  \
-                 /agents [list|show <id>|kill <id>|nudge <id> <msg>|drop-queued]\n  \
+                 /agents [list|show|tail|kill|nudge|drop-queued|retained|diff|apply|discard]\n  \
                  /validate <cmd|off>      success check for a turn\n  \
                  @path                    include a file's contents in your message"
             );
@@ -975,6 +1047,8 @@ async fn handle_command(
         }
         "new" => match Session::create(cwd) {
             Ok(s) => {
+                workers.shutdown().await;
+                agent.close_mcp(session).await;
                 *session = s;
                 workers.set_parent_session(session.path().to_path_buf());
                 agent.set_session_path(session.path().to_path_buf());
@@ -1003,7 +1077,7 @@ async fn handle_command(
             CommandResult::Handled
         }
         "agents" | "workers" => {
-            handle_agents(parts, workers);
+            handle_agents(parts, workers).await;
             CommandResult::Handled
         }
         _ => CommandResult::NotACommand,
@@ -1032,6 +1106,13 @@ async fn handle_spawn(
             return;
         }
     };
+    if let Err(e) = workers.prepare_spawn(req.shared).await {
+        eprintln!("spawn: {e}");
+        return;
+    }
+    if req.shared {
+        eprintln!("shared workers edit the parent directory; concurrent writes can collide");
+    }
     let system = build_worker_prompt(cwd, mem);
     let over = match req.model.as_deref() {
         Some(spec) => match worksmith::llm::ModelOverride::resolve(config, spec) {
@@ -1094,12 +1175,27 @@ async fn handle_spawn(
             println!("  {}. {t}", i + 1);
         }
     }
-    let report = workers.spawn_many_on(tasks, build_worker_prompt(cwd, mem), request, over);
+    let report = workers.spawn_many_checked(
+        tasks,
+        build_worker_prompt(cwd, mem),
+        request,
+        over,
+        req.validate,
+    );
     println!("{}", fanout_notice(&report));
 }
 
-fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut WorkerManager) {
+async fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut WorkerManager) {
     match parts.next().unwrap_or("list") {
+        action @ ("retained" | "diff" | "apply" | "discard") => {
+            let id = parts.next();
+            let confirmed = parts.next() == Some("--yes");
+            match workers.review(action, id, confirmed).await {
+                Ok(text) => println!("{text}"),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+
         "list" | "" => {
             let list = workers.list();
             if list.is_empty() && workers.queued_count() == 0 {
@@ -1133,21 +1229,7 @@ fn handle_agents<'a>(mut parts: impl Iterator<Item = &'a str>, workers: &mut Wor
         }
         "show" | "result" => match parts.next().and_then(|id| workers.get(id)) {
             Some(w) => {
-                println!("{} [{}]", w.id, w.status.label());
-                if let Some(reason) = &w.escalation {
-                    println!("stopped by supervisor: {reason}");
-                }
-                if !w.changed.is_empty() {
-                    println!("changed: {}", w.changed.join(", "));
-                }
-                println!(
-                    "{}",
-                    if w.result.is_empty() {
-                        &w.last
-                    } else {
-                        &w.result
-                    }
-                );
+                println!("{}", worksmith::report::worker_detail(&w));
             }
             None => println!("usage: /agents show <id>"),
         },
@@ -1632,19 +1714,9 @@ fn render_activity(ev: &Event, print_mode: bool) {
             );
             emit_line(&line, print_mode);
         }
-        Event::Validation { ok, detail } => {
-            let line = if *ok {
-                format!(
-                    "\x1b[32m✓ validation passed: {}\x1b[0m",
-                    truncate(detail, 120)
-                )
-            } else {
-                format!(
-                    "\x1b[31m✗ validation failed: {}\x1b[0m",
-                    truncate(detail, 200)
-                )
-            };
-            emit_line(&line, print_mode);
+        Event::Validation { ok, detail, .. } => {
+            let color = if *ok { "32" } else { "31" };
+            emit_line(&format!("\x1b[{color}m{detail}\x1b[0m"), print_mode);
         }
         Event::Error { message } => {
             let line = format!("\x1b[31merror:\x1b[0m {message}");
