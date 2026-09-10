@@ -1,6 +1,6 @@
 +++
 title = "Measuring the harness"
-description = "A weak model plus the loop scored 95% where the same model alone scored 56%. Getting to that number took four wrong answers first, and they are written down here."
+description = "A weak model plus the loop scored 97% where the same model alone scored 56%. Getting to that number took four wrong answers first, and they are written down here."
 weight = 20
 +++
 
@@ -12,7 +12,7 @@ This page is the measurement, the arms it took to isolate it, and the four
 results we published to ourselves and then had to retract. If you want to poke
 holes in the claim, the holes we already found are here.
 
-## The number that needs no trust
+## HumanEval results
 
 HumanEval, all 164 problems, hosted `qwen/qwen3.5-9b`. OpenAI's problems,
 OpenAI's tests, and the tests are both the `--until` check and the grader.
@@ -24,11 +24,11 @@ Nothing here was written by us.
 | the model alone, shown the tests as text | 134/163, 82% |
 | **the model with the harness** | **162/164, 99%** |
 
-The middle row is the one to look at first, because it kills the objection a
-reader should raise. If the harness helps only because its check tells the model
-something it did not know, then handing the model the same tests as plain text
-should help too. It does not: 83% against 82%. So the +17 points come from being
-made to check, not from being told.
+Showing the tests as text did not improve the observed one-shot pass rate.
+This supports testing and retries as an explanation for the gain in this run.
+The denominators differ: the two one-shot arms contain 163 scored attempts,
+while the harness arm contains 164. The percentages describe those recorded
+attempts, not equally sized repeated trials.
 
 Per problem: 28 rescued that the model failed one shot, 1 lost that it had
 passed, 1 that failed either way. The harness is not strictly better and that
@@ -55,14 +55,18 @@ the loop.
 | Qwen3.5-9B, one shot, hosted | 51/65, 78% | 15 | 5 | 2 | $0.0088 |
 | Qwen3.5-4B, one shot | 35/62, 56% | 9 | 7 | 6 | free |
 
-Three attempts per task, every arm, same tasks from the same starting states.
+Three attempts were planned per task in each arm, using the same starting
+states. The recorded denominators show that some one-shot attempts were not
+scored. Costs are historical; “free” means no provider charge for local runs
+and excludes hardware and electricity.
 
 The 4B goes from 56% alone to 97% inside the loop. That is worth more than
 doubling the model: a bare 9B, more than twice the parameters, manages 80%.
 
 The consistency columns say it better than the pass rate does. The same 4B goes
 from 9 tasks that always pass to 20, and from 6 tasks it never passes to none.
-There is no task in the suite the harness cannot eventually get right.
+Each task passed at least once in these three attempts; that does not
+guarantee success on future runs.
 
 Cost is not the interesting part, and we should say so plainly. Sonnet did the
 whole suite for 26 cents, about four tenths of a cent per solved task. Nobody is
@@ -71,7 +75,7 @@ has no rate limit, and works on a plane. The argument is not that Sonnet is
 expensive.
 
 Wall clock is the real price. Sonnet finished in a few minutes. The 4B with the
-harness took 35.
+harness took 111 minutes across the recorded comparison.
 
 ## Always, flaky, never
 
@@ -82,14 +86,15 @@ of three is a coin flip wearing a percentage, and an average hides which one you
 have. The bare 9B gets a respectable 80%, and 8 of its 22 tasks are coin flips.
 Sonnet has none.
 
-This matters more than it looks, because chained work compounds. At 95% per
-task, a 22 step chain finishes 32% of the time. At 99% it finishes 80% of the
-time. Consistency is not a nice property here, it is the whole thing.
+Chained work compounds failures. Assuming independent outcomes and a constant
+success probability, 95% per task gives about 32% success across 22 steps;
+99% gives about 80%. These are illustrations, not measured end-to-end
+completion rates.
 
 Which is where the claim stops. Sonnet is 22 always-pass and no coin flips. The
-4B with the harness is 20 and 2. Per task that gap is three points. Across a 22
-step chain those two coin flips compound to about 44% against Sonnet's 100%, so
-the harness closes most of the distance and not all of it.
+4B with the harness is 20 and 2. Per task that gap is three points. Treating each flaky task as having an independent 2/3 success probability
+gives roughly 44% for both to pass in one chain. Three attempts per task are
+not enough to estimate a reliable end-to-end success rate for either model.
 
 The two flaky tasks are `pa-reject` and `cli-print`, and both are the same
 failure: the model rewrites the whole file instead of editing it. `pa-reject`
@@ -166,8 +171,9 @@ Three attempts per task is weak resolution for this. A task with a true 90% rate
 still shows 3/3 about three quarters of the time, and 90% per task is a disaster
 across 22 of them.
 
-Every number here is one fixture of Python coding tasks and one model family. A
-second fixture built around file and directory work, closer to how people
+The coding-workflow comparison uses one Python fixture and a small set of
+models. HumanEval adds function-writing tasks, not a second repository workflow.
+A second fixture built around file and directory work, closer to how people
 actually delegate, turned out too easy to separate anything: the 4B passed both
 the 3 task and the 14 task versions.
 
@@ -178,8 +184,8 @@ local models, but it means this compares one local setup against the hosted
 frontier rather than model against model. The 111 minutes is partly the 4B and
 partly a 4-bit MLX model on a Pro-tier chip at about 45 tok/s.
 
-Quantisation is the one thing we can rule out. Local 4-bit scored 80% and the
-same model hosted scored 78%, which is inside the noise.
+Local 4-bit scored 80% and the same model hosted scored 78%. This small sample
+does not establish a quantisation effect or rule one out.
 
 ## Reproducing it
 
@@ -197,4 +203,6 @@ provider with no tools, no retries, no supervisor and no timeout, and grades the
 answer with the same check the harness uses. Anything the harness scores above
 that number is the harness.
 
-The raw results, including the retracted ones, are in `evals/pool/RESULTS.md`.
+The recorded results are from August 30, 2026. See the
+[evaluation log](https://github.com/bradleyd/worksmith/blob/main/evals/pool/RESULTS.md)
+for raw summaries, limitations, and retracted earlier results.

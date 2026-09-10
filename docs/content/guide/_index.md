@@ -1,37 +1,26 @@
 +++
 title = "Guide"
-description = "The concepts behind worksmith, one page each. Start with the validation loop: why the harness exists, what 'done' means, and the measurements that bound the claim."
+description = "Configure your model, understand validation, and inspect usage and results."
 +++
 
-One binary, one bet. The other terminal agents — Codex, Gemini CLI, pi — are
-thin wrappers around a frontier model that mostly stays on task. Worksmith bets
-the other way: **the harness does the work of keeping a weaker model honest.**
-These pages explain the machinery that bet relies on.
-
-The single most important page is the [validation loop](validation-loop.md).
-Everything else hangs off it. In one paragraph: a task carries a check you
-named — `--until "cargo test"` — and the turn is not done when the model says
-it is done, but when that check exits 0. When the model spins, the harness
-notices and sends it back with the failure output. That is the whole product,
-and it is measurable: on a small model (qwen3.5-9b) it was worth +34 points —
-52% to 86% — at flat cost per solved task, because all ten of the unguided
-failures had outcome `done`. The model declared itself finished and was wrong.
-On a capable 27B the same loop changed nothing — 21/21 either way, for about
-18% more tokens — which is why guidance is earned, not assumed, and why the
-docs say so out loud.
+Start with the [quickstart](@/quickstart.md) to install Worksmith and try the
+TUI or CLI. These guides cover configuration, validation, and how to understand
+a run's results.
 
 ## The pages
 
-- [**The validation loop**](validation-loop.md) — why the loop exists, what
+- [**Model configuration**](@/guide/configuration.md) — connect local and hosted providers and troubleshoot setup.
+
+- [**The validation loop**](@/guide/validation-loop.md) — why the loop exists, what
   "done" means, how a failure becomes a re-plan, and the two evals that bound
   the claim: decisive on a weak model, dead weight on a capable one.
-- [**Measuring the harness**](measuring.md) — the 22 task comparison: 56% for a
-  4B alone, 95% for the same model in the loop, 100% for Sonnet at 26 cents.
+- [**Measuring the harness**](@/guide/measuring.md) — the 22 task comparison: 56% for a
+  4B alone, 97% for the same model in the loop, 100% for Sonnet at 26 cents.
   Includes the four results we retracted and the measurement bugs that produced
   them.
 - [**Metrics and cost accounting**](@/guide/metrics.md) — what every dashboard, footer,
   and JSON value means; cache and cost formulas; provider-neutral accounting;
-  and a dogfood checklist for the feature branch.
+  and steps to verify recorded accounting.
 - [**Prompt and cache behavior**](@/guide/prompt-cache.md) — skill lifecycle,
   stable request prefixes, and a repeatable local cache probe.
 - **Workers** — one `/spawn` into N workers, the supervisor that is the same

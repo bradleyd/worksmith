@@ -10,7 +10,7 @@ build_search_index = false
 [markdown]
 
 [markdown.highlighting]
-theme = "catppuccin-mocha"
+theme = "github-dark-high-contrast"
 
 [extra]
 # Put all your custom variables here

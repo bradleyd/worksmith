@@ -9,7 +9,7 @@ weight = 36
 Keep production memory immediately after the system message. Moving it before the
 current turn showed potential for cache reuse, but these measurements establish
 neither a consistent latency improvement nor sufficient task-quality evidence to
-change production behavior. This branch changes probes and documentation only.
+change production behavior. The experimental layout is confined to the probes.
 
 ## Method
 

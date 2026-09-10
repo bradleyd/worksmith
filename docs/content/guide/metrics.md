@@ -244,9 +244,9 @@ and at least one pass. This differs from a session turn merely saying `done`.
 Eval `elapsed` is wall time around execution, stats collection, and validation;
 `model_ms` is summed request time.
 
-## Dogfood this branch before committing
+## Verify the accounting
 
-Run these commands from the repository so `cargo run` uses the feature build
+Run these commands from the repository so `cargo run` uses the current checkout
 rather than an older installed binary. Replace placeholders with your configured
 model and the full session ID printed at startup.
 

@@ -39,6 +39,14 @@ jobs:
       - name: Build
         run: cd docs && zola build
 
+      - name: Check links and contrast
+        run: python3 docs/tests/check_site.py docs/public
+
+      - name: Check local preview navigation
+        run: |
+          zola --root docs build --base-url http://127.0.0.1:8765 --output-dir /tmp/worksmith-docs-preview
+          python3 docs/tests/check_site.py /tmp/worksmith-docs-preview http://127.0.0.1:8765
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

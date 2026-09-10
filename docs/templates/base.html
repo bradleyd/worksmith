@@ -5,57 +5,98 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Worksmith{% endblock %}</title>
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0; padding: 2rem 1.25rem 4rem;
-      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      color: #1c1e21; background: #fdfdfd;
+    :root {
+      color-scheme: light dark;
+      --text: #24292f;
+      --muted: #57606a;
+      --background: #ffffff;
+      --surface: #f3f4f6;
+      --border: #d0d7de;
+      --link: #0969a5;
+      --code: #30363d;
     }
     @media (prefers-color-scheme: dark) {
-      body { color: #cdd6f4; background: #1e1e2e; }
-      a { color: #89b4fa; }
-      pre { background: #181825; }
-      code { background: #313244; }
+      :root {
+        --text: #e0e4e9;
+        --muted: #a6afb9;
+        --background: #171a1f;
+        --surface: #242930;
+        --border: #3d4650;
+        --link: #8cc8f0;
+        --code: #e0e4e9;
+      }
     }
-    .wrap { max-width: 46rem; margin: 0 auto; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 2rem 1.25rem 4rem;
+      font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      color: var(--text); background: var(--background);
+    }
+    .wrap { max-width: 46rem; margin: 0 auto; overflow-wrap: break-word; }
     nav {
-      max-width: 46rem; margin: 0 auto 2rem;
-      display: flex; gap: 1.25rem; font-size: 0.95rem;
+      max-width: 46rem; margin: 0 auto 2.5rem;
+      display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; font-size: 0.95rem;
+      border-bottom: 1px solid var(--border); padding-bottom: 1rem;
     }
-    nav a { text-decoration: none; opacity: 0.75; }
-    nav a:hover { opacity: 1; }
-    h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 0.5rem; }
-    .lede { font-size: 1.1rem; opacity: 0.8; margin: 0 0 2rem; }
-    h2 { margin-top: 2.5rem; border-bottom: 1px solid rgba(128,128,128,0.25); padding-bottom: 0.25rem; }
-    p, li { max-width: 46rem; }
-    a { color: #0969da; }
-    code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; background: #f0f1f3; padding: 0.1em 0.35em; border-radius: 4px; }
-    pre { background: #f6f7f9; padding: 1rem; border-radius: 8px; overflow-x: auto; }
-    pre code { background: none; padding: 0; }
+    nav a { color: var(--muted); text-decoration: none; }
+    nav a:hover, nav a[aria-current="page"] { color: var(--text); text-decoration: underline; }
+    h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 0.75rem; letter-spacing: -0.025em; }
+    .lede { font-size: 1.1rem; color: var(--muted); margin: 0 0 2rem; }
+    h2 { margin-top: 2.5rem; line-height: 1.35; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+    h3 { margin-top: 1.75rem; line-height: 1.4; }
+    h2, h3 { scroll-margin-top: 1.5rem; }
+    a { color: var(--link); text-underline-offset: 0.2em; }
+    a:hover { text-decoration-thickness: 2px; }
+    :focus-visible { outline: 2px solid var(--link); outline-offset: 4px; }
+    code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+    :not(pre) > code { color: var(--code); background: var(--surface); padding: 0.1em 0.3em; border-radius: 3px; overflow-wrap: anywhere; }
+    pre { color: var(--text); background: var(--surface); padding: 1rem 1.25rem; border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; line-height: 1.6; }
+    pre code { color: inherit; background: none; padding: 0; }
+    .screenshot { margin: 1.5rem 0; }
+    .screenshot a { display: block; }
+    .screenshot img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; }
+    .screenshot figcaption { margin-top: 0.65rem; color: var(--muted); font-size: 0.9rem; line-height: 1.6; }
     .mermaid { text-align: center; }
-    table { border-collapse: collapse; }
-    td, th { border: 1px solid rgba(128,128,128,0.3); padding: 0.35rem 0.7rem; }
+    table { border-collapse: collapse; display: block; overflow-x: auto; }
+    td, th { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: var(--surface); }
     ul.pages { list-style: none; padding: 0; }
     ul.pages li { margin: 0.4rem 0; }
+    .skip-link { position: absolute; top: -5rem; }
+    .skip-link:focus { top: 0.5rem; background: var(--background); padding: 0.5rem; }
+    @media (max-width: 480px) {
+      body { padding: 1.25rem 1rem 3rem; }
+      h1 { font-size: 1.8rem; }
+      pre { padding: 0.875rem; }
+    }
   </style>
 </head>
 <body>
-  <nav>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <nav aria-label="Main navigation">
     <a href="/">Home</a>
     <a href="/quickstart/">Quickstart</a>
     <a href="/guide/">Guide</a>
   </nav>
-  <div class="wrap">
+  <main id="main" class="wrap">
     {% block body %}{% endblock %}
-  </div>
+  </main>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script>
-    // Zola emits fenced blocks as <pre><code class="language-mermaid">;
-    // tag the <pre> so mermaid.run() picks them up.
-    document.querySelectorAll("code.language-mermaid").forEach(function (c) {
-      c.parentElement.classList.add("mermaid");
+    // Strip syntax markup before passing a fenced diagram to Mermaid.
+    document.querySelectorAll('code.language-mermaid, code[data-lang="mermaid"]').forEach(function (c) {
+      var pre = c.parentElement;
+      pre.textContent = c.textContent;
+      pre.removeAttribute("style");
+      pre.className = "mermaid";
     });
-    mermaid.run();
+    if (typeof mermaid !== "undefined" && document.querySelector(".mermaid")) {
+      mermaid.initialize({ startOnLoad: false, theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default" });
+      mermaid.run();
+    }
+    document.querySelectorAll("nav a").forEach(function (link) {
+      if (link.pathname === window.location.pathname) link.setAttribute("aria-current", "page");
+    });
   </script>
 </body>
 </html>
