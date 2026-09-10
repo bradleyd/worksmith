@@ -1,13 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-09-10
 
 ### Added
 
 - Session and worker metrics with recorded cost, timing, context, and usage evidence.
 - Interactive skill management and improved command overlays.
 - Prompt-cache and memory-placement regression checks with documented measurements.
-
 - Parent-only stdio MCP with explicit trust and approval gates, bounded discovery,
   retained results, and protection against replaying uncertain calls.
 - Isolated worker Git worktrees with retained results, explicit diff/apply/discard,
@@ -32,4 +31,3 @@
 - Worktrees require a clean Git checkout; `--shared` explicitly opts out.
 - MCP subprocesses and workers are not OS-sandboxed. Use MCP at your own risk.
 - Session retention/pruning and OS-enforced sandboxing remain future work.
-- No new release tag or version bump has been made for these changes.

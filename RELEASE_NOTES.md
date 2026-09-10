@@ -1,4 +1,4 @@
-# Worksmith release notes
+# Worksmith v0.6.0
 
 This release adds parent MCP support and isolated worker worktrees, and makes
 worker results easier to inspect across the TUI, plain REPL, and CLI.
