@@ -1,202 +1,92 @@
 # What to do next
 
-Updated after MCP, worktree, and worker-result implementation on 2026-09-09. `LOOSE_ENDS.md`
-keeps the longer forensic notes; this file is the short operational list.
+Updated 2026-09-10 after the v0.6.0 release. This is the short operational list;
+`PLAN.md` holds the broader roadmap and `LOOSE_ENDS.md` the forensic notes.
+Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
 
-## Implementation update
+## Released baseline
 
-Parent-only MCP, the first M11 worker-worktree slice, and readable worker validation
-results are implemented in this change. Usage is in
-[`docs/mcp.md`](docs/mcp.md) and [`docs/worktrees.md`](docs/worktrees.md).
-Worktrees require a clean starting checkout unless `--shared` is explicitly used.
-They do not provide OS sandboxing; that design is tracked in GitHub issue #2.
-The release history and earlier validation baseline below describe the prior
-merged state before this change. The agreed dated-session storage work is now implemented; review the release
-notes and validation results before choosing the next tag.
+[v0.6.0](https://github.com/bradleyd/worksmith/releases/tag/v0.6.0) is published
+from `main` at `8220028`. Both macOS ARM64 and Linux x86-64 release assets are
+available. The Homebrew tap is updated and pushed at `d93e1d9`.
 
-## Current stopping point
+Shipped work includes:
 
-`main` has shipped and tagged `v0.5.0`. The recent work landed:
+- M9 metrics: request-time model/cost/cache records, per-turn history, context
+  attribution, helper spend, durable worker links, `/stats`, and offline reports.
+- Command overlays and interactive skill management shared with the existing
+  skill loader; workers inherit independent loaded-skill snapshots.
+- Parent-only stdio MCP with trust/approval gates, bounded discovery and results,
+  and recoverable oversized results. See [`docs/mcp.md`](docs/mcp.md).
+- The first M11 slice: clean-commit detached worker worktrees, retained results,
+  guarded apply/discard, and recovery. See [`docs/worktrees.md`](docs/worktrees.md).
+- Shared human-facing worker results with validation evidence, retained logs,
+  and readable diffs across the frontends.
+- Dated JSONL sessions under `YYYY/MM/DD/<id>/`, grouped supporting files,
+  shared ID lookup, and ripgrep search with UTC date/range and project filters.
+  Legacy flat sessions remain readable in place. See [`docs/sessions.md`](docs/sessions.md).
 
-- automatic turn-start memory injection with capped, relevant dynamic memory;
-- memory proposal review before durable writes;
-- provider presets for first-run `--model openrouter/...` and `openai/...`;
-- the first model-call metrics collector and `/metrics` dashboard overlay;
-- a manual compaction progress overlay so `/compact` no longer looks frozen;
-- current README, quickstart, guide index, and `config.example.toml` updates.
+Release verification: 500 tests passed, two live probes ignored;
+`cargo clippy --locked --all-targets -- -D warnings` passed. Local build/version
+verification and both GitHub release jobs passed. Earlier CLI/REPL/TUI smoke
+checks covered dated sessions, search, worker metrics, and validation output.
+These are release results, not claims of new validation for this Markdown refresh.
 
-M9 metrics (`c4268f7`) and command overlays/skill management (`9a6ba4a`) are
-merged into `main` and pushed. The prompt/cache validation pass is also merged;
-production memory placement remains unchanged. MCP was documentation-only at that
-merged baseline; see the working-tree update above for subsequent implementation.
+## Next: M12 per-role model routing
 
-Fresh-start handoff: `FRESH_START.md`. Suggested first slice: **parent-only MCP**.
-M11 worker isolation is a separate priority and a prerequisite for worker MCP,
-not for parent-only MCP. Both precede expanded worker integration; M12 follows.
-See `MCP_PLAN.md` for the product design and acceptance gates.
+The initial MCP, isolation, metrics, and session-storage work has shipped.
+The next recommended implementation slice is explicit routing for existing
+helper calls: compaction, memory extraction/classification, and fan-out planning.
 
-## Checks for this slice
+Keep it mechanical: call-site role → configured model profile → existing
+`client_for` path. Reuse `[models]` and preserve existing behavior when a role is
+not configured. Keep current main/worker model controls compatible.
 
-The prior merged UI slice passed 445 Rust tests, warning-clean Clippy, Python
-metrics tests, docs build, and PTY/manual coverage. This validation slice adds two
-offline tests for experimental layout stability and the quality scoring oracle.
-Live probes remain ignored by normal `cargo test`. Final verification passed:
-447 Rust tests (two live probes ignored), warning-clean Clippy, the Zola docs
-build, and `git diff --check`.
+Before production edits, inspect the actual call sites and resolve the differing
+role names in older roadmap examples. Use one small configuration vocabulary;
+those examples are proposals, not an implemented configuration contract.
 
-- `cargo test`
-- `cargo clippy --all-targets -- -D warnings`
-- Zola docs build
-- `git diff --check`
+Acceptance criteria for the first slice:
 
-Two OpenRouter runs completed 90 requests total. See
-`docs/content/guide/prompt-cache-results.md` for scores, cache telemetry, limitations,
-and the next production gate. The local B70 was not used for this slice.
+- Each configured helper uses its selected model; unspecified roles retain their
+  current model selection.
+- Invalid configuration produces a clear error rather than silently selecting a
+  different model.
+- Existing accounting records the actual helper model and attributes spend to
+  the originating session.
+- Scripted offline tests cover routing, fallback, and accounting. CLI and TUI
+  share the backend behavior.
 
-## 2. M9 metrics, second pass
+Do not add automatic task classification, capability discovery, a new observer,
+worker MCP, or a broad TUI refactor to this slice. Add synthesis/judge routing
+later if the inspected call sites justify it. Load the idiomatic Rust skill
+before Rust work; keep the implementation simple and focused.
 
-Merged into main: request-time model/cost/cache records,
-shared accounting in `src/metrics.rs`, per-turn history and context attribution,
-helper spend, durable worker links, `/stats`, and offline text/JSON reports.
-The eval harness reads Worksmith's own combined totals to report dollars per
-solved task. The footer accumulates recorded costs across model switches. Usage is normalized
-at the provider adapter boundary; cache reads/writes and reasoning have explicit
-subset semantics, with coverage for inclusive and disjoint provider counts.
+## Deferred work and constraints
 
-The three accounting review findings are fixed: missing/partial usage stays
-unpriced; background helper jobs retain their originating session and late
-metrics cannot charge a new footer; eval stats failures no longer skip validation
-or overwrite task outcomes. Regression tests cover these cases.
+- **OS sandboxing:** tracked in [issue #2](https://github.com/bradleyd/worksmith/issues/2).
+  Worktrees isolate edits for review; they do not restrict process authority.
+  MCP remains use-at-your-own-risk. Approval gates are not a sandbox.
+- **Worker integration:** worker MCP, dirty snapshots, non-Git copies, and
+  automatic merging remain deferred. Isolated spawn requires a clean checkout;
+  `--shared` is an explicit alternative. Spawning is user initiated.
+- **Session retention:** pruning and automatic retention need a separate design.
+  No silent deletion, legacy migration, or SQLite session index is enabled.
+- **Prompt/cache changes:** production memory placement stays unchanged. The
+  prior experiments did not establish a consistent latency or completed-task
+  quality benefit. The next gate is completed tool-loop fixtures with observed
+  or fixed provider routing, then cross-turn/compaction/resume coverage if
+  placement moves. See [`docs/content/guide/prompt-cache-results.md`](docs/content/guide/prompt-cache-results.md).
+  Do not repeat live experiments as setup work.
+- **Metrics:** missing/partial usage remains unpriced. Historical sessions cannot
+  recover missing prices or worker links; cache-discount billing remains deferred.
+- **TUI extraction:** continue only when a feature forces it. Preserve ordering
+  around worker completion, synthesis, approvals, checkpoints, mining, compaction,
+  and turn completion.
 
-The command-output fix from `COMMAND_OUTPUT_PLAN.md` was merged in `9a6ba4a`: `/stats` and the skill catalog use reference overlays; keyboard/wheel
-navigation stays inside them. The skill catalog distinguishes active instructions from discovered catalog
-entries. The two-pane browser previews instructions without loading; Tab switches
-panes, Enter loads, and `u` unloads without closing the catalog.
-`/skill <name>` pins instructions through the
-same loader as the model's tool in both frontends. `/skill unload <name>` removes
-standing instructions from subsequent requests. The separate 12 KB skill cap has been removed;
-active instructions remain subject to the model context window without silent
-eviction. The browser now occupies a dedicated screen with wrapped controls and
-status, and distinguishes discovered catalog entries from active instructions. Workers inherit independent loaded-skill snapshots. Status messages and errors
-for these commands stay out of the streaming transcript. Other commands that
-print transcript notices have not been migrated to overlays.
+## Validation habit
 
-Prompt/cache validation covers request prefixes, skill lifecycle changes,
-wire metadata, memory changes, and compaction. The new OpenRouter comparison found
-potential cache reuse with memory before the current turn, but no consistent
-latency benefit. Synthetic direct-answer quality was 10/12 for each placement,
-with different failures. A tool-enabled exploratory sample did not execute returned
-tool calls and cannot establish completed-agent quality. Production placement stays
-unchanged. Next gate: completed tool-loop fixture tasks with observed/fixed provider
-routing, followed by cross-turn, compaction, and resume coverage if placement moves.
-See `docs/content/guide/prompt-cache-results.md`. The validation pass is merged into `main`.
-
-Review and dogfood the merged changes while implementing M11. Historical sessions cannot
-recover missing prices or worker links; cache-discount billing remains outside
-this pass. Failed or interrupted requests with no returned usage are not billed
-by this accounting.
-
-Why: the last long dogfood session made the performance problem visible but not
-actionable. The TUI now has a `/metrics` overlay and records request timing,
-token counts, context size, and an estimated context breakdown. This pass turns that into a diagnostic instrument.
-
-Implemented scope:
-
-- per-turn rows, not only aggregate latest/average numbers;
-- session totals for model calls, tool calls, generated tokens, reasoning
-  tokens, elapsed model time, and compactions;
-- cache data when providers expose it, especially
-  `prompt_tokens_details.cached_tokens`;
-- cost by model using `[models]` prices, with local providers explicitly free
-  unless priced;
-- worker metrics included as worker metrics, not mixed into the parent context
-  percentage;
-- `/stats` or an equivalent non-overlay dump for plain mode and logs;
-- JSONL events rich enough that eval scripts stop rebuilding a shadow metrics
-  system outside Worksmith.
-
-Success criteria:
-
-- after a long session, the user can answer "what grew the context?", "how fast
-  is the provider from Worksmith's point of view?", and "which turns cost the
-  most?" without reading server logs;
-- the memory teach/test eval can report the same headline numbers from
-  Worksmith's own events;
-- the metrics display stays out of the transcript and does not block transcript
-  scrolling.
-
-## 3. M11 worker worktrees
-
-Implemented in the working tree: [`WORKTREE_PLAN.md`](WORKTREE_PLAN.md). Clean-commit
-detached worktrees, retained results, and explicit guarded apply are available.
-See [`docs/worktrees.md`](docs/worktrees.md) for usage. Dirty snapshots
-and non-Git copies are deferred; OS sandboxing is tracked separately in issue #2.
-
-This is a priority before expanding worker tools and role routing. Parent-only
-MCP can proceed independently, as described in `MCP_PLAN.md`. Keep these as
-separate implementation slices; worker MCP waits for both.
-
-Each worker should be able to run in its own git worktree or scratch overlay,
-then report a diff for the parent to accept. That fixes fan-out collisions,
-makes worker undo real, and lets write-heavy validation run without leaving
-failed attempts in the user's live tree.
-
-Do not call it a full security sandbox. It is filesystem isolation and review
-semantics first.
-
-## 4. Session storage — dated layout implemented
-
-The agreed pre-release storage slice is implemented: new sessions live in
-`YYYY/MM/DD/<id>/`, supporting files stay inside the session directory, and
-listing/ID lookup share one traversal. Content search uses ripgrep with date and
-project filters. No SQLite session index was added.
-
-Existing development sessions remain readable in place. Tests and evals already
-use isolated homes. Explicit pruning and automatic retention are separate future
-work; neither is silently enabled. See `docs/sessions.md`.
-
-Before tagging, review `CHANGELOG.md` and `RELEASE_NOTES.md`, select the next
-version, and run the release checks. The tag workflow uses `RELEASE_NOTES.md`.
-
-## 5. M12 per-role model routing
-
-Do this after M11 and the initial MCP integration. Metrics now provide the
-measurement foundation; isolated worker execution takes priority.
-
-The harness already makes model calls that are not the user's main turn:
-compaction, memory extraction/classification, fan-out planning, and synthesis or
-judging. Today those mostly inherit the session model. That is expensive,
-rough on local VRAM, and hard to compare.
-
-First useful shape:
-
-```toml
-[roles]
-planner = "openrouter/qwen/qwen3.5-9b"
-classifier = "openrouter/qwen/qwen3.5-9b"
-compactor = "vllm/Qwen/Qwen3.5-9B"
-judge = "openrouter/qwen/qwen3.8-27b"
-```
-
-Keep this mechanical: call-site role -> configured model -> existing
-`client_for` path. Avoid task-kind auto-classification for now.
-
-## 6. TUI command/run-loop refactor
-
-Keep going here only when a feature forces it. `CommandContext` already pulled
-several command families out of the giant TUI file. The remaining command and
-run-loop extractions are valuable, but mechanical refactoring is lower leverage
-than metrics, routing, and session cleanup right now.
-
-When returning to it, keep each extraction behavior-preserving and test the
-branch ordering carefully: worker completions, parent synthesis, approvals,
-checkpoints, memory mining, compaction, and turn completion race through the
-same loop.
-
-## Habit to keep
-
-Test the test. Nearly every expensive false turn came from a check that passed
-for the wrong reason: a scaffold check that accepted implemented code, a
-playcheck with vacuous assertions, `spawn --until` accepting a flag but not
-running the check, and guard tests that matched the wrong branch. Before
-trusting a new validation, break the thing it claims to guard and watch it fail.
+Use scripted models and isolated test homes. Run `cargo test` and warning-clean
+Clippy for implementation changes, plus meaningful PTY checks for affected UI.
+Test the test: deliberately break the behavior a new guard claims to verify and
+confirm it fails. Tool success or a vacuous validation is not proof of completion.
