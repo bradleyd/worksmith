@@ -25,7 +25,7 @@ use anyhow::Result;
 use crate::agent::Agent;
 use crate::llm::Role;
 use crate::memory::{EXTRACTION_PROMPT, MemoryStore, Scope, parse_candidates};
-use crate::session::{Session, session_cwd, sessions_dir};
+use crate::session::Session;
 
 /// A session this small is a false start, a one-liner, or an abandoned run.
 /// Mining them produces noise and costs a model call each.
@@ -83,25 +83,8 @@ pub struct MinePlan {
 /// Sessions recorded for `cwd`, newest first — recent work is likelier to still
 /// be true.
 pub fn sessions_for_project(cwd: &Path) -> Result<Vec<PathBuf>> {
-    let dir = sessions_dir()?;
-    let want = cwd.display().to_string();
-    let mut out: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        // Cheap probe: read the meta line rather than replaying the session.
-        if session_cwd(&path).as_deref() != Some(want.as_str()) {
-            continue;
-        }
-        let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-        out.push((mtime, path));
-    }
-    out.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
-    Ok(out.into_iter().map(|(_, p)| p).collect())
+    Ok(crate::session::store::list(crate::session::store::DateRange::default(), Some(cwd))?
+        .into_iter().map(|entry| entry.path).collect())
 }
 
 /// Render a session for the classifier. Tool *output* is dropped: it is exactly
@@ -145,7 +128,7 @@ pub fn plan(mem: &MemoryStore, cwd: &Path, limit: usize) -> Result<MinePlan> {
         if plan.items.len() >= limit {
             break;
         }
-        let id = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let id = Session::id_from_path(&path).unwrap_or_default().to_string();
         if mem.was_mined(&id).unwrap_or(false) {
             plan.report.already_mined += 1;
             continue;

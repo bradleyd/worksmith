@@ -94,10 +94,10 @@ summary is labeled separately from the actual validation evidence.
 
 Every completed check retains its output, including successful checks. Long output
 shows a labeled tail of at most 4,000 bytes plus a validation log path. Logs live
-beside the worker session in `<session-id>.checks/<attempt-id>.log`; stdout is
+in the dated session directory at `checks/<attempt-id>.log` (legacy sessions keep
+`<session-id>.checks/<attempt-id>.log`); stdout is
 followed by stderr, not interleaved. The existing subprocess limit of 16 MiB per
 stream still applies; exceeding it is an execution error. `/agents tail w1` shows
 validation events during the run. After restart, `worksmith agents diff <uuid>`
 shows the retained check excerpt and log path. Old records explicitly report when
-output was not recorded. Session/log retention cleanup is required before the next
-tagged release.
+output was not recorded. Dated session storage is implemented; retention/pruning remains separate future work.

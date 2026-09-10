@@ -59,4 +59,4 @@ ls -1 "$OUT"/*.json
 echo "compare tokens-per-solved between p1-hosted-loop and p2-local-27b:"
 echo "  that is the daily-driver question, 4-bit local against the hosted build."
 echo "which model actually answered:"
-echo "  grep -ho '\"model\":\"[^\"]*\"' ~/.worksmith/sessions/*.jsonl | sort | uniq -c"
+echo "  rg --no-filename -o '\"model\":\"[^\"]*\"' ~/.worksmith/sessions -g '*.jsonl' | sort | uniq -c"

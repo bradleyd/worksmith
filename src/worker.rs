@@ -594,8 +594,7 @@ impl WorkerManager {
         let session_id = session.id.clone();
         let parent_id = parent_session
             .as_ref()
-            .and_then(|p| p.file_stem())
-            .and_then(|s| s.to_str())
+            .and_then(|p| Session::id_from_path(p))
             .unwrap_or(&session_id)
             .to_owned();
         if let Some(path) = parent_session {

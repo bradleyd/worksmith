@@ -2,7 +2,7 @@
 """Read one task's event stream as a timeline of what the loop actually did.
 
     python3 evals/pool/trace.py traces/pa-reject.jsonl
-    python3 evals/pool/trace.py ~/.worksmith/sessions/<id>.jsonl
+    python3 evals/pool/trace.py ~/.worksmith/sessions/YYYY/MM/DD/<id>/transcript.jsonl
 
 Answers the questions that counters cannot, and that cost three wrong
 diagnoses in one day:

@@ -122,7 +122,7 @@ impl CheckReport {
             }
             Err(error) => (false, None, error),
         };
-        let directory = session.with_extension("checks");
+        let directory = crate::session::store::artifact_path(session, "checks", "checks");
         let path = directory.join(format!("{}.log", uuid::Uuid::new_v4()));
         let code = exit_code
             .map(|code| code.to_string())

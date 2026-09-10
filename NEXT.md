@@ -11,8 +11,8 @@ results are implemented in this change. Usage is in
 Worktrees require a clean starting checkout unless `--shared` is explicitly used.
 They do not provide OS sandboxing; that design is tracked in GitHub issue #2.
 The release history and earlier validation baseline below describe the prior
-merged state before this change. The next priority is session storage cleanup;
-do not create another tag until it is complete.
+merged state before this change. The agreed dated-session storage work is now implemented; review the release
+notes and validation results before choosing the next tag.
 
 ## Current stopping point
 
@@ -144,22 +144,19 @@ failed attempts in the user's live tree.
 Do not call it a full security sandbox. It is filesystem isolation and review
 semantics first.
 
-## 4. Session store cleanup — required before the next tag
+## 4. Session storage — dated layout implemented
 
-The real session store has been polluted by test and eval runs, and
-`most_recent_for_cwd` still crawls a flat directory. This matters more now that
-`/history`, `/metrics <session-id>`, `--resume`, workers, and evals all depend
-on sessions.
+The agreed pre-release storage slice is implemented: new sessions live in
+`YYYY/MM/DD/<id>/`, supporting files stay inside the session directory, and
+listing/ID lookup share one traversal. Content search uses ripgrep with date and
+project filters. No SQLite session index was added.
 
-Do not create another tagged release until this cleanup is complete. Include the
-new per-session validation logs in the storage and retention design.
+Existing development sessions remain readable in place. Tests and evals already
+use isolated homes. Explicit pruning and automatic retention are separate future
+work; neither is silently enabled. See `docs/sessions.md`.
 
-Cheap first cut:
-
-- make tests and evals default to an isolated `WORKSMITH_HOME`;
-- keep real user sessions out of temp/eval storage;
-- add enough indexing or directory structure that resume does not parse every
-  session file.
+Before tagging, review `CHANGELOG.md` and `RELEASE_NOTES.md`, select the next
+version, and run the release checks. The tag workflow uses `RELEASE_NOTES.md`.
 
 ## 5. M12 per-role model routing
 

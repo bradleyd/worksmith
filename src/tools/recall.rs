@@ -172,7 +172,7 @@ impl Tool for KnowledgeTool {
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolOutput {
         let opened = if ctx.is_worker {
             crate::session::Session::path_for_id(&ctx.session_id).and_then(|path| {
-                KnowledgeStore::open_at(&path.with_extension("knowledge.db"), &ctx.cwd)
+                KnowledgeStore::open_at(&crate::session::store::artifact_path(&path, "knowledge.db", "knowledge.db"), &ctx.cwd)
             })
         } else {
             KnowledgeStore::open(&ctx.cwd)

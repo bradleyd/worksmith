@@ -1717,6 +1717,23 @@ async fn helper_job_keeps_its_origin_across_session_changes() {
 }
 
 #[tokio::test]
+async fn helper_metrics_keep_the_dated_session_id() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let old = Session::create(dir.path()).unwrap();
+    let new = Session::create(dir.path()).unwrap();
+    let agent = build_agent(MockClient::new(vec![done("answer")]), dir.path(), 3)
+        .with_session_path(old.path().to_path_buf());
+    let helper = agent.helper_snapshot();
+    agent.set_session_path(new.path().to_path_buf());
+    helper.ask("helper", "question", 512).await.unwrap();
+    let events = worksmith::session::events(old.path()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0].event, worksmith::event::Event::ModelMetrics { session_id: Some(id), .. } if id == &old.id));
+    assert!(worksmith::session::events(new.path()).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn explicitly_reported_zero_usage_has_known_zero_cost() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();

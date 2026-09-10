@@ -3,6 +3,19 @@
 Updated 2026-09-09. Start a new conversation from this file. This is a handoff,
 not authorization to implement every milestone in one pass.
 
+## Session storage update
+
+The next authorized slice implements date directories without a SQLite index:
+`YYYY/MM/DD/<id>/transcript.jsonl`, sidecar listing metadata, and grouped supporting
+files. `sessions list` and ripgrep-backed `sessions search` support UTC creation
+date/range and project filters. Legacy flat sessions remain readable in place.
+Shared ID resolution now covers workers, metrics, mining, MCP, and UI accounting.
+See `docs/sessions.md`, `CHANGELOG.md`, and `RELEASE_NOTES.md`. No tag has been
+created; version selection and publication are still pending. Pruning is separate.
+Final storage QA: 500 tests passed, two live probes ignored; Clippy all-targets
+warning-clean. CLI/REPL/TUI smoke tests passed with dated sessions, search, and
+worker metrics. Build and release-note wiring checks also passed.
+
 ## Implementation update
 
 The user subsequently authorized and reviewed parent MCP, then authorized M11

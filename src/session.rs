@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod store;
+
 use crate::config;
 use crate::llm::Message;
 
@@ -48,7 +50,10 @@ pub fn summary_message(summary: &str) -> Message {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `~/.worksmith/sessions`, created if missing.
@@ -56,8 +61,7 @@ pub fn sessions_dir() -> Result<PathBuf> {
     let dir = config::global_dir()
         .context("cannot locate home directory")?
         .join("sessions");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -65,16 +69,23 @@ impl Session {
     /// Start a fresh session for `cwd` under the global sessions directory.
     pub fn create(cwd: &Path) -> Result<Session> {
         let id = Uuid::new_v4().to_string();
-        let path = sessions_dir()?.join(format!("{id}.jsonl"));
+        let directory = sessions_dir()?
+            .join(store::Date::from_unix(now_secs()).directory())
+            .join(&id);
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("transcript.jsonl");
         Self::create_at(&path, cwd)
     }
 
     /// Start a fresh session at an explicit file path (used by tests).
     pub fn create_at(path: &Path, cwd: &Path) -> Result<Session> {
-        let id = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let id = (if store::is_managed(path) {
+            path.parent().and_then(Path::file_name)
+        } else {
+            path.file_stem()
+        })
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
         let path = path.to_path_buf();
         let file = OpenOptions::new()
             .create(true)
@@ -92,6 +103,16 @@ impl Session {
             cwd: cwd.clone(),
         };
         s.write_entry("meta", serde_json::json!({ "cwd": cwd, "id": id }))?;
+        // Listing metadata is a cache; a missing sidecar falls back to JSONL.
+        let _ = store::write_metadata(
+            &s.path,
+            &store::Metadata {
+                id,
+                cwd,
+                created: now_secs(),
+                title: String::new(),
+            },
+        );
         Ok(s)
     }
 
@@ -147,51 +168,80 @@ impl Session {
                         .unwrap_or(messages.len());
                     let kept = messages.split_off(start);
                     let kept_ids = message_ids.split_off(start);
-                    messages = std::iter::once(summary_message(summary)).chain(kept).collect();
-                    message_ids =
-                        std::iter::once(entry.id.clone()).chain(kept_ids).collect();
+                    messages = std::iter::once(summary_message(summary))
+                        .chain(kept)
+                        .collect();
+                    message_ids = std::iter::once(entry.id.clone()).chain(kept_ids).collect();
                 }
                 _ => {}
             }
         }
 
         if id.is_empty() {
-            id = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            id = Self::id_from_path(path).unwrap_or_default().to_string();
         }
 
-        let file = OpenOptions::new().append(true).open(path)
+        let file = OpenOptions::new()
+            .append(true)
+            .open(path)
             .with_context(|| format!("reopening {} for append", path.display()))?;
 
-        Ok(Session { id, path: path.to_path_buf(), file, last_id, messages, message_ids, cwd })
+        Ok(Session {
+            id,
+            path: path.to_path_buf(),
+            file,
+            last_id,
+            messages,
+            message_ids,
+            cwd,
+        })
     }
 
     /// Find the most recent session whose meta `cwd` matches `cwd`.
     pub fn most_recent_for_cwd(cwd: &Path) -> Result<Option<PathBuf>> {
-        let dir = sessions_dir()?;
-        let want = cwd.display().to_string();
-        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if session_cwd(&path).as_deref() != Some(want.as_str()) {
-                continue;
-            }
-            let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
-            match &best {
-                Some((t, _)) if *t >= mtime => {}
-                _ => best = Some((mtime, path)),
-            }
-        }
-        Ok(best.map(|(_, p)| p))
+        Ok(store::list(store::DateRange::default(), Some(cwd))?
+            .into_iter()
+            .next()
+            .map(|entry| entry.path))
     }
 
-    /// Resolve a session id to its file path.
+    pub fn id_from_path(path: &Path) -> Option<&str> {
+        if store::is_managed(path) {
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+        } else {
+            path.file_stem().and_then(|name| name.to_str())
+        }
+    }
+
+    /// Resolve both dated and legacy session IDs without parsing transcripts.
     pub fn path_for_id(id: &str) -> Result<PathBuf> {
-        Ok(sessions_dir()?.join(format!("{id}.jsonl")))
+        anyhow::ensure!(
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "invalid session id"
+        );
+        let paths: Vec<_> = store::transcripts(store::DateRange::default())?
+            .into_iter()
+            .filter(|path| {
+                if store::is_managed(path) {
+                    path.parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == id)
+                } else {
+                    path.file_stem().is_some_and(|name| name == id)
+                }
+            })
+            .collect();
+        anyhow::ensure!(paths.len() <= 1, "multiple sessions have id {id}");
+        // Preserve the legacy missing-path behavior for callers that create artifacts.
+        Ok(paths
+            .into_iter()
+            .next()
+            .unwrap_or(sessions_dir()?.join(format!("{id}.jsonl"))))
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -228,7 +278,9 @@ impl Session {
 
         let kept = self.messages.split_off(split);
         let kept_ids = self.message_ids.split_off(split);
-        self.messages = std::iter::once(summary_message(summary)).chain(kept).collect();
+        self.messages = std::iter::once(summary_message(summary))
+            .chain(kept)
+            .collect();
         self.message_ids = std::iter::once(entry_id).chain(kept_ids).collect();
         Ok(())
     }
@@ -254,9 +306,27 @@ impl Session {
 
     /// Append a message to both the in-memory history and the JSONL file.
     pub fn append_message(&mut self, msg: Message) -> Result<()> {
+        if msg.role == crate::llm::Role::User
+            && store::is_managed(&self.path)
+            && let Ok(mut meta) = store::metadata(&self.path)
+            && meta.title.is_empty()
+        {
+            meta.title = msg
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(120)
+                .collect();
+            let _ = store::write_metadata(&self.path, &meta);
+        }
         let data = serde_json::to_value(&msg).context("serializing message")?;
         self.write_entry("message", data)?;
-        self.message_ids.push(self.last_id.clone().unwrap_or_default());
+        self.message_ids
+            .push(self.last_id.clone().unwrap_or_default());
         self.messages.push(msg);
         Ok(())
     }
@@ -271,7 +341,9 @@ impl Session {
             data,
         };
         let line = serde_json::to_string(&entry).context("serializing session entry")?;
-        self.file.write_all(format!("{line}\n").as_bytes()).context("writing session entry")?;
+        self.file
+            .write_all(format!("{line}\n").as_bytes())
+            .context("writing session entry")?;
         self.file.flush().ok();
         self.last_id = Some(id);
         Ok(())
@@ -286,9 +358,14 @@ pub fn session_cwd(path: &Path) -> Option<String> {
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<SessionEntry>(&line)
-            && entry.kind == "meta" {
-                return entry.data.get("cwd").and_then(|v| v.as_str()).map(String::from);
-            }
+            && entry.kind == "meta"
+        {
+            return entry
+                .data
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
     }
     None
 }
@@ -317,12 +394,14 @@ pub fn events(path: &Path) -> Result<Vec<TimedEvent>> {
             continue;
         }
         if let Ok(event) = serde_json::from_value(entry.data) {
-            out.push(TimedEvent { ts: entry.ts, event });
+            out.push(TimedEvent {
+                ts: entry.ts,
+                event,
+            });
         }
     }
     Ok(out)
 }
-
 
 /// A durable worker relation, independent of the replayable conversation tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,18 +414,26 @@ pub struct WorkerLink {
 /// append write keeps it separate from the agent's message/event records.
 pub fn link_worker(path: &Path, link: &WorkerLink) -> Result<()> {
     let entry = SessionEntry {
-        id: Uuid::new_v4().to_string(), parent_id: None, kind: "worker".into(),
-        ts: now_secs(), data: serde_json::to_value(link)?,
+        id: Uuid::new_v4().to_string(),
+        parent_id: None,
+        kind: "worker".into(),
+        ts: now_secs(),
+        data: serde_json::to_value(link)?,
     };
     let line = format!("{}\n", serde_json::to_string(&entry)?);
-    OpenOptions::new().append(true).open(path)?.write_all(line.as_bytes())?;
+    OpenOptions::new()
+        .append(true)
+        .open(path)?
+        .write_all(line.as_bytes())?;
     Ok(())
 }
 
 pub fn worker_links(path: &Path) -> Result<Vec<WorkerLink>> {
     let mut out = Vec::new();
     for line in BufReader::new(File::open(path)?).lines() {
-        let Ok(entry) = serde_json::from_str::<SessionEntry>(&line?) else { continue };
+        let Ok(entry) = serde_json::from_str::<SessionEntry>(&line?) else {
+            continue;
+        };
         if entry.kind == "worker" {
             out.push(serde_json::from_value(entry.data)?);
         }
@@ -359,9 +446,13 @@ impl Session {
     /// replay and does not contend for the running turn's session lock.
     pub(crate) fn event_writer(path: &Path) -> Result<Self> {
         Ok(Self {
-            id: String::new(), path: path.to_path_buf(),
+            id: Self::id_from_path(path).unwrap_or_default().to_string(),
+            path: path.to_path_buf(),
             file: OpenOptions::new().append(true).open(path)?,
-            last_id: None, messages: Vec::new(), message_ids: Vec::new(), cwd: String::new(),
+            last_id: None,
+            messages: Vec::new(),
+            message_ids: Vec::new(),
+            cwd: String::new(),
         })
     }
 }

@@ -514,7 +514,8 @@ fn load_with_events(
             warnings.push(format!("{}: invalid worker session id", link.id));
             continue;
         }
-        let worker_path = path.with_file_name(format!("{}.jsonl", link.session_id));
+        let sibling = path.with_file_name(format!("{}.jsonl", link.session_id));
+        let worker_path = if sibling.is_file() { sibling } else { crate::session::Session::path_for_id(&link.session_id)? };
         if worker_path == path {
             warnings.push(format!("{}: worker links to parent", link.id));
             continue;

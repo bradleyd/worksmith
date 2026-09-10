@@ -20,6 +20,15 @@ loop, the evals, and the configuration reference are all there.
 
 See the [MCP setup and limitations](docs/mcp.md) before enabling a server.
 
+## Session history
+
+New sessions and their supporting files live together under
+`~/.worksmith/sessions/YYYY/MM/DD/<session-id>/`. Existing flat sessions remain
+readable. Find prior work with `worksmith sessions list --date YYYY-MM-DD` or
+`worksmith sessions search 'chapter 9'`; search uses ripgrep, with optional date
+range and project filters. See [session storage](docs/sessions.md), the
+[changelog](CHANGELOG.md), and [release notes](RELEASE_NOTES.md).
+
 ## Why I built this
 
 There is a lot of room between one-shotting a prompt and turning an agent loose

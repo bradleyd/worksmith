@@ -98,8 +98,33 @@ struct Args {
     think: Option<String>,
 }
 
+#[derive(clap::Args, Debug)]
+struct SessionFilter {
+    /// Creation date in UTC (YYYY-MM-DD).
+    #[arg(long, conflicts_with_all = ["from", "to"])]
+    date: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    to: Option<String>,
+    /// Restrict results to a project directory.
+    #[arg(long)]
+    project: Option<PathBuf>,
+}
+#[derive(Subcommand, Debug)]
+enum SessionAction {
+    List { #[command(flatten)] filter: SessionFilter },
+    /// Find sessions whose JSONL transcript matches a ripgrep regular expression.
+    Search { pattern: String, #[command(flatten)] filter: SessionFilter },
+}
+
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// List or search saved sessions without starting a model.
+    Sessions {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
     /// Review retained worker worktrees without starting a model.
     Agents {
         #[arg(default_value = "retained")]
@@ -210,6 +235,21 @@ async fn run(args: Args) -> Result<()> {
             args.mode.as_deref() == Some("json"),
         )
         .await;
+    }
+
+    if let Some(Cmd::Sessions { action }) = &args.cmd {
+        let filter = match action { SessionAction::List { filter } | SessionAction::Search { filter, .. } => filter };
+        let range = worksmith::session::store::DateRange::new(filter.date.as_deref().or(filter.from.as_deref()), filter.date.as_deref().or(filter.to.as_deref()))?;
+        let project = filter.project.as_ref().map(std::path::absolute).transpose()?;
+        let entries = match action {
+            SessionAction::List { .. } => worksmith::session::store::list(range, project.as_deref())?,
+            SessionAction::Search { pattern, .. } => worksmith::session::store::search(pattern, range, project.as_deref()).await?,
+        };
+        if entries.is_empty() { println!("No matching sessions."); }
+        for entry in entries {
+            println!("{} · {} · {}\n  {}\n  {}", entry.metadata.id, worksmith::session::store::Date::from_unix(entry.metadata.created), entry.metadata.cwd, entry.metadata.title, entry.path.display());
+        }
+        return Ok(());
     }
 
     if let Some(Cmd::Agents {

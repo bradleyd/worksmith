@@ -478,7 +478,7 @@ impl App {
             Event::ModelCallStarted | Event::ModelCallFinished => {}
             event @ Event::ModelMetrics { .. } => {
                 if let Event::ModelMetrics { session_id: Some(ref id), .. } = event
-                    && self.session_path.file_stem().and_then(|s| s.to_str()) != Some(id.as_str())
+                    && Session::id_from_path(&self.session_path) != Some(id.as_str())
                 {
                     return;
                 }

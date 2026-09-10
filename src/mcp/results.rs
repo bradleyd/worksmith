@@ -16,7 +16,7 @@ pub(super) struct Store {
 impl Store {
     pub fn new(session: &std::path::Path) -> Self {
         Self {
-            directory: session.with_extension("mcp-results"),
+            directory: crate::session::store::artifact_path(session, "mcp-results", "mcp-results"),
         }
     }
 

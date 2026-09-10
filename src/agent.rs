@@ -448,7 +448,7 @@ impl Agent {
     /// destinations drifting apart is how the history came to be missing.
     fn emit(&self, session: &mut Session, mut ev: Event) {
         if let Event::ModelMetrics { session_id, .. } = &mut ev {
-            *session_id = session.path().file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+            *session_id = Some(session.id.clone());
         }
         // Best-effort: a session that cannot be written must not kill a turn.
         let _ = session.append_event(&ev);
@@ -1425,7 +1425,7 @@ impl Agent {
     fn current_tool_context(&self) -> ToolContext {
         let mut ctx = self.tool_ctx.clone();
         if let Some(path) = self.accounting_path.lock().unwrap().as_ref()
-            && let Some(id) = path.file_stem().and_then(|id| id.to_str())
+            && let Some(id) = Session::id_from_path(path)
         {
             ctx.session_id = id.to_string();
             ctx.mcp_session_path = Some(path.clone());

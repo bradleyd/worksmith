@@ -253,3 +253,35 @@ fn normalization_preserves_absent_cache_telemetry_and_legacy_usage() {
     assert_eq!(old.cache_write_tokens, None);
     assert_eq!(old.cached_tokens, None);
 }
+
+#[test]
+fn worker_metrics_resolve_dated_sessions_across_days() {
+    common::isolate_home();
+    let project = tempfile::tempdir().unwrap();
+    let mut parent = Session::create(project.path()).unwrap();
+    parent
+        .append_event(&sample("parent", Some(0.1), None))
+        .unwrap();
+    let root = worksmith::session::sessions_dir().unwrap();
+    let directory = root
+        .join("2000/01/01")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut worker =
+        Session::create_at(&directory.join("transcript.jsonl"), project.path()).unwrap();
+    worker
+        .append_event(&sample("worker", Some(0.2), Some(100)))
+        .unwrap();
+    link_worker(
+        parent.path(),
+        &WorkerLink {
+            id: "w1".into(),
+            session_id: worker.id.clone(),
+        },
+    )
+    .unwrap();
+    let stats = load(parent.path()).unwrap();
+    assert_eq!(stats.combined.calls, 2);
+    assert_eq!(stats.workers.len(), 1);
+    assert!(stats.warnings.is_empty());
+}
