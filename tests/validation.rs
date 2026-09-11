@@ -141,3 +141,18 @@ fn old_validation_events_still_deserialize() {
         worksmith::event::Event::Validation { report: None, .. }
     ));
 }
+
+#[tokio::test]
+async fn validation_pipelines_preserve_failure_and_explicit_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    for (command, expected) in [
+        ("(printf 'check failed\\n'; exit 7) | tail -1", false),
+        ("printf 'check passed\\n' | tail -1", true),
+        ("false | cat || true", true),
+    ] {
+        let result = CommandValidator::new(command, dir.path().to_path_buf(), Duration::from_secs(5))
+            .validate().await.unwrap();
+        assert_eq!(result.passed, expected, "{command}: {result:?}");
+        if !expected { assert_eq!(result.exit_code, Some(7)); }
+    }
+}

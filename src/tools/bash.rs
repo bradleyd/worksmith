@@ -31,7 +31,7 @@ impl Tool for BashTool {
 
     fn description(&self) -> &str {
         "Run a shell command in the working directory and return its combined \
-         stdout/stderr and exit status. Has a timeout; long-running or \
+         stdout/stderr and exit status. Pipelines fail if any stage fails (pipefail). Has a timeout; long-running or \
          interactive commands will be killed."
     }
 
@@ -88,7 +88,7 @@ impl Tool for BashTool {
             .unwrap_or(ctx.bash_timeout);
 
         let mut cmd = Command::new("bash");
-        cmd.arg("-lc")
+        cmd.args(["-o", "pipefail", "-lc"])
             .arg(command)
             .current_dir(&ctx.cwd)
             .env("WORKSMITH_SESSION_ID", &ctx.session_id)
@@ -143,6 +143,23 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod kill_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_pipeline_stages_do_not_report_success_or_run_the_next_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext { cwd: dir.path().to_path_buf(), ..Default::default() };
+        let out = BashTool.run(json!({"command":
+            "worksmith_missing_test_executable_7821 2>&1 | tail -1 && printf ran > second-check"
+        }), &ctx).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("exit code: 127"));
+        assert!(out.content.contains("command not found"));
+        assert!(!dir.path().join("second-check").exists());
+        for command in ["printf 'ok\\n' | cat", "false | cat || true"] {
+            let out = BashTool.run(json!({"command": command}), &ctx).await;
+            assert!(!out.is_error, "{}", out.content);
+        }
+    }
 
     /// A timed-out command does not outlive its timeout.
     ///

@@ -32,6 +32,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+mod checkpoint;
 mod composer;
 mod footer;
 mod modals;
@@ -189,6 +190,7 @@ struct App {
     // index of the in-progress assistant / thinking item, for delta appends
     cur_assistant: Option<usize>,
     cur_thinking: Option<usize>,
+    checkpoint_item: Option<usize>,
     // Cosmetic/among-turn state.
     spinner: usize,
     turn_start: Option<std::time::Instant>,
@@ -258,6 +260,7 @@ impl App {
             status: "/help for keys and commands".into(),
             cur_assistant: None,
             cur_thinking: None,
+            checkpoint_item: None,
             spinner: 0,
             turn_start: None,
             compact_start: None,
@@ -298,6 +301,7 @@ impl App {
     fn reset_for_new_session(&mut self, path: PathBuf) {
         self.session_path = path;
         self.transcript.clear_for_new_session();
+        self.checkpoint_item = None;
         self.cur_assistant = None;
         self.cur_thinking = None;
         // Counters the footer reads. Totals are per-session: they sit next to a
@@ -312,6 +316,17 @@ impl App {
         self.last_finish_reason = None;
         self.compacting = false;
         self.compact_start = None;
+    }
+
+    fn show_checkpoint(&mut self, subject: &str, question: &str) {
+        if let Some(i) = self.checkpoint_item {
+            self.transcript.items[i].text.push_str(&format!("\n\n{question}"));
+            self.transcript.items[i].kind = Kind::Checkpoint { expanded: true };
+            self.touch(i);
+        } else {
+            self.push(Kind::Checkpoint { expanded: true }, format!("{subject}\n{question}"));
+            self.checkpoint_item = Some(self.transcript.items.len() - 1);
+        }
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
@@ -475,7 +490,8 @@ impl App {
                 self.touch(at);
             }
             // Bookkeeping for the supervisor and /metrics; nothing to draw.
-            Event::ModelCallStarted | Event::ModelCallFinished => {}
+            Event::ModelCallStarted => { self.checkpoint_item = None; }
+            Event::ModelCallFinished => {}
             event @ Event::ModelMetrics { .. } => {
                 if let Event::ModelMetrics { session_id: Some(ref id), .. } = event
                     && Session::id_from_path(&self.session_path) != Some(id.as_str())
@@ -489,11 +505,17 @@ impl App {
             }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
             Event::ToolCall { name, arguments, .. } => {
-                self.push(Kind::Tool, tool_summary(&name, &arguments));
+                if name != "checkpoint" {
+                    self.push(Kind::Tool, tool_summary(&name, &arguments));
+                }
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
             Event::ToolResult { ok, output, name, .. } => {
+                if name == "checkpoint" && ok {
+                    self.checkpoint_item = None;
+                    return;
+                }
                 // Successful edit/write results are unified diffs → render as such.
                 if ok && matches!(name.as_str(), "edit" | "write") {
                     self.push(Kind::Diff, output);
@@ -503,16 +525,15 @@ impl App {
                 }
             }
             Event::Checkpoint { kind, subject, detail } => {
-                // `ask` renders when its answer comes back, not here — the
-                // question is already on screen in the composer's prompt, and
-                // printing it twice reads as the loop stuttering.
+                // Blocking asks render from the UI request channel; the event
+                // and tool channels must not create a second copy.
                 let head = match kind.as_str() {
                     "yours" => format!("yours — {subject}"),
-                    // Both halves of a question are already on screen: the
-                    // composer prompt asked it, and answering echoed it back.
+                    // The request and local answer share one checkpoint item.
                     // These events exist for the session log, /history and
                     // --mode json, not to be printed a second time here.
                     "ask" | "answered" => return,
+                    "note" if self.checkpoint_item.is_some() => return,
                     _ => subject.clone(),
                 };
                 self.push(Kind::Pair, format!("{head}\n  {detail}"));
@@ -558,7 +579,7 @@ impl App {
             Event::Warning { message } => self.push(Kind::Notice, format!("⚠ {message}")),
             Event::Error { message } => self.push(Kind::Error, message),
             Event::SessionStarted { id } => self.show_session_id(&id),
-            Event::TurnComplete { .. } => {}
+            Event::TurnComplete { .. } => { self.checkpoint_item = None; }
             Event::McpOperation { .. } => {}
         }
     }
@@ -1082,10 +1103,7 @@ async fn run_loop(
             // free to ignore it — Esc skips, and the work carries on without
             // their answer rather than stalling.
             Some(req) = asks.recv(), if !app.modals.ask_pending() => {
-                app.push(
-                    Kind::Pair,
-                    format!("{}\n  {}", req.subject, req.question),
-                );
+                app.show_checkpoint(&req.subject, &req.question);
                 app.status = "type your answer · Enter to send · Esc to skip".into();
                 alert("waiting on you");
                 app.modals.set_ask(req);
@@ -1498,6 +1516,9 @@ fn handle_normal_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Result<Option<
         KeyCode::Char('c') if ctrl => return Ok(Some(Flow::Quit)),
         // Back to typing. Several routes, because being stuck in a mode is
         // the failure people remember.
+        KeyCode::Enter if app.transcript.toggle_checkpoint() => {
+            app.status = "checkpoint toggled · Enter expands/collapses · i to type".into();
+        }
         KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Enter | KeyCode::Esc => {
             app.enter_insert();
             app.status = "insert".into();
@@ -1606,9 +1627,15 @@ fn answer_pending_ask(app: &mut App, answer: Option<String>) -> bool {
         return false;
     };
 
-    match answer {
-        AskAnswer::Answered(input) => app.push(Kind::Pair, format!("you ▸ {input}")),
-        AskAnswer::Skipped => app.push(Kind::Pair, "skipped".to_string()),
+    let echo = match answer {
+        AskAnswer::Answered(input) => format!("You: {input}"),
+        AskAnswer::Skipped => "Skipped".to_string(),
+    };
+    if let Some(i) = app.checkpoint_item {
+        app.transcript.items[i].text.push_str(&format!("\n\n{echo}"));
+        app.touch(i);
+    } else {
+        app.push(Kind::Pair, echo);
     }
     app.status = "/help for keys and commands".into();
     true
@@ -1739,7 +1766,7 @@ async fn handle_insert_key(
                 // Nothing to clear, so Esc means "stop typing, start reading".
                 // Never steals an Esc that had a job to do.
                 app.enter_normal();
-                app.status = "normal · j k /search n N · y yank · i insert".into();
+                app.status = "normal · j k /search n N · Enter fold · y yank · i insert".into();
             } else {
                 app.composer.clear_input();
             }
@@ -1775,7 +1802,7 @@ async fn handle_insert_key(
         KeyCode::Char(c) if !ctrl => {
             if app.escape_pair(c) {
                 app.enter_normal();
-                app.status = "normal · j k /search n N · y yank · i insert".into();
+                app.status = "normal · j k /search n N · Enter fold · y yank · i insert".into();
                 app.composer.refresh_hint();
                 return Ok(Flow::Continue);
             }
@@ -1907,7 +1934,8 @@ NORMAL MODE (Esc on an empty composer, or `jj`)
   g  G           top / bottom    PageUp/Dn  page
   /              search          n  N       next / previous match
   y              yank the message under the cursor to the clipboard
-  i  Enter  Esc  back to typing
+  Enter          expand/collapse checkpoint (else back to typing)
+  i  Esc         back to typing
 
 SESSION
   /new                                start a fresh session
@@ -5858,6 +5886,81 @@ mod tests {
         let (_, some) =
             compute_completions("/model vllm/", Path::new("."), &probe_store(), &cfg).unwrap();
         assert_eq!(some, vec!["vllm/local-model".to_string()]);
+    }
+
+    #[test]
+    fn checkpoint_tool_events_do_not_duplicate_the_question_in_either_delivery_order() {
+        for request_first in [false, true] {
+            let mut a = app();
+            let call = Event::ToolCall {
+                id: "q1".into(), name: "checkpoint".into(),
+                arguments: r#"{"kind":"ask","subject":"Timer","detail":"Wall-clock or turns?"}"#.into(),
+            };
+            if request_first {
+                a.show_checkpoint("Timer", "Wall-clock or turns?");
+                a.apply_event(call);
+            } else {
+                a.apply_event(call);
+                a.show_checkpoint("Timer", "Wall-clock or turns?");
+            }
+            a.apply_event(Event::Checkpoint { kind: "ask".into(), subject: "Timer".into(), detail: "Wall-clock or turns?".into() });
+            a.apply_event(Event::ToolResult { id: "q1".into(), name: "checkpoint".into(), ok: true, output: "The user answered: wall-clock. Build that.".into() });
+            assert_eq!(a.transcript.items.len(), 1);
+            assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: true }));
+            assert_eq!(a.transcript.items[0].text.matches("Wall-clock or turns?").count(), 1);
+            assert!(!a.transcript.items[0].text.contains("Build that"));
+            a.apply_event(Event::ToolResult { id: "q2".into(), name: "checkpoint".into(), ok: false, output: "no checkpoints left".into() });
+            assert!(a.transcript.items.last().unwrap().text.contains("[error] no checkpoints left"));
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_discussion_and_answer_stay_in_one_expandable_item() {
+        use crate::tools::approval::Asker;
+        let (asker, mut rx) = crate::tools::approval::ChannelAsker::new();
+        let task = tokio::spawn(async move { asker.ask_text("Timer", "Why wall-clock?").await });
+        let req = rx.recv().await.unwrap();
+        let mut a = app();
+        a.show_checkpoint(&req.subject, &req.question);
+        a.modals.set_ask(req);
+        assert!(answer_pending_ask(&mut a, Some("How is it tested?".into())));
+        assert_eq!(task.await.unwrap().as_deref(), Some("How is it tested?"));
+        a.apply_event(Event::Checkpoint { kind: "note".into(), subject: "Timer".into(), detail: "Use a fake clock.".into() });
+        a.show_checkpoint("Timer", "Use a fake clock. What should it do?");
+        assert_eq!(a.transcript.items.len(), 1);
+        assert!(a.transcript.items[0].text.contains("You: How is it tested?"));
+        assert_eq!(a.transcript.items[0].text.matches("Use a fake clock.").count(), 1);
+        a.ensure_rows(60);
+        a.enter_normal();
+        a.transcript.cursor_row = 0;
+        handle_normal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut a, false).unwrap();
+        a.ensure_rows(60);
+        assert_eq!(a.transcript.mode, Mode::Normal);
+        assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: false }));
+        // Collapse is presentation only: yank still uses this original text.
+        assert!(a.transcript.items[0].text.contains("How is it tested?"));
+        a.set_search(Some(Search { pattern: "fake clock".into(), typing: false }));
+        assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: true }));
+        assert!(!a.transcript.search_hits().is_empty());
+        a.apply_event(Event::TurnComplete { outcome: "done".into() });
+        a.show_checkpoint("Next choice", "A separate question");
+        assert_eq!(a.transcript.items.len(), 2);
+    }
+
+    #[test]
+    fn checkpoint_growth_keeps_selection_on_the_same_later_item() {
+        let mut a = app();
+        a.show_checkpoint("Timer", "Short question");
+        a.push(Kind::Assistant, "I am reading this older answer.");
+        a.ensure_rows(40);
+        a.enter_normal();
+        a.transcript.cursor_row = a.transcript.item_starts[1];
+        a.show_checkpoint("Timer", &"More context for the question. ".repeat(10));
+        a.ensure_rows(40);
+        assert_eq!(a.item_at_row(a.transcript.cursor_row), Some(1));
+        assert!(!a.transcript.follow);
+        a.ensure_rows(25);
+        assert_eq!(a.item_at_row(a.transcript.cursor_row), Some(1));
     }
 
     #[test]

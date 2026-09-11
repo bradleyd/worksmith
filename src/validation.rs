@@ -50,7 +50,7 @@ impl CommandValidator {
 impl Validator for CommandValidator {
     async fn validate(&self) -> Result<CheckOutput, String> {
         let mut cmd = Command::new("bash");
-        cmd.arg("-lc").arg(&self.command).current_dir(&self.cwd);
+        cmd.args(["-o", "pipefail", "-lc"]).arg(&self.command).current_dir(&self.cwd);
         let out = crate::process::run(cmd, self.timeout, &self.cancel, 16 * 1024 * 1024)
             .await
             .map_err(|e| format!("validation command: {e}"))?;

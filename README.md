@@ -74,8 +74,22 @@ through a tool-free helper call and asks again, filing only the eventual decisio
 After four question rounds without direction, the turn stops. Empty input or Esc
 skips the checkpoint under its existing policy. Tool calls batched after a
 blocking checkpoint are deferred so the next model request can use your answer.
+
+In the TUI, the question, discussion, and answer share one expandable checkpoint
+entry. Raw checkpoint tool arguments and successful tool responses stay in the
+session log and `/history`; failures remain visible. In transcript navigation
+mode (`jj`, or Esc with an empty idle composer), Enter folds/unfolds the selected
+checkpoint and `i` returns to typing. Search reveals matching folded content;
+yanking copies the full entry. Composer Enter still answers the question.
+
 This is guidance plus bounded interruption handling, not proof that the model
 will identify every important decision; mechanical stuck/validation checks remain.
+
+The `bash` tool and `--until` checks run with Bash `pipefail`: a failing pipeline
+stage makes the pipeline fail even when the last stage (`tail`, for example)
+succeeds. Explicit recovery such as `|| true` still applies. A consumer such as
+`head` can close a pipe early and cause an upstream SIGPIPE; prefer capturing the
+full check output when its exit status matters.
 
 None of this is only for code. The loop cares that a command exits zero and not
 what that command looked at. A writer using it as a rubber duck gets the same

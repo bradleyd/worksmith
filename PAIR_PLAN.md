@@ -40,6 +40,36 @@ still proposals; this branch does not implement them.
 - `git diff --check`: passed. No live model quality claim; local 27B dogfooding
   and trace UI work remain next.
 
+## Follow-up from the MUD dogfood run
+
+Session `fe8a4b38-b033-454b-8bb9-3d82638ca7f2` paused before edits and followed the
+user's testability requirement. It also exposed duplicated checkpoint text/raw
+JSON, awkward wrapping, and a shell pipeline that returned success despite a
+missing Python executable. The model recovered, but the shell status was weak
+evidence. The run did not exercise a follow-up question or isolate the prompt's
+benefit: the user explicitly asked for discussion before editing.
+
+The follow-up slice groups each live checkpoint's question, discussion, and
+answer into one expandable entry. It uses a dedicated small checkpoint renderer,
+word wrapping, and basic inline emphasis. Enter in transcript navigation toggles
+the selected entry; search reveals hidden matches and copying retains full text.
+Pending questions start expanded. Raw tool arguments/success results remain in
+session history; errors remain visible. This is not the full turn/worker trace.
+
+Bash tool calls and command validators enable `pipefail`. Failure in a pipeline
+stage is retained; intentional shell recovery remains possible. This changes
+shell defaults, not command approval rules or what counts as validation evidence.
+
+Follow-up validation:
+
+- `cargo test --locked`: 515 passed; 2 opt-in live probes ignored.
+- `cargo clippy --locked --all-targets -- -D warnings`: clean.
+- Scripted local PTY smoke: one formatted checkpoint, no raw JSON, folding while
+  waiting, follow-up discussion, final direction, and completion passed.
+- Removing `pipefail` deliberately made the missing-executable regression fail;
+  restoring it passed. Validation pipelines also cover failure and recovery.
+- `git diff --check`: passed. Live model follow-up-question dogfooding remains.
+
 ## 1. Problem and intended result
 
 Before this slice, the model received a task-execution prompt even when `/pair` is on.

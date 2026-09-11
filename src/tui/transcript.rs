@@ -37,6 +37,8 @@ pub(super) enum Kind {
     /// it reads as machinery chatter, and machinery chatter is what teaches
     /// someone to stop reading the transcript.
     Pair,
+    /// One inspectable question/discussion/answer block; raw text stays intact.
+    Checkpoint { expanded: bool },
 }
 
 pub(super) struct Item {
@@ -145,15 +147,40 @@ impl Transcript {
         if self.item_starts.is_empty() {
             return None;
         }
-        Some(match self.item_starts.binary_search(&row) {
-            Ok(i) => i,
-            Err(0) => 0,
-            Err(i) => i - 1,
-        })
+        // Hidden items share the next visible item's start row.
+        Some(self.item_starts.partition_point(|&start| start <= row).saturating_sub(1))
+    }
+
+    pub(super) fn toggle_checkpoint(&mut self) -> bool {
+        let Some(index) = self.item_at_row(self.cursor_row) else { return false; };
+        let Kind::Checkpoint { expanded } = &mut self.items[index].kind else { return false; };
+        *expanded = !*expanded;
+        self.cursor_row = self.item_starts[index];
+        self.touch(index);
+        true
+    }
+
+    fn reveal_checkpoint_matches(&mut self) {
+        let Some(search) = self.search.as_ref().filter(|s| !s.pattern.is_empty()) else { return; };
+        let needle = search.pattern.to_lowercase();
+        let mut first = None;
+        for (i, item) in self.items.iter_mut().enumerate() {
+            if item.kind == (Kind::Checkpoint { expanded: false })
+                && item.text.to_lowercase().contains(&needle)
+            {
+                item.kind = Kind::Checkpoint { expanded: true };
+                first.get_or_insert(i);
+            }
+        }
+        if let Some(i) = first {
+            self.touch(i);
+            if self.cache_width > 0 { self.ensure_rows(self.cache_width); }
+        }
     }
 
     pub(super) fn set_search(&mut self, search: Option<Search>) {
         self.search = search;
+        self.reveal_checkpoint_matches();
         self.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
@@ -162,6 +189,7 @@ impl Transcript {
         if let Some(search) = &mut self.search {
             f(search);
         }
+        self.reveal_checkpoint_matches();
         self.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
@@ -241,6 +269,8 @@ impl Transcript {
             }
             return;
         }
+        let anchor = self.item_at_row(self.cursor_row)
+            .map(|i| (i, self.cursor_row.saturating_sub(self.item_starts[i])));
         let from = if width_changed { 0 } else { self.dirty_from.unwrap_or(0) };
         // Never start past the last item with recorded rows: `item_starts` is
         // what says where a rebuild may resume, and indexing past it would
@@ -263,6 +293,12 @@ impl Transcript {
                 self.show_thinking,
                 width,
             );
+        }
+        if let Some((i, offset)) = anchor
+            && let Some(&start) = self.item_starts.get(i)
+        {
+            let end = self.item_starts.get(i + 1).copied().unwrap_or(self.cached_rows.len());
+            self.cursor_row = (start + offset).min(end.saturating_sub(1));
         }
         self.cache_width = width;
         self.dirty = false;
@@ -317,6 +353,10 @@ fn item_rows(
 ) {
     let w = (width.max(12) as usize).saturating_sub(1);
     {
+        if let Kind::Checkpoint { expanded } = item.kind {
+            super::checkpoint::render(rows, &item.text, expanded, width);
+            return;
+        }
         if item.kind == Kind::Thinking && !show_thinking {
             return;
         }
@@ -387,6 +427,7 @@ fn kind_style(kind: Kind) -> (Style, &'static str) {
             (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
         }
         Kind::Error => (Style::default().fg(Color::Red), "! "),
+        Kind::Checkpoint { .. } => unreachable!("checkpoints have their own renderer"),
         Kind::Diff | Kind::ReviewDiff => unreachable!("diffs are rendered before kind styling"),
     }
 }
