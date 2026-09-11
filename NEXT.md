@@ -50,8 +50,10 @@ Two bounded slices:
    calls to invent activity summaries. Extend the existing transcript module and
    extract only what this feature requires.
 
-Next, dogfood pairing on the local 27B and discuss the working/waiting/finished
-trace mockups before implementing the UI slice. Resume currently uses configured
+Two local MUD runs verified checkpoint expansion and follow-up discussion before
+edits (see `PAIR_PLAN.md`). Individual expandable tool entries are the current
+slice. Next, discuss the working/waiting/finished
+trace mockups before adding turn grouping. Resume currently uses configured
 pairing state; persisted live mode changes remain deferred.
 
 ## Deferred work and constraints

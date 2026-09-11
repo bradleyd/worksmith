@@ -32,6 +32,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+mod activity;
 mod checkpoint;
 mod composer;
 mod footer;
@@ -504,16 +505,19 @@ impl App {
                 self.push(Kind::Notice, format!("model changed: {from} → {to}"));
             }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
-            Event::ToolCall { name, arguments, .. } => {
+            Event::ToolCall { id, name, arguments } => {
                 if name != "checkpoint" {
-                    self.push(Kind::Tool, tool_summary(&name, &arguments));
+                    self.transcript.start_tool(id, tool_summary(&name, &arguments));
                 }
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
-            Event::ToolResult { ok, output, name, .. } => {
+            Event::ToolResult { id, ok, output, name } => {
                 if name == "checkpoint" && ok {
                     self.checkpoint_item = None;
+                    return;
+                }
+                if name != "checkpoint" && self.transcript.finish_tool(&id, &name, ok, &output) {
                     return;
                 }
                 // Successful edit/write results are unified diffs → render as such.
@@ -1516,8 +1520,8 @@ fn handle_normal_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Result<Option<
         KeyCode::Char('c') if ctrl => return Ok(Some(Flow::Quit)),
         // Back to typing. Several routes, because being stuck in a mode is
         // the failure people remember.
-        KeyCode::Enter if app.transcript.toggle_checkpoint() => {
-            app.status = "checkpoint toggled · Enter expands/collapses · i to type".into();
+        KeyCode::Enter if app.transcript.toggle_entry() => {
+            app.status = "entry toggled · Enter expands/collapses · i to type".into();
         }
         KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Enter | KeyCode::Esc => {
             app.enter_insert();
@@ -1733,7 +1737,7 @@ async fn handle_insert_key(
         KeyCode::Char('c') if ctrl => return Ok(Flow::Quit),
         KeyCode::Tab => complete(app, ctx.cwd, ctx.mem, ctx.config),
         KeyCode::Char('o') if ctrl => {
-            app.transcript.collapse_tools = !app.transcript.collapse_tools;
+            app.transcript.toggle_tools();
             // Changes how *every* item renders, not just the tail.
             app.touch_all();
             app.status = format!(
@@ -1934,7 +1938,7 @@ NORMAL MODE (Esc on an empty composer, or `jj`)
   g  G           top / bottom    PageUp/Dn  page
   /              search          n  N       next / previous match
   y              yank the message under the cursor to the clipboard
-  Enter          expand/collapse checkpoint (else back to typing)
+  Enter          expand/collapse entry (else back to typing)
   i  Esc         back to typing
 
 SESSION
@@ -5409,7 +5413,12 @@ mod tests {
         // before-assistant, tool, after-assistant → 3 separate items.
         assert_eq!(a.transcript.items.len(), 3);
         assert_eq!(a.transcript.items[0].text, "before");
-        assert!(matches!(a.transcript.items[1].kind, Kind::Tool));
+        assert!(matches!(a.transcript.items[1].kind, Kind::ToolActivity { .. }));
+        a.apply_event(Event::ToolResult { id: "1".into(), name: "ls".into(), ok: true, output: "main.py".into() });
+        assert_eq!(a.transcript.items.len(), 3);
+        assert!(a.transcript.items[1].text.contains("main.py"));
+        a.apply_event(Event::ToolResult { id: "unmatched".into(), name: "ls".into(), ok: false, output: "missing call".into() });
+        assert!(a.transcript.items.last().unwrap().text.contains("missing call"));
         assert_eq!(a.transcript.items[2].text, "after");
     }
 

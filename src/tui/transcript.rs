@@ -28,6 +28,7 @@ pub(super) enum Kind {
     Thinking,
     Tool,
     ToolResult,
+    ToolActivity { expanded: bool, chosen: bool, status: super::activity::Status, diff: bool },
     Diff,
     /// Explicit review stays expanded even when tool previews are collapsed.
     ReviewDiff,
@@ -51,6 +52,7 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 15;
 
 pub(super) struct Transcript {
     pub(super) items: Vec<Item>,
+    pub(super) pending_tools: std::collections::HashMap<String, usize>,
     /// Lines scrolled up from the bottom; 0 = following the tail.
     pub(super) scroll_up: u16,
     pub(super) follow: bool,
@@ -86,6 +88,7 @@ impl Default for Transcript {
     fn default() -> Self {
         Self {
             items: Vec::new(),
+            pending_tools: Default::default(),
             scroll_up: 0,
             follow: true,
             collapse_tools: false,
@@ -107,6 +110,7 @@ impl Default for Transcript {
 impl Transcript {
     pub(super) fn clear_for_new_session(&mut self) {
         self.items.clear();
+        self.pending_tools.clear();
         // A fresh transcript has nothing to be scrolled back into.
         self.scroll_up = 0;
         self.dirty = true;
@@ -151,25 +155,33 @@ impl Transcript {
         Some(self.item_starts.partition_point(|&start| start <= row).saturating_sub(1))
     }
 
-    pub(super) fn toggle_checkpoint(&mut self) -> bool {
+    pub(super) fn toggle_entry(&mut self) -> bool {
         let Some(index) = self.item_at_row(self.cursor_row) else { return false; };
-        let Kind::Checkpoint { expanded } = &mut self.items[index].kind else { return false; };
+        let expanded = match &mut self.items[index].kind {
+            Kind::Checkpoint { expanded } => expanded,
+            Kind::ToolActivity { expanded, chosen, .. } => { *chosen = true; expanded }
+            _ => return false,
+        };
         *expanded = !*expanded;
         self.cursor_row = self.item_starts[index];
         self.touch(index);
         true
     }
 
-    fn reveal_checkpoint_matches(&mut self) {
+    fn reveal_matches(&mut self) {
         let Some(search) = self.search.as_ref().filter(|s| !s.pattern.is_empty()) else { return; };
         let needle = search.pattern.to_lowercase();
         let mut first = None;
         for (i, item) in self.items.iter_mut().enumerate() {
-            if item.kind == (Kind::Checkpoint { expanded: false })
-                && item.text.to_lowercase().contains(&needle)
-            {
-                item.kind = Kind::Checkpoint { expanded: true };
-                first.get_or_insert(i);
+            if item.text.to_lowercase().contains(&needle) {
+                match &mut item.kind {
+                    Kind::Checkpoint { expanded } | Kind::ToolActivity { expanded, .. } if !*expanded => {
+                        *expanded = true;
+                        if let Kind::ToolActivity { chosen, .. } = &mut item.kind { *chosen = true; }
+                        first.get_or_insert(i);
+                    }
+                    _ => {}
+                }
             }
         }
         if let Some(i) = first {
@@ -180,7 +192,7 @@ impl Transcript {
 
     pub(super) fn set_search(&mut self, search: Option<Search>) {
         self.search = search;
-        self.reveal_checkpoint_matches();
+        self.reveal_matches();
         self.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
@@ -189,7 +201,7 @@ impl Transcript {
         if let Some(search) = &mut self.search {
             f(search);
         }
-        self.reveal_checkpoint_matches();
+        self.reveal_matches();
         self.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
@@ -344,7 +356,7 @@ pub(super) fn build_rows(
 /// rebuild a single item instead of the whole transcript: streaming mutates
 /// only the last item, and re-wrapping everything per token is what made a long
 /// session crawl (measured: 15ms per token at 60 turns of real tool output).
-fn item_rows(
+pub(super) fn item_rows(
     rows: &mut Vec<Line<'static>>,
     item: &Item,
     collapse_tools: bool,
@@ -353,6 +365,10 @@ fn item_rows(
 ) {
     let w = (width.max(12) as usize).saturating_sub(1);
     {
+        if let Kind::ToolActivity { expanded, status, diff, .. } = item.kind {
+            super::activity::render(rows, &item.text, expanded, status, diff, width);
+            return;
+        }
         if let Kind::Checkpoint { expanded } = item.kind {
             super::checkpoint::render(rows, &item.text, expanded, width);
             return;
@@ -427,6 +443,7 @@ fn kind_style(kind: Kind) -> (Style, &'static str) {
             (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
         }
         Kind::Error => (Style::default().fg(Color::Red), "! "),
+        Kind::ToolActivity { .. } => unreachable!("tool activities have their own renderer"),
         Kind::Checkpoint { .. } => unreachable!("checkpoints have their own renderer"),
         Kind::Diff | Kind::ReviewDiff => unreachable!("diffs are rendered before kind styling"),
     }

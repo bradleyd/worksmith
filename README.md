@@ -82,6 +82,12 @@ mode (`jj`, or Esc with an empty idle composer), Enter folds/unfolds the selecte
 checkpoint and `i` returns to typing. Search reveals matching folded content;
 yanking copies the full entry. Composer Enter still answers the question.
 
+Tool calls and results also share an expandable entry: successful output starts
+collapsed, failures open. Enter toggles a selected tool entry, including while it
+runs; that choice survives completion. Ctrl+O folds/unfolds all tool output.
+Search reveals matching output, and yanking keeps the complete entry. Expanded
+edit/write results retain their diff colors.
+
 This is guidance plus bounded interruption handling, not proof that the model
 will identify every important decision; mechanical stuck/validation checks remain.
 

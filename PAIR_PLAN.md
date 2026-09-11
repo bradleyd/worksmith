@@ -1,6 +1,6 @@
 # Plan: pairing and the session trace
 
-Updated 2026-09-11. **Status: first pairing slice implemented on `codex/pairing-guidance`; offline validation complete.**
+Updated 2026-09-11. **Status: pairing, expandable checkpoints, and individual tool entries implemented on `codex/pairing-guidance`; turn grouping remains next.**
 This is the next recommended milestone in `NEXT.md`. The original checkpoint
 plan is retained below as history, including evidence that prompting alone did
 not reliably produce useful checkpoints.
@@ -25,8 +25,8 @@ resume rebuild guidance rather than storing repeated reminders in history.
 The existing question heuristic remains a trailing question mark. It does not
 infer the intent of ambiguous prose. A prompt test proves guidance delivery, not
 that a model recognizes consequential decisions. Live 27B dogfooding remains
-before claiming that behavioral benefit. Trace rendering and its UX choices are
-still proposals; this branch does not implement them.
+before claiming that behavioral benefit. The original trace mockups below describe the broader target; the implementation
+now includes expandable checkpoints and individual tool activities.
 
 ### First-slice validation
 
@@ -69,6 +69,36 @@ Follow-up validation:
 - Removing `pipefail` deliberately made the missing-executable regression fail;
   restoring it passed. Validation pipelines also cover failure and recovery.
 - `git diff --check`: passed. Live model follow-up-question dogfooding remains.
+
+## Second MUD run and tool activity slice
+
+Session `9f2c22ef-0e0b-4d13-9336-cf336d39ad21` exercised the follow-up question:
+Qwen38 explained an injectable clock, waited for explicit direction, then edited.
+The user confirmed expansion worked. All 140 game tests passed independently.
+The missing `python` pipeline correctly reported exit 127, and the model recovered
+with `python3`. The one follow-up model call took 5.5 seconds (290 input / 233
+output tokens) on the same local Qwen38 INT4 model. This verifies the interaction,
+not the instruction's isolated benefit or another model's quality. The generated
+code still chose `time.time` rather than a monotonic clock and recovered from one
+malformed edit call.
+
+The next slice joins live tool calls/results by ID in one expandable entry.
+Successful results start collapsed, failures open, and explicit user choices
+survive completion. Enter uses the existing transcript navigation mode; Ctrl+O
+sets all tool entries, search reveals matching output, and copy retains output.
+Expanded edit/write results retain diff colors. Unmatched results remain visible.
+Grouping lives in `src/tui/activity.rs`; no new event schema, timing estimates,
+configuration, model calls, turn trees, or worker hierarchy are added.
+
+Validation:
+
+- Unit coverage checks pairing by ID, failure visibility, explicit expansion,
+  search, selection stability, diff colors, and unmatched-result preservation.
+- Scripted PTY: tool success/failure, search and folding passed with pairing off.
+  Checkpoint folding and follow-up discussion also passed with pairing on.
+- `cargo clippy --locked --all-targets -- -D warnings`: clean.
+- `cargo test --locked`: 518 passed, 0 failed; 2 opt-in live probes ignored.
+- `git diff --check`: passed.
 
 ## 1. Problem and intended result
 
