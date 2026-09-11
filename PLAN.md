@@ -991,6 +991,15 @@ would have prevented the invented third task.
 
 ## 10a. Working order (decided 2026-08-20)
 
+**Ordering update, 2026-09-11:** pairing behavior and an expandable main-session
+trace are next for design discussion; see `PAIR_PLAN.md` and `NEXT.md`. Internal
+role routing moves behind benchmark evidence of helper quality, latency, and
+cost. Workflows remain a TOML description of dependent staged jobs replacing
+shell orchestration, informed by agent-line; serial execution must be possible
+on a single local model. The older linear-only workflow scope needs revisiting when
+workflow design resumes. Tabs and a wholesale TUI rewrite are not prerequisites
+for the trace. This update supersedes the September 9 next-work ordering.
+
 **Ordering update, 2026-09-09:** approvals and M9 have landed. Parent-only MCP
 and M11 worker isolation can proceed independently; worker MCP requires both,
 and M12 role routing follows. `MCP_PLAN.md` defines the new MCP scope. The dated rationale below

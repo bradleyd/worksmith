@@ -1,6 +1,6 @@
 # Fresh-start handoff — Worksmith
 
-Updated 2026-09-10 after v0.6.0 and the Homebrew tap update. Read `AGENTS.md` and
+Updated 2026-09-11 after the pairing/session-trace discussion. Read `AGENTS.md` and
 [`NEXT.md`](NEXT.md) first. This handoff recommends the next slice; it is not
 authorization to implement every milestone.
 
@@ -25,24 +25,25 @@ Check current branch/status before editing and preserve any local changes. The
 old references to uncommitted MCP planning files and pending release authorization
 are obsolete; Git status is the source of truth.
 
-## Next recommended slice: M12 role routing
+## Next recommended slice: pairing and session trace
 
-Allow existing helper jobs to use explicitly configured model profiles. Start
-with compaction, memory extraction/classification, and fan-out planning. Reuse the
-existing model configuration and `client_for` path. Unconfigured roles must keep
-current behavior, and existing main/worker model controls must stay compatible.
+Read the September 11 discussion proposal in `PAIR_PLAN.md`. M12 internal role
+routing is deferred pending benchmark evidence; workflows and tabs remain later
+work. The user authorized the first phase on a new branch. Pairing guidance and
+checkpoint discussion handling are implemented on `codex/pairing-guidance`, with
+offline validation complete. The trace UI is not implemented.
 
-Before production edits, inspect configuration, helper call sites, client
-construction, and metrics attribution. Produce a short implementation plan and
-settle one consistent set of role names; older `PLAN.md` and configuration
-examples use differing proposed names. Avoid new abstractions unless the actual
-call sites require them. Use a feature branch such as `codex/role-routing` for
-implementation.
+Next, dogfood the pairing behavior and discuss the working/waiting/finished
+terminal mockups before starting the trace. Resume uses current configured
+pairing state; persistence of live toggles remains deferred.
+Retain mechanical checkpoints, existing worker behavior, and CLI JSON output.
+`src/tui/transcript.rs` already exists: extend/extract around the feature instead
+of requiring a wholesale `tui.rs` rewrite. No extra model calls for trace labels.
 
-Tests should prove configured routing, unchanged fallback, clear configuration
-errors, and attribution of actual helper model/cost to the originating session.
-Keep the backend shared by CLI and TUI. Automatic task classification, capability
-discovery, synthesis/judge expansion, and model observers can wait.
+Acceptance includes pairing toggle/compaction/resume coverage, stable selection
+while streaming, inspectable failures and decisions, honest available timings,
+and meaningful PTY checks. Prompt compliance needs real dogfooding in addition to
+scripted tests; a test that proves injection does not prove useful collaboration.
 
 ## Shipped behavior to preserve
 
@@ -80,12 +81,13 @@ Use scripted models and local fixtures; session/global-memory tests must call
 `common::isolate_home()`. Implementation work requires `cargo test`, warning-clean
 Clippy, and meaningful PTY checks when UI behavior changes. New tests should fail
 when the behavior they guard is deliberately broken. No live provider call is
-needed for routing correctness; do not use the local B70 for setup testing.
+needed for deterministic request/trace tests; do not use the local B70 for setup
+testing.
 
 ## Suggested opening prompt
 
-Read FRESH_START.md and NEXT.md. Plan the first M12 per-role routing slice for
-compaction, memory extraction/classification, and fan-out planning. Inspect the
-existing call sites and model/client configuration before proposing code changes.
-Preserve fallback behavior and metrics attribution, use the idiomatic Rust skill,
-and keep the design simple. Do not implement unrelated roadmap items.
+Read FRESH_START.md, NEXT.md, and the current proposal in PAIR_PLAN.md. Discuss
+pairing instructions and an expandable session trace before implementation.
+Resolve the proposed interaction defaults, question-versus-resume behavior, and
+mode persistence. Keep changes focused, preserve existing checks and accounting,
+and defer role routing, workflows, tabs, and unrelated refactors.

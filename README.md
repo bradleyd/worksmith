@@ -57,8 +57,25 @@ quietly.
 readily as "use a regex". It answers you, then asks again. Pairing is a
 conversation or it is a form.
 
-**Off is one switch.** Run `/pair off` and it works unattended. The point is
-that attended is the default, not that it is compulsory.
+**Pairing is opt-in.** Use `/pair on` or set `[agent] pair = true` for the TUI.
+Run `/pair off` to stop offering checkpoints; command approvals remain separate.
+
+With `/pair on`, each main request includes concise collaboration guidance:
+bring consequential choices to the user before implementing them, proceed with
+routine details, and respect decisions already made. `/pair off` removes that
+guidance and the checkpoint tool on the next model step; an in-flight request
+and its fit retries keep their original settings. A pending question still needs
+an answer or an explicit skip. Workers and headless runs do not enable pairing.
+On resume, the current `[agent].pair` configuration applies; live toggles are not
+persisted yet.
+
+Checkpoint replies ending in `?` are treated as questions. Worksmith answers
+through a tool-free helper call and asks again, filing only the eventual decision.
+After four question rounds without direction, the turn stops. Empty input or Esc
+skips the checkpoint under its existing policy. Tool calls batched after a
+blocking checkpoint are deferred so the next model request can use your answer.
+This is guidance plus bounded interruption handling, not proof that the model
+will identify every important decision; mechanical stuck/validation checks remain.
 
 None of this is only for code. The loop cares that a command exits zero and not
 what that command looked at. A writer using it as a rubber duck gets the same

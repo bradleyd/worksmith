@@ -718,6 +718,7 @@ impl Agent {
                         && let Some(a) = self
                             .harness_checkpoint(
                                 session,
+                                &cancel,
                                 &format!("{} steps, nothing written", self.max_steps),
                                 &format!(
                                     "It has used all {} steps without editing anything — it is \
@@ -749,6 +750,7 @@ impl Agent {
                     match self
                         .harness_checkpoint(
                             session,
+                            &cancel,
                             "Going in circles",
                             &format!(
                                 "{r}\n\nIt is repeating itself and the turn is about to end. \
@@ -778,6 +780,7 @@ impl Agent {
                         && let Some(a) = self
                             .harness_checkpoint(
                                 session,
+                                &cancel,
                                 &format!("{spent} tokens spent, still going"),
                                 &format!(
                                     "This turn has generated {spent} tokens without \
@@ -835,6 +838,7 @@ impl Agent {
                         let steer = if same_failure_count == 2 {
                             self.harness_checkpoint(
                                 session,
+                                &cancel,
                                 &format!("`{}` has failed twice the same way", v.describe()),
                                 &format!(
                                     "The check keeps failing:\n\n{}\n\nRe-planning has not \
@@ -972,8 +976,12 @@ impl Agent {
                 }
             }
 
+            // One mode snapshot governs both guidance and tools, including fit retries.
+            let pairing = self.pairing_on();
+            let tools = self.tools_for_pairing(pairing);
             let mut request_parts = request_messages(
                 system_prompt,
+                pairing,
                 &self.tool_ctx,
                 memory_context,
                 session,
@@ -1005,7 +1013,6 @@ impl Agent {
             // chases its own tail. One shrink, then compact, then stop.
             let mut shrunk = false;
             let mut compacted_here = false;
-            let tools = self.advertised_tools();
             let completion = loop {
                 request_parts.breakdown.tool_schema_tokens =
                     tokens_u32(estimate_tool_schema_tokens(&tools));
@@ -1055,6 +1062,7 @@ impl Agent {
                     }
                     request_parts = request_messages(
                         system_prompt,
+                        pairing,
                         &self.tool_ctx,
                         memory_context,
                         session,
@@ -1197,12 +1205,27 @@ impl Agent {
 
             // Execute tool calls and feed results back.
             let mut blocked: Option<String> = None;
+            let mut checkpoint_intervened = false;
             for call in &completion.tool_calls {
                 self.emit(session, Event::ToolCall {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                 });
+                if checkpoint_intervened || cancel.is_cancelled() {
+                    let output = if cancel.is_cancelled() {
+                        "Not executed: the turn was cancelled."
+                    } else {
+                        "Not executed: a pairing checkpoint intervened. Reconsider this \
+                         operation using the user's answer before requesting it again."
+                    };
+                    self.emit(session, Event::ToolResult {
+                        id: call.id.clone(), name: call.name.clone(), ok: false,
+                        output: output.to_string(),
+                    });
+                    session.append_message(Message::tool_result(&call.id, &call.name, output))?;
+                    continue;
+                }
                 // A checkpoint is addressed to the *user*, not to the model, so
                 // it gets its own event rather than living inside a tool result
                 // the front end renders as machinery. Emitted here rather than
@@ -1214,11 +1237,15 @@ impl Agent {
                     let field = |k: &str| {
                         v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string()
                     };
-                    self.emit(session, Event::Checkpoint {
-                        kind: field("kind"),
-                        subject: field("subject"),
-                        detail: field("detail"),
-                    });
+                    // Blocking asks are emitted by the dialogue after tool validation.
+                    checkpoint_intervened = field("kind") == "ask";
+                    if !checkpoint_intervened {
+                        self.emit(session, Event::Checkpoint {
+                            kind: field("kind"),
+                            subject: field("subject"),
+                            detail: field("detail"),
+                        });
+                    }
                 }
 
                 if matches!(call.name.as_str(), "write" | "edit") {
@@ -1271,6 +1298,9 @@ impl Agent {
                     blocked = Some(content);
                     break;
                 }
+            }
+            if cancel.is_cancelled() {
+                return Ok(IdleReason::Aborted);
             }
             if let Some(reason) = blocked {
                 self.emit(session, Event::Error {
@@ -1328,6 +1358,7 @@ impl Agent {
     async fn harness_checkpoint(
         &self,
         session: &mut Session,
+        cancel: &CancellationToken,
         subject: &str,
         question: &str,
     ) -> Option<String> {
@@ -1343,23 +1374,36 @@ impl Agent {
         // that asks for help while withholding the evidence is asking the user
         // to do the harness's work.
         let evidence = recent_evidence(session);
-        let mut detail = if evidence.is_empty() {
+        let detail = if evidence.is_empty() {
             question.to_string()
         } else {
             format!("{question}\n\nWhat just happened:\n\n{evidence}")
         };
 
+        self.checkpoint_dialogue(session, cancel, subject, detail).await
+    }
+
+    /// Both model and harness checkpoints wait through questions before proceeding.
+    async fn checkpoint_dialogue(
+        &self,
+        session: &mut Session,
+        cancel: &CancellationToken,
+        subject: &str,
+        mut detail: String,
+    ) -> Option<String> {
         for _ in 0..MAX_CHECKPOINT_ROUNDS {
             self.emit(session, Event::Checkpoint {
                 kind: "ask".to_string(),
                 subject: subject.to_string(),
                 detail: detail.clone(),
             });
-            // Deliberately not spending `checkpoints_left`. That cap exists to
-            // stop a model being chatty; this fires at most once per validation
-            // retry and once per stuck turn, and it is the high-value one —
-            // being crowded out by three notes would be exactly backwards.
-            let answer = self.tool_ctx.asker.ask_text(subject, &detail).await;
+            // Follow-up questions belong to this checkpoint, not new tool calls.
+            // The dialogue has its own bound; notes cannot crowd it out.
+            let answer = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return None,
+                answer = self.tool_ctx.asker.ask_text(subject, &detail) => answer,
+            };
             let answer = answer.filter(|a| !a.trim().is_empty())?;
             self.emit(session, Event::Checkpoint {
                 kind: "answered".to_string(),
@@ -1380,18 +1424,21 @@ impl Agent {
             // out of band, and come back round. Nothing is appended to the
             // conversation and `offered_a_way_in` is untouched, because nothing
             // was decided yet.
-            let reply = match self
-                .ask(
+            let prompt = format!("{detail}\n\nThe user asks: {answer}");
+            let response = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return None,
+                response = self.ask(
                     "You are a coding agent that has stopped mid-task to ask the user for \
                      help. The user has asked you a question instead of giving you an \
                      instruction. Answer it directly from the evidence, in at most four \
                      sentences. Do not propose a plan and do not start working — the user \
                      is deciding what you should do next.",
-                    &format!("{detail}\n\nThe user asks: {answer}"),
+                    &prompt,
                     400,
-                )
-                .await
-            {
+                ) => response,
+            };
+            let reply = match response {
                 Ok(t) => t.trim().to_string(),
                 // A failed side call must not eat the checkpoint. Say so and
                 // ask again; the user can still give an instruction.
@@ -1404,9 +1451,14 @@ impl Agent {
             });
             detail = format!(
                 "{reply}\n\nSo — what should it do differently? \
-                 (Enter to answer, Esc to end the turn.)"
+                 (Enter to answer; an empty answer or Esc skips this checkpoint.)"
             );
         }
+        self.emit(session, Event::Warning {
+            message: "Pairing discussion limit reached without a decision; stopping the turn."
+                .to_string(),
+        });
+        cancel.cancel();
         None
     }
 
@@ -1414,9 +1466,13 @@ impl Agent {
     /// on — not advertising it is what makes `/pair off` free rather than
     /// merely polite.
     pub fn advertised_tools(&self) -> Vec<crate::llm::ToolDef> {
+        self.tools_for_pairing(self.pairing_on())
+    }
+
+    fn tools_for_pairing(&self, pairing: bool) -> Vec<crate::llm::ToolDef> {
         let ctx = self.current_tool_context();
         let mut defs = self.registry.defs_for(&ctx);
-        if !self.pairing_on() {
+        if !pairing {
             defs.retain(|d| d.name != "checkpoint");
         }
         defs
@@ -1472,14 +1528,30 @@ impl Agent {
         ctx: &ToolContext,
         advertised: Option<&crate::llm::ToolDef>,
     ) -> crate::tools::ToolOutput {
+        if name == "checkpoint" && advertised.is_none() {
+            return crate::tools::ToolOutput::error("Pairing was off for this request; checkpoint is unavailable.");
+        }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ctx = ctx.clone();
         ctx.mcp_events = Some(tx);
+        let (asker, mut questions) = crate::tools::approval::ChannelAsker::new();
+        if name == "checkpoint" {
+            ctx.asker = Arc::new(asker);
+        }
         let run = self.registry.run_snapshot(name, args, &ctx, advertised);
         tokio::pin!(run);
         let out = loop {
             tokio::select! {
                 event = rx.recv() => if let Some(event) = event { self.emit(session, event); },
+                Some(question) = questions.recv(), if name == "checkpoint" => {
+                    let answer = self.checkpoint_dialogue(
+                        session, &ctx.cancel, &question.subject, question.question.clone(),
+                    ).await;
+                    if ctx.cancel.is_cancelled() {
+                        break crate::tools::ToolOutput::error("Pairing discussion stopped without a decision.");
+                    }
+                    question.answer(answer);
+                }
                 out = &mut run => break out,
             }
         };
@@ -1873,6 +1945,7 @@ fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> SystemPromptPar
 
 fn request_messages(
     system_prompt: &str,
+    pairing: bool,
     ctx: &ToolContext,
     memory_context: Option<&MemoryContext>,
     session: &Session,
@@ -1883,7 +1956,12 @@ fn request_messages(
     // instruction — the conventions the work has to follow — and treating it
     // as ordinary conversation meant compaction ate it and the model reloaded
     // the same pack again and again.
-    let system = with_loaded_skills(system_prompt, ctx);
+    let mut system = with_loaded_skills(system_prompt, ctx);
+    if pairing {
+        let guidance = format!("\n\n{}", crate::prompt::PAIRING_PREAMBLE);
+        system.text.push_str(&guidance);
+        system.system_tokens = system.system_tokens.saturating_add(text_tokens(&guidance));
+    }
     breakdown.system_tokens = system.system_tokens;
     breakdown.loaded_skill_tokens = system.loaded_skill_tokens;
     messages.push(Message::system(system.text));
@@ -2884,8 +2962,8 @@ mod checkpoint_tests {
 
         assert_eq!(asked.lock().unwrap().len(), MAX_CHECKPOINT_ROUNDS, "it stops asking");
         assert!(
-            matches!(out.outcome, TurnOutcome::ValidationFailed(_)),
-            "and ends the ordinary way: {:?}",
+            matches!(out.outcome, TurnOutcome::Aborted),
+            "unanswered discussion stops before another attempt: {:?}",
             out.outcome
         );
     }

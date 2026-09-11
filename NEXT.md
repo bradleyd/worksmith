@@ -1,6 +1,7 @@
 # What to do next
 
-Updated 2026-09-10 after the v0.6.0 release. This is the short operational list;
+Updated 2026-09-11 after the pairing/session-trace discussion.
+This is the short operational list;
 `PLAN.md` holds the broader roadmap and `LOOSE_ENDS.md` the forensic notes.
 Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
 
@@ -32,37 +33,41 @@ verification and both GitHub release jobs passed. Earlier CLI/REPL/TUI smoke
 checks covered dated sessions, search, worker metrics, and validation output.
 These are release results, not claims of new validation for this Markdown refresh.
 
-## Next: M12 per-role model routing
+## Next: pairing behavior and an expandable session trace
 
-The initial MCP, isolation, metrics, and session-storage work has shipped.
-The next recommended implementation slice is explicit routing for existing
-helper calls: compaction, memory extraction/classification, and fan-out planning.
+The next milestone is making the main session easier to follow and participate
+in. The first pairing slice is implemented on `codex/pairing-guidance`, with
+offline validation complete; see [`PAIR_PLAN.md`](PAIR_PLAN.md). Trace rendering remains
+proposed. This milestone supersedes M12 as the next recommended work.
 
-Keep it mechanical: call-site role → configured model profile → existing
-`client_for` path. Reuse `[models]` and preserve existing behavior when a role is
-not configured. Keep current main/worker model controls compatible.
+Two bounded slices:
 
-Before production edits, inspect the actual call sites and resolve the differing
-role names in older roadmap examples. Use one small configuration vocabulary;
-those examples are proposals, not an implemented configuration contract.
+1. Make `/pair on` explicitly describe collaboration in outgoing model requests,
+   retaining mechanical checkpoints and keeping questions distinct from consent
+   to resume. Verify toggling, compaction, and resume behavior.
+2. Group the main transcript by user turn with expandable tool/check details,
+   available timings, and prominent decisions. Use actual events, without model
+   calls to invent activity summaries. Extend the existing transcript module and
+   extract only what this feature requires.
 
-Acceptance criteria for the first slice:
-
-- Each configured helper uses its selected model; unspecified roles retain their
-  current model selection.
-- Invalid configuration produces a clear error rather than silently selecting a
-  different model.
-- Existing accounting records the actual helper model and attributes spend to
-  the originating session.
-- Scripted offline tests cover routing, fallback, and accounting. CLI and TUI
-  share the backend behavior.
-
-Do not add automatic task classification, capability discovery, a new observer,
-worker MCP, or a broad TUI refactor to this slice. Add synthesis/judge routing
-later if the inspected call sites justify it. Load the idiomatic Rust skill
-before Rust work; keep the implementation simple and focused.
+Next, dogfood pairing on the local 27B and discuss the working/waiting/finished
+trace mockups before implementing the UI slice. Resume currently uses configured
+pairing state; persisted live mode changes remain deferred.
 
 ## Deferred work and constraints
+
+- **M12 internal role routing:** benchmark tooling first. Compare helper models
+  with role-specific cost, latency, failures, and downstream task success before
+  adding production configuration. Cheaper compaction/extraction/planning is an
+  unproven benefit; existing `[agents].model` already selects worker models.
+- **Workflows:** retain the goal of a TOML job replacing shell loops for dependent
+  staged work, drawing on agent-line. A dependency graph can execute serially;
+  concurrent workers and model swapping are separate choices. Reconcile older
+  linear-only examples and worktree handoff before implementation.
+- **Tabs and broad TUI refactoring:** deferred. The trace belongs in the main
+  session window. Extract code as this feature needs it.
+- **System-prompt replacement:** deferred. The pairing instruction is a bounded
+  mode behavior, not a general prompt editor or a lightweight inference mode.
 
 - **OS sandboxing:** tracked in [issue #2](https://github.com/bradleyd/worksmith/issues/2).
   Worktrees isolate edits for review; they do not restrict process authority.

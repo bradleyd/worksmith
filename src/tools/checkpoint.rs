@@ -122,7 +122,8 @@ impl Tool for CheckpointTool {
          what, since they can read the code. `yours` hands them the hard part: write the \
          surrounding wiring, leave the function as todo!() with a comment stating the \
          contract, and move on. Do not checkpoint on wiring, boilerplate, or a change the \
-         plan did not flag."
+         user has already settled. Ask about consequential tradeoffs even when no plan \
+         flagged them."
     }
 
     fn parameters(&self) -> Value {
@@ -175,6 +176,14 @@ impl Tool for CheckpointTool {
 
         match kind {
             "ask" => match ctx.asker.ask_text(subject, detail).await {
+                Some(answer) if answer.trim().ends_with('?') => ToolOutput::ok(format!(
+                    "The user asked a question, not made a decision:\n\n{}\n\n\
+                     Answer it before doing more work, then use checkpoint to get their \
+                     direction. If the checkpoint budget is exhausted, answer and end the \
+                     turn waiting for the user. Do not implement the pending choice. \
+                     No decision record was filed.",
+                    answer.trim()
+                )),
                 Some(answer) if !answer.trim().is_empty() => {
                     let filed = write_decision(ctx, subject, detail, answer.trim());
                     ToolOutput::ok(format!(
@@ -243,6 +252,18 @@ mod tests {
         assert!(body.contains("A running worker must not move."));
         // The model is told the answer, so it can act on it.
         assert!(out.content.contains("A running worker must not move."));
+    }
+
+    #[tokio::test]
+    async fn a_question_is_not_filed_or_returned_as_a_decision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path(), Arc::new(Answers("Why would we pin it?  ")));
+        let out = CheckpointTool.run(args("ask"), &c).await;
+        assert!(!out.is_error);
+        assert!(out.content.contains("Why would we pin it?"));
+        assert!(out.content.contains("Do not implement the pending choice"));
+        assert!(!out.content.contains("Build that"));
+        assert!(!tmp.path().join("decisions").exists());
     }
 
     #[tokio::test]
