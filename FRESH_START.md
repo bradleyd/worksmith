@@ -4,20 +4,25 @@ Updated after the pairing branch review. Read `AGENTS.md` and
 [`NEXT.md`](NEXT.md) first. This handoff recommends the next slice; it is not
 authorization to implement every milestone.
 
-## v0.7.0 release preparation
+## v0.7.0 released
 
-The user manually tested the changes in `mud-test` and reported that they work.
-Release notes are drafted in `RELEASE_NOTES.md`, with a dated entry in
-`CHANGELOG.md`. The implementation passed 522 tests (two opt-in live probes
-ignored), warning-clean all-target clippy, CLI checks, and checkpoint/tool PTY
-checks including a 25-call session. Those are the implementation validation
-results, not a new release-binary verification.
+[v0.7.0](https://github.com/bradleyd/worksmith/releases/tag/v0.7.0) is published
+from `main` at `57101d3`, with macOS ARM64 and Linux x86-64 musl archives.
+Both GitHub release jobs passed. The website guides now cover pairing,
+expandable entries, tool timings, and pipeline failures; Pages deployment passed.
+The Homebrew tap is updated and pushed at `deea370`, using the SHA-256 of the
+downloaded macOS archive. Its binary reports 0.7.0 and formula syntax checks pass.
 
-Version and changelog are prepared for v0.7.0. Publishing and the Homebrew
-checksum update remain pending until release verification completes.
-The v0.6.0 details below are the historical baseline.
+Fresh release verification: 522 tests passed, zero failed, two opt-in live probes
+ignored; all-target Clippy passed with warnings denied. The optimized local
+binary passed version, checkpoint discussion/expansion PTY, and web-result JSON
+smoke checks. Production and preview site checks passed. The user also manually
+tested the changes in `mud-test` and reported that they work.
 
-## Where we stopped
+Release notes are in `RELEASE_NOTES.md` and `CHANGELOG.md`. No release steps
+remain pending. The v0.6.0 details below are historical context.
+
+## Historical v0.6.0 baseline
 
 - v0.6.0 is released from `main` at `8220028`; the commit and annotated tag are
   pushed. GitHub published macOS ARM64 and Linux x86-64 binaries with
@@ -44,7 +49,7 @@ The pairing branch implements guidance, bounded follow-up discussion, expandable
 checkpoints/tool entries, and `elapsed_ms` in recorded tool results and the TUI.
 Two local MUD runs exercised pairing. Branch review also fixed web extraction of
 `<header>`/adjacent scripts and explicit failure for empty readable output.
-Read `PAIR_PLAN.md` for validation; check Git for merge status.
+Read `PAIR_PLAN.md` for validation; these changes are merged and released.
 
 Next, use a fresh branch for turn grouping and working/waiting/finished status.
 Discuss the mockups before implementation. Worker trees, tabs, model-role routing,
