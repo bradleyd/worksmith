@@ -45,6 +45,14 @@ pub(super) enum Kind {
 pub(super) struct Item {
     pub(super) kind: Kind,
     pub(super) text: String,
+    pub(super) checkpoint: Vec<super::checkpoint::Message>,
+}
+
+impl Item {
+    pub(super) fn append_checkpoint(&mut self, speaker: super::checkpoint::Speaker, text: &str) {
+        self.text.push_str(&format!("\n\n{}: {text}", speaker.label()));
+        self.checkpoint.push(super::checkpoint::Message { speaker, text: text.into() });
+    }
 }
 
 /// How many lines of a long tool result to show before capping (Ctrl+O expands).
@@ -119,7 +127,7 @@ impl Transcript {
 
     pub(super) fn push(&mut self, kind: Kind, text: impl Into<String>) {
         let at = self.items.len();
-        self.items.push(Item { kind, text: text.into() });
+        self.items.push(Item { kind, text: text.into(), checkpoint: Vec::new() });
         self.touch(at);
     }
 
@@ -370,7 +378,7 @@ pub(super) fn item_rows(
             return;
         }
         if let Kind::Checkpoint { expanded } = item.kind {
-            super::checkpoint::render(rows, &item.text, expanded, width);
+            super::checkpoint::render(rows, &item.text, &item.checkpoint, expanded, width);
             return;
         }
         if item.kind == Kind::Thinking && !show_thinking {

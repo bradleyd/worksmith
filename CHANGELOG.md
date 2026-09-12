@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Pairing checkpoint discussions distinguish Assistant, You, and System with
+  bold labels and spacing, plus a border on every wrapped user-message line.
+  Speaker separation does not rely on color; user text retains literal markup.
+  Expansion, search, copying, and checkpoint behavior are preserved.
+
 ## 0.7.0 — 2026-09-11
 
 ### Added

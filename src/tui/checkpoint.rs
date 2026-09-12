@@ -3,22 +3,113 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Paragraph, Wrap};
 
-pub(super) fn render(rows: &mut Vec<Line<'static>>, text: &str, expanded: bool, width: u16) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Speaker {
+    Assistant,
+    User,
+    System,
+}
+
+impl Speaker {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Assistant => "Assistant",
+            Self::User => "You",
+            Self::System => "System",
+        }
+    }
+}
+
+pub(super) struct Message {
+    pub(super) speaker: Speaker,
+    pub(super) text: String,
+}
+
+pub(super) fn render(
+    rows: &mut Vec<Line<'static>>,
+    text: &str,
+    messages: &[Message],
+    expanded: bool,
+    width: u16,
+) {
     let (subject, body) = text.split_once('\n').unwrap_or((text, ""));
     let heading = Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD);
-    let mut lines = vec![Line::styled(subject.to_string(), heading)];
-    if expanded {
-        lines.extend(body.lines().map(inline));
+    wrapped(
+        rows,
+        vec![Line::styled(subject.to_string(), heading)],
+        if expanded { "▼ " } else { "▶ " },
+        "  ",
+        heading,
+        width,
+    );
+    if !expanded {
+        wrapped(
+            rows,
+            vec![Line::styled(
+                "Enter to expand",
+                Style::default().add_modifier(Modifier::DIM),
+            )],
+            "  ",
+            "  ",
+            Style::default(),
+            width,
+        );
+    } else if messages.is_empty() {
+        wrapped(
+            rows,
+            body.lines().map(inline).collect(),
+            "  ",
+            "  ",
+            Style::default(),
+            width,
+        );
     } else {
-        lines.push(Line::styled(
-            "Enter to expand",
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+        for message in messages {
+            rows.push(Line::default());
+            let label = Style::default().add_modifier(Modifier::BOLD);
+            wrapped(
+                rows,
+                vec![Line::styled(message.speaker.label(), label)],
+                "  ",
+                "  ",
+                label,
+                width,
+            );
+            let gutter = if message.speaker == Speaker::User {
+                "  │ "
+            } else {
+                "    "
+            };
+            let lines = if message.speaker == Speaker::User {
+                // User text is literal; markup must not change what they typed.
+                message
+                    .text
+                    .lines()
+                    .map(|line| Line::raw(line.to_string()))
+                    .collect()
+            } else {
+                message.text.lines().map(inline).collect()
+            };
+            wrapped(rows, lines, gutter, gutter, Style::default(), width);
+        }
     }
-    // Use the terminal's existing word wrapper and display-width handling.
-    let content_width = width.saturating_sub(3).max(1);
+    rows.push(Line::default());
+}
+
+fn wrapped(
+    rows: &mut Vec<Line<'static>>,
+    lines: Vec<Line<'static>>,
+    first: &str,
+    rest: &str,
+    gutter_style: Style,
+    width: u16,
+) {
+    // Wrap each message before adding its gutter, including continuation lines.
+    let content_width = width
+        .saturating_sub(Span::raw(first).width() as u16 + 1)
+        .max(1);
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let height = paragraph.line_count(content_width).min(u16::MAX as usize) as u16;
     let area = Rect::new(0, 0, content_width, height);
@@ -27,11 +118,11 @@ pub(super) fn render(rows: &mut Vec<Line<'static>>, text: &str, expanded: bool, 
     for y in 0..height {
         let mut spans = vec![Span::styled(
             if y == 0 {
-                if expanded { "▼ " } else { "▶ " }
+                first.to_string()
             } else {
-                "  "
+                rest.to_string()
             },
-            heading,
+            gutter_style,
         )];
         let last = (0..content_width)
             .rev()
@@ -45,7 +136,6 @@ pub(super) fn render(rows: &mut Vec<Line<'static>>, text: &str, expanded: bool, 
         }
         rows.push(Line::from(spans));
     }
-    rows.push(Line::default());
 }
 
 /// The inline emphasis used by checkpoint prompts; identifiers keep underscores.
@@ -103,11 +193,75 @@ mod tests {
     }
 
     #[test]
+    fn conversation_roles_remain_distinct_without_color() {
+        let messages = vec![
+            Message {
+                speaker: Speaker::Assistant,
+                text: "You: is just quoted text.".into(),
+            },
+            Message {
+                speaker: Speaker::User,
+                text: "Keep **literal** text\nand wrap this long answer across lines.".into(),
+            },
+            Message {
+                speaker: Speaker::Assistant,
+                text: "Use a **fake clock**.".into(),
+            },
+            Message {
+                speaker: Speaker::System,
+                text: "Skipped".into(),
+            },
+        ];
+        let mut rows = Vec::new();
+        render(&mut rows, "Timer", &messages, true, 26);
+        let output = text(&rows);
+        assert_eq!(
+            output.lines().filter(|line| *line == "  Assistant").count(),
+            2
+        );
+        assert_eq!(output.lines().filter(|line| *line == "  You").count(), 1);
+        assert!(output.contains("**literal**"));
+        assert!(output.contains("  System\n    Skipped"));
+        let user = output
+            .split("  You\n")
+            .nth(1)
+            .unwrap()
+            .split("\n\n")
+            .next()
+            .unwrap();
+        assert!(user.lines().count() > 2);
+        assert!(user.lines().all(|line| line.starts_with("  │ ")));
+        assert!(rows.iter().all(|line| line.width() <= 26));
+        assert!(
+            rows.iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
+
+    #[test]
+    fn structured_conversation_collapses_and_wraps_unicode() {
+        let messages = vec![Message {
+            speaker: Speaker::User,
+            text: "計時 snake_case\n\nMore detail".into(),
+        }];
+        let mut rows = Vec::new();
+        render(&mut rows, "Timer", &messages, true, 14);
+        assert!(rows.iter().all(|line| line.width() <= 14));
+        assert!(text(&rows).contains("計時"));
+        rows.clear();
+        render(&mut rows, "Timer", &messages, false, 14);
+        assert!(!text(&rows).contains("計時"));
+        assert!(!text(&rows).contains("You"));
+    }
+
+    #[test]
     fn checkpoints_wrap_words_and_render_emphasis_without_literal_markers() {
         let mut rows = Vec::new();
         render(
             &mut rows,
             "Timer choice\nUse **elapsed time** and `time.monotonic()` while *waiting*.",
+            &[],
             true,
             30,
         );
@@ -130,6 +284,7 @@ mod tests {
         render(
             &mut rows,
             "Timer choice\nDetailed alternatives\n\nYou: wall-clock",
+            &[],
             false,
             50,
         );
@@ -145,6 +300,7 @@ mod tests {
         render(
             &mut rows,
             "計時\nKeep snake_case and unmatched * markers.",
+            &[],
             true,
             14,
         );

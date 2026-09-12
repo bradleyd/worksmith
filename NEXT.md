@@ -5,6 +5,14 @@ This is the short operational list;
 `PLAN.md` holds the broader roadmap and `LOOSE_ENDS.md` the forensic notes.
 Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
 
+## Checkpoint speaker UI ready
+
+`codex/checkpoint-conversation-ui` contains the unreleased speaker-label,
+spacing, and user-border fix. Automated checks passed (524 tests, Clippy, PTY,
+and docs); the user confirmed collapse, navigation while waiting, and the skip
+message. See `PAIR_PLAN.md` for evidence and the separate skip-policy/model
+comparison follow-ups. No new release or Homebrew update is part of this slice.
+
 ## v0.7.0 released
 
 [v0.7.0](https://github.com/bradleyd/worksmith/releases/tag/v0.7.0) is published

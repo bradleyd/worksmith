@@ -102,9 +102,14 @@ Use `/pair on` when you want to discuss decisions as you work. Pairing adds
 collaboration guidance to model requests and offers checkpoints for your direction.
 At a checkpoint, end a follow-up question with `?` to discuss it before deciding;
 the turn stops if four discussion rounds pass without a decision. Checkpoint
-questions, discussion, and answers stay together in an expandable entry. Pairing
+questions, discussion, and answers stay together in an expandable entry. Bold
+`Assistant` and `You` labels separate replies, and a left border marks your text
+without relying on color. Pairing
 guidance helps the model collaborate, but cannot guarantee it will identify every
 decision that deserves a checkpoint. Use `/pair off` to turn it off.
+
+Esc at a checkpoint skips the question and lets the assistant decide and continue;
+it does not cancel the turn.
 
 To work on a failing test, set the check first by entering:
 

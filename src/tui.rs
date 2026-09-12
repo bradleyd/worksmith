@@ -321,11 +321,12 @@ impl App {
 
     fn show_checkpoint(&mut self, subject: &str, question: &str) {
         if let Some(i) = self.checkpoint_item {
-            self.transcript.items[i].text.push_str(&format!("\n\n{question}"));
+            self.transcript.items[i].append_checkpoint(checkpoint::Speaker::Assistant, question);
             self.transcript.items[i].kind = Kind::Checkpoint { expanded: true };
             self.touch(i);
         } else {
-            self.push(Kind::Checkpoint { expanded: true }, format!("{subject}\n{question}"));
+            self.push(Kind::Checkpoint { expanded: true }, subject);
+            self.transcript.items.last_mut().unwrap().append_checkpoint(checkpoint::Speaker::Assistant, question);
             self.checkpoint_item = Some(self.transcript.items.len() - 1);
         }
     }
@@ -469,7 +470,7 @@ impl App {
                         i
                     }
                     None => {
-                        self.transcript.items.push(Item { kind: Kind::Thinking, text });
+                        self.transcript.items.push(Item { kind: Kind::Thinking, text, checkpoint: Vec::new() });
                         self.cur_thinking = Some(self.transcript.items.len() - 1);
                         self.transcript.items.len() - 1
                     }
@@ -483,7 +484,7 @@ impl App {
                         i
                     }
                     None => {
-                        self.transcript.items.push(Item { kind: Kind::Assistant, text });
+                        self.transcript.items.push(Item { kind: Kind::Assistant, text, checkpoint: Vec::new() });
                         self.cur_assistant = Some(self.transcript.items.len() - 1);
                         self.transcript.items.len() - 1
                     }
@@ -1631,15 +1632,15 @@ fn answer_pending_ask(app: &mut App, answer: Option<String>) -> bool {
         return false;
     };
 
-    let echo = match answer {
-        AskAnswer::Answered(input) => format!("You: {input}"),
-        AskAnswer::Skipped => "Skipped".to_string(),
+    let (speaker, text) = match answer {
+        AskAnswer::Answered(input) => (checkpoint::Speaker::User, input),
+        AskAnswer::Skipped => (checkpoint::Speaker::System, "Skipped".to_string()),
     };
     if let Some(i) = app.checkpoint_item {
-        app.transcript.items[i].text.push_str(&format!("\n\n{echo}"));
+        app.transcript.items[i].append_checkpoint(speaker, &text);
         app.touch(i);
     } else {
-        app.push(Kind::Pair, echo);
+        app.push(Kind::Pair, format!("{}: {text}", speaker.label()));
     }
     app.status = "/help for keys and commands".into();
     true
@@ -5938,6 +5939,8 @@ mod tests {
         a.show_checkpoint("Timer", "Use a fake clock. What should it do?");
         assert_eq!(a.transcript.items.len(), 1);
         assert!(a.transcript.items[0].text.contains("You: How is it tested?"));
+        assert_eq!(a.transcript.items[0].checkpoint.iter().map(|m| m.speaker).collect::<Vec<_>>(),
+            vec![checkpoint::Speaker::Assistant, checkpoint::Speaker::User, checkpoint::Speaker::Assistant]);
         assert_eq!(a.transcript.items[0].text.matches("Use a fake clock.").count(), 1);
         a.ensure_rows(60);
         a.enter_normal();

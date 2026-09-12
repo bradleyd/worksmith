@@ -120,6 +120,7 @@ pub(super) fn render(
                     Kind::ToolResult
                 },
                 text: body,
+                checkpoint: Vec::new(),
             },
             false,
             true,

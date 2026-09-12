@@ -1,9 +1,36 @@
 # Plan: pairing and the session trace
 
-Updated 2026-09-11. **Status: pairing, expandable checkpoints, and individual tool entries implemented on `codex/pairing-guidance`; turn grouping remains next.**
+Updated 2026-09-12. **Status: v0.7.0 released; checkpoint speaker UI completed on `codex/checkpoint-conversation-ui`, not yet released; turn grouping remains next.**
 This is the next recommended milestone in `NEXT.md`. The original checkpoint
 plan is retained below as history, including evidence that prompting alone did
 not reliably produce useful checkpoints.
+
+## Checkpoint speaker UI follow-up
+
+Checkpoint discussions now retain explicit speaker boundaries in TUI state and
+render bold Assistant / You / System labels with spacing. User messages have a
+left border on every wrapped line and preserve literal markup. Search and copy
+retain the complete labeled conversation; collapse behavior and session events
+are unchanged. The quickstart documents the presentation and existing skip policy.
+
+Validation: 524 tests passed, zero failed, two opt-in probes ignored;
+`cargo clippy --locked --all-targets -- -D warnings` passed. Scripted local PTY
+checks passed for labels, user borders, expansion, follow-up discussion, and
+final direction. Production site checks passed. Test linking emitted a cached
+AWS-LC macOS deployment-target warning; build/cache investigation remains separate.
+
+The user confirmed collapse and `jj` preserve the pending question, and Esc shows
+System / Skipped. Session `2a9e107a-c107-4d30-b68a-23ee73652362` confirms that
+Qwen38 used a checkpoint and answered a follow-up. After Esc, the tool explicitly
+told it to decide and continue; it edited the game and reported 138 passing tests.
+This is existing skip behavior, not permission inferred by the new UI. Follow-up:
+distinguish delegating a decision from cancelling the turn; no policy change here.
+
+The preceding 9B session `055a8ca3-05fa-4146-8d3a-fc0e13495f55` received the same
+explicit checkpoint request but asked for task details in ordinary chat, with no
+tool calls or edits. The request omitted the concrete task, so this shows a
+checkpoint-use difference rather than inability to pair. A future comparison
+should name the elapsed-time task and hold pairing configuration constant.
 
 ## First slice: implementation decisions
 
