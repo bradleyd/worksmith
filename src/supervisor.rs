@@ -341,6 +341,7 @@ mod tests {
 
         // The result arrives and ordinary supervision resumes.
         s.observe(&Event::ToolResult {
+            elapsed_ms: None,
             id: "c".into(),
             name: "bash".into(),
             ok: true,

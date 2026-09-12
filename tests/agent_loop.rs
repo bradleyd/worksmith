@@ -1988,3 +1988,28 @@ fn multiple_large_skills_remain_active_until_explicitly_unloaded() {
     agent.load_skill("small-fixture").unwrap();
     assert_eq!(agent.loaded_skill_names(), ["small-fixture", "third-fixture"]);
 }
+
+#[tokio::test]
+async fn tool_durations_are_recorded_for_success_and_failure_but_not_invalid_calls() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("timings.jsonl"), dir.path()).unwrap();
+    let client = MockClient::new(vec![
+        tool_call("bash", r#"{"command":"sleep 0.05"}"#),
+        tool_call("bash", r#"{"command":"sleep 0.05; exit 7"}"#),
+        tool_call("read", "invalid json"),
+        done("finished"),
+    ]);
+    let agent = build_agent(client, dir.path(), 5);
+    agent.run_turn(&mut session, "check tools", "system", None, CancellationToken::new()).await.unwrap();
+    let results: Vec<_> = worksmith::session::events(session.path()).unwrap().into_iter()
+        .filter_map(|entry| match entry.event {
+            worksmith::event::Event::ToolResult { ok, elapsed_ms, .. } => Some((ok, elapsed_ms)),
+            _ => None,
+        }).collect();
+    assert_eq!(results.len(), 3);
+    assert!(results[0].0);
+    assert!(!results[1].0);
+    for (_, elapsed) in &results[..2] { assert!(elapsed.unwrap() >= 50); }
+    assert_eq!(results[2], (false, None));
+}

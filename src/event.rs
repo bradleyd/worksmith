@@ -60,7 +60,13 @@ pub enum Event {
     /// The final assembled assistant text for a step.
     AssistantMessage { text: String },
     ToolCall { id: String, name: String, arguments: String },
-    ToolResult { id: String, name: String, ok: bool, output: String },
+    ToolResult {
+        id: String, name: String, ok: bool, output: String,
+        /// Wall time inside tool dispatch, including approvals, retries and user waits.
+        /// Absent for legacy records and calls not dispatched (deferred/invalid JSON).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+    },
     /// MCP lifecycle evidence. Arguments, credentials and remote results stay out.
     McpOperation {
         server: String,
@@ -138,5 +144,22 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Event;
+
+    #[test]
+    fn tool_duration_json_is_optional_and_preserves_measured_zero() {
+        let old = r#"{"type":"tool_result","id":"a","name":"read","ok":true,"output":"text"}"#;
+        let mut event: Event = serde_json::from_str(old).unwrap();
+        assert!(matches!(event, Event::ToolResult { elapsed_ms: None, .. }));
+        assert!(serde_json::to_value(&event).unwrap().get("elapsed_ms").is_none());
+        if let Event::ToolResult { elapsed_ms, .. } = &mut event { *elapsed_ms = Some(0); }
+        let encoded = serde_json::to_value(event).unwrap();
+        assert_eq!(encoded["elapsed_ms"], 0);
+        assert!(matches!(serde_json::from_value::<Event>(encoded).unwrap(), Event::ToolResult { elapsed_ms: Some(0), .. }));
     }
 }

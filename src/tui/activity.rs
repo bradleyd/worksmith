@@ -24,7 +24,14 @@ impl Transcript {
         self.pending_tools.insert(id, index);
     }
 
-    pub(super) fn finish_tool(&mut self, id: &str, name: &str, ok: bool, output: &str) -> bool {
+    pub(super) fn finish_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        ok: bool,
+        output: &str,
+        elapsed_ms: Option<u64>,
+    ) -> bool {
         let Some(index) = self.pending_tools.remove(id) else {
             return false;
         };
@@ -42,6 +49,9 @@ impl Transcript {
         *diff = ok && matches!(name, "edit" | "write");
         if !*chosen {
             *expanded = !ok;
+        }
+        if let Some(ms) = elapsed_ms {
+            item.text.insert_str(0, &format!("{ms}ms · "));
         }
         item.text.push('\n');
         item.text.push_str(output);
@@ -131,11 +141,12 @@ mod tests {
         t.ensure_rows(60);
         t.enter_normal();
         t.cursor_row = t.item_starts[1];
-        assert!(t.finish_tool("a", "read", false, &"error details\n".repeat(10)));
+        assert!(t.finish_tool("a", "read", false, &"error details\n".repeat(10), Some(25)));
         t.ensure_rows(60);
         assert_eq!(t.item_at_row(t.cursor_row), Some(1));
-        assert!(t.finish_tool("b", "bash", true, "140 passed"));
+        assert!(t.finish_tool("b", "bash", true, "140 passed", Some(100)));
         assert_eq!(t.items.len(), 2);
+        assert!(t.items[0].text.starts_with("25ms · read main.py\n"));
         assert!(matches!(
             t.items[0].kind,
             Kind::ToolActivity {
@@ -152,7 +163,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(!t.finish_tool("missing", "read", true, "legacy"));
+        assert!(!t.finish_tool("missing", "read", true, "legacy", None));
         assert!(t.items[1].text.contains("140 passed"));
     }
 
@@ -163,7 +174,7 @@ mod tests {
         t.ensure_rows(60);
         t.enter_normal();
         assert!(t.toggle_entry());
-        t.finish_tool("a", "edit", true, "+new timer");
+        t.finish_tool("a", "edit", true, "+new timer", None);
         assert!(matches!(
             t.items[0].kind,
             Kind::ToolActivity {
@@ -190,7 +201,7 @@ mod tests {
         ));
         assert!(!t.search_hits().is_empty());
         t.clear_for_new_session();
-        assert!(!t.finish_tool("a", "edit", true, "stale"));
+        assert!(!t.finish_tool("a", "edit", true, "stale", None));
     }
 
     #[test]

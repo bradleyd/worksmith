@@ -1268,6 +1268,7 @@ mod tail_tests {
         update_last(
             &mut g,
             Event::ToolResult {
+                elapsed_ms: None,
                 id: "c".into(),
                 name: "bash".into(),
                 ok: true,
@@ -1287,6 +1288,7 @@ mod tail_tests {
         update_last(
             &mut g,
             Event::ToolResult {
+                elapsed_ms: None,
                 id: "c".into(),
                 name: "bash".into(),
                 ok: false,

@@ -100,6 +100,29 @@ Validation:
 - `cargo test --locked`: 518 passed, 0 failed; 2 opt-in live probes ignored.
 - `git diff --check`: passed.
 
+## Tool timing follow-up
+
+Tool results now carry optional `elapsed_ms`, measured with a monotonic clock
+around tool dispatch. It includes approval, retry, and checkpoint discussion
+waits, so it is wall time rather than CPU time or provider-only latency.
+Model generation and result rendering are outside this interval. Deferred calls
+and invalid JSON omit timing; legacy records deserialize without it. Zero is a
+valid measurement below one millisecond. JSON mode serializes the same event
+that sessions record, and tool rows show the duration before the command to keep
+it visible when a long command is clipped. No timing configuration is added.
+
+Validation:
+
+- Recorded agent-loop regression verifies at least 50ms for successful and failing
+  delayed tools and no duration for invalid arguments.
+- Legacy JSON round-trip and measured-zero serialization passed.
+- `--think off --mode json` with a scripted local server emitted `elapsed_ms`
+  for both a successful read and a failing shell command.
+- PTY smoke verified visible timing labels, folding, failure expansion, and search.
+- Focused UI tests and warning-clean all-target clippy passed.
+- `cargo test --locked`: 520 passed, 0 failed; 2 opt-in live probes ignored.
+- `git diff --check`: passed.
+
 ## 1. Problem and intended result
 
 Before this slice, the model received a task-execution prompt even when `/pair` is on.

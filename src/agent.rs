@@ -1220,7 +1220,7 @@ impl Agent {
                          operation using the user's answer before requesting it again."
                     };
                     self.emit(session, Event::ToolResult {
-                        id: call.id.clone(), name: call.name.clone(), ok: false,
+                        id: call.id.clone(), name: call.name.clone(), ok: false, elapsed_ms: None,
                         output: output.to_string(),
                     });
                     session.append_message(Message::tool_result(&call.id, &call.name, output))?;
@@ -1251,9 +1251,10 @@ impl Agent {
                 if matches!(call.name.as_str(), "write" | "edit") {
                     edits.fetch_add(1, Ordering::Relaxed);
                 }
-                let (ok, fatal, raw) =
+                let (ok, fatal, raw, elapsed_ms) =
                     match serde_json::from_str::<serde_json::Value>(&call.arguments) {
                         Ok(v) => {
+                            let started = std::time::Instant::now();
                             let o = self
                                 .run_tool_recorded(
                                     session,
@@ -1263,7 +1264,7 @@ impl Agent {
                                     tools.iter().find(|def| def.name == call.name),
                                 )
                                 .await;
-                            (!o.is_error, o.fatal, o.content)
+                            (!o.is_error, o.fatal, o.content, Some(started.elapsed().as_millis() as u64))
                         }
                         Err(e) => {
                             let hint = if truncated {
@@ -1276,6 +1277,7 @@ impl Agent {
                                 false,
                                 false,
                                 format!("invalid JSON arguments for `{}`: {e}{hint}", call.name),
+                                None,
                             )
                         }
                     };
@@ -1286,6 +1288,7 @@ impl Agent {
                     name: call.name.clone(),
                     ok,
                     output: content.clone(),
+                    elapsed_ms,
                 });
                 session.append_message(Message::tool_result(
                     &call.id,

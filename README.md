@@ -86,7 +86,14 @@ Tool calls and results also share an expandable entry: successful output starts
 collapsed, failures open. Enter toggles a selected tool entry, including while it
 runs; that choice survives completion. Ctrl+O folds/unfolds all tool output.
 Search reveals matching output, and yanking keeps the complete entry. Expanded
-edit/write results retain their diff colors.
+edit/write results retain their diff colors. Completed tool rows show measured
+milliseconds before the command so timings stay visible for long commands.
+
+JSON `tool_result` events include `elapsed_ms` for dispatched calls. This measures
+wall time inside tool dispatch, including approvals, retries, and checkpoint
+user waits; it excludes model generation and output rendering. Old records and
+calls skipped before dispatch (including invalid JSON) omit the field. A measured
+`0` is valid for calls finishing in less than one millisecond.
 
 This is guidance plus bounded interruption handling, not proof that the model
 will identify every important decision; mechanical stuck/validation checks remain.

@@ -512,12 +512,12 @@ impl App {
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
-            Event::ToolResult { id, ok, output, name } => {
+            Event::ToolResult { id, ok, output, name, elapsed_ms } => {
                 if name == "checkpoint" && ok {
                     self.checkpoint_item = None;
                     return;
                 }
-                if name != "checkpoint" && self.transcript.finish_tool(&id, &name, ok, &output) {
+                if name != "checkpoint" && self.transcript.finish_tool(&id, &name, ok, &output, elapsed_ms) {
                     return;
                 }
                 // Successful edit/write results are unified diffs → render as such.
@@ -5414,10 +5414,10 @@ mod tests {
         assert_eq!(a.transcript.items.len(), 3);
         assert_eq!(a.transcript.items[0].text, "before");
         assert!(matches!(a.transcript.items[1].kind, Kind::ToolActivity { .. }));
-        a.apply_event(Event::ToolResult { id: "1".into(), name: "ls".into(), ok: true, output: "main.py".into() });
+        a.apply_event(Event::ToolResult { elapsed_ms: None, id: "1".into(), name: "ls".into(), ok: true, output: "main.py".into() });
         assert_eq!(a.transcript.items.len(), 3);
         assert!(a.transcript.items[1].text.contains("main.py"));
-        a.apply_event(Event::ToolResult { id: "unmatched".into(), name: "ls".into(), ok: false, output: "missing call".into() });
+        a.apply_event(Event::ToolResult { elapsed_ms: None, id: "unmatched".into(), name: "ls".into(), ok: false, output: "missing call".into() });
         assert!(a.transcript.items.last().unwrap().text.contains("missing call"));
         assert_eq!(a.transcript.items[2].text, "after");
     }
@@ -5913,12 +5913,12 @@ mod tests {
                 a.show_checkpoint("Timer", "Wall-clock or turns?");
             }
             a.apply_event(Event::Checkpoint { kind: "ask".into(), subject: "Timer".into(), detail: "Wall-clock or turns?".into() });
-            a.apply_event(Event::ToolResult { id: "q1".into(), name: "checkpoint".into(), ok: true, output: "The user answered: wall-clock. Build that.".into() });
+            a.apply_event(Event::ToolResult { elapsed_ms: None, id: "q1".into(), name: "checkpoint".into(), ok: true, output: "The user answered: wall-clock. Build that.".into() });
             assert_eq!(a.transcript.items.len(), 1);
             assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: true }));
             assert_eq!(a.transcript.items[0].text.matches("Wall-clock or turns?").count(), 1);
             assert!(!a.transcript.items[0].text.contains("Build that"));
-            a.apply_event(Event::ToolResult { id: "q2".into(), name: "checkpoint".into(), ok: false, output: "no checkpoints left".into() });
+            a.apply_event(Event::ToolResult { elapsed_ms: None, id: "q2".into(), name: "checkpoint".into(), ok: false, output: "no checkpoints left".into() });
             assert!(a.transcript.items.last().unwrap().text.contains("[error] no checkpoints left"));
         }
     }
