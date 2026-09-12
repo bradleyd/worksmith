@@ -105,8 +105,9 @@ Validation:
 Tool results now carry optional `elapsed_ms`, measured with a monotonic clock
 around tool dispatch. It includes approval, retry, and checkpoint discussion
 waits, so it is wall time rather than CPU time or provider-only latency.
-Model generation and result rendering are outside this interval. Deferred calls
-and invalid JSON omit timing; legacy records deserialize without it. Zero is a
+The initiating model request and result rendering are outside this interval;
+checkpoint follow-up model calls are inside it. Deferred calls and invalid JSON
+omit timing; legacy records deserialize without it. Zero is a
 valid measurement below one millisecond. JSON mode serializes the same event
 that sessions record, and tool rows show the duration before the command to keep
 it visible when a long command is clipped. No timing configuration is added.
