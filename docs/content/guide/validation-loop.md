@@ -61,6 +61,12 @@ A turn's outcome describes why it stopped:
 Use `/stats` to inspect the recorded validation result. A bare `done` label is
 not proof that a check ran.
 
+Shell checks and the Bash tool use `pipefail`: a failing stage in a pipeline
+makes the pipeline fail even if its final command succeeds. For example,
+`cargo test | tee test.log` preserves a test failure. An explicit `|| true` still
+masks failure, and consumers such as `head` can cause an upstream SIGPIPE by
+closing a pipe early.
+
 ## How a failure becomes a re-plan
 
 The turn is two loops nested inside each other. The **inner** loop keeps going

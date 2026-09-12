@@ -100,6 +100,32 @@ A rising `history` value often explains growing context. A large `system`,
 `tools`, or `skills` value indicates standing prompt overhead that compaction
 may not remove. Breakdown data can be absent in older sessions.
 
+## Tool execution timing
+
+Completed TUI tool entries show their duration. In JSON mode, `tool_result`
+events include an optional `elapsed_ms`, paired with `tool_call` by `id`:
+
+```sh
+worksmith --think off --mode json "Search the web for Rust release notes"
+```
+
+A result might include:
+
+```json
+{"type":"tool_result","id":"call_1","name":"web","ok":true,"output":"...","elapsed_ms":160}
+```
+
+This measures tool dispatch, including approval waits and retries inside the
+call. A checkpoint also includes follow-up model requests and time waiting for
+your answer. It excludes the initiating model request and result rendering.
+Do not add checkpoint time to overlapping follow-up model time as if they were
+separate parts of wall-clock duration.
+
+Durations are also saved in session events. Older results and calls that never
+reach dispatch may omit the field; zero is valid for a sub-millisecond call.
+`/stats` model-time totals remain model-request totals, not aggregates of tool
+execution time.
+
 ## Session totals, turns, and cache coverage
 
 The JSON field names below apply to a `totals` object. Per-turn rows use the

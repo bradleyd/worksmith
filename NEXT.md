@@ -8,16 +8,15 @@ Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
 ## v0.7.0 release preparation
 
 The user manually tested the changes in `mud-test` and reported that they work.
-Release notes are drafted in `RELEASE_NOTES.md`, with an unreleased entry in
+Release notes are drafted in `RELEASE_NOTES.md`, with a dated entry in
 `CHANGELOG.md`. The implementation passed 522 tests (two opt-in live probes
 ignored), warning-clean all-target clippy, CLI checks, and checkpoint/tool PTY
 checks including a 25-call session. Those are the implementation validation
 results, not a new release-binary verification.
 
-Still pending: bump `Cargo.toml`/`Cargo.lock` from 0.6.0 to 0.7.0, verify the
-release build and version, finalize the changelog date, commit/tag/publish,
-and update the Homebrew tap from the published macOS artifact and checksum.
-v0.6.0 remains the published baseline below; v0.7.0 is not yet published.
+Version and changelog are prepared for v0.7.0. Publishing and the Homebrew
+checksum update remain pending until release verification completes.
+The v0.6.0 details below are the historical baseline.
 
 ## Released baseline
 

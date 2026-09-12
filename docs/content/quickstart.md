@@ -94,7 +94,17 @@ Explain how this project is organized and where its tests live.
 ```
 
 The transcript shows the response and tool activity. You can ask follow-up
-questions in the same session.
+questions in the same session. Successful tool results start collapsed; failures
+start expanded. Enter transcript navigation with `jj` or Esc while idle, select
+an entry, and press Enter to toggle its details. Press `i` to return to typing.
+
+Use `/pair on` when you want to discuss decisions as you work. Pairing adds
+collaboration guidance to model requests and offers checkpoints for your direction.
+At a checkpoint, end a follow-up question with `?` to discuss it before deciding;
+the turn stops if four discussion rounds pass without a decision. Checkpoint
+questions, discussion, and answers stay together in an expandable entry. Pairing
+guidance helps the model collaborate, but cannot guarantee it will identify every
+decision that deserves a checkpoint. Use `/pair off` to turn it off.
 
 To work on a failing test, set the check first by entering:
 
@@ -122,7 +132,9 @@ worksmith --until "cargo test" "make the failing test pass"
 | --- | --- |
 | Send a message | Enter |
 | Add a newline | Ctrl+N |
-| Expand tool output | Ctrl+O |
+| Toggle all tool details | Ctrl+O |
+| Toggle selected entry | Enter in transcript navigation |
+| Enable pairing | `/pair on` |
 | Stop the current turn | Esc |
 | Read the transcript | Esc with an empty input; `i` to return to typing |
 | Show available commands | `/help` |
