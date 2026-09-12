@@ -24,8 +24,8 @@ resume rebuild guidance rather than storing repeated reminders in history.
 
 The existing question heuristic remains a trailing question mark. It does not
 infer the intent of ambiguous prose. A prompt test proves guidance delivery, not
-that a model recognizes consequential decisions. Live 27B dogfooding remains
-before claiming that behavioral benefit. The original trace mockups below describe the broader target; the implementation
+that a model recognizes consequential decisions. The later MUD runs below
+provide live interaction evidence, without isolating the guidance benefit. The original trace mockups below describe the broader target; the implementation
 now includes expandable checkpoints and individual tool activities.
 
 ### First-slice validation
@@ -122,6 +122,32 @@ Validation:
 - Focused UI tests and warning-clean all-target clippy passed.
 - `cargo test --locked`: 520 passed, 0 failed; 2 opt-in live probes ignored.
 - `git diff --check`: passed.
+
+## Final branch review
+
+Session `21c32176-0ad7-480a-a107-50a29f575f59` exposed empty successful web
+fetches and leaked script text. The reported USA Today URL currently returns
+HTML containing `<header>`, which the extractor incorrectly treated as `<head>`.
+Exact tag boundaries, correct scanning after skipped elements, and ASCII-only
+case folding preserve article text and UTF-8 offsets. Empty extracted text now
+returns an actionable error instead of successful empty output. This remains a
+small static HTML extractor; nonempty navigation alone does not prove an article
+was retrieved.
+
+The branch review covered request snapshots, checkpoint cancellation/deferred
+calls, tool event compatibility, expansion/selection behavior, and shell status.
+The next UI work is turn grouping on a separate branch.
+
+Final checks:
+
+- Captured live HTML replayed through CLI: 2,996 characters of article text;
+  an empty HTML fixture returned `ok: false` with recovery guidance.
+- A scripted 25-tool-call PTY session retained the earlier expanded row during
+  streaming, returned to the tail with G, and showed failures and tool timings.
+  This verifies UI mechanics; it is not a new live-model quality benchmark.
+- `cargo test --locked`: 522 passed, 0 failed; 2 opt-in live probes ignored.
+- All-target clippy with warnings denied and `git diff --check`: passed.
+- Integrated into local `main` after final validation; turn grouping is next.
 
 ## 1. Problem and intended result
 

@@ -33,28 +33,20 @@ verification and both GitHub release jobs passed. Earlier CLI/REPL/TUI smoke
 checks covered dated sessions, search, worker metrics, and validation output.
 These are release results, not claims of new validation for this Markdown refresh.
 
-## Next: pairing behavior and an expandable session trace
+## Next: turn grouping and session status
 
-The next milestone is making the main session easier to follow and participate
-in. The first pairing slice is implemented on `codex/pairing-guidance`, with
-offline validation complete; see [`PAIR_PLAN.md`](PAIR_PLAN.md). Trace rendering remains
-proposed. This milestone supersedes M12 as the next recommended work.
+The pairing branch now implements request guidance, bounded checkpoint discussion,
+expandable checkpoints and tool entries, and recorded tool durations in JSON and
+the TUI. Two local MUD runs verified discussion before editing and expansion.
+The final review also fixes HTML extraction that discarded article content and
+makes empty fetches explicit failures. See [`PAIR_PLAN.md`](PAIR_PLAN.md) for
+validation and limits.
 
-Two bounded slices:
-
-1. Make `/pair on` explicitly describe collaboration in outgoing model requests,
-   retaining mechanical checkpoints and keeping questions distinct from consent
-   to resume. Verify toggling, compaction, and resume behavior.
-2. Group the main transcript by user turn with expandable tool/check details,
-   available timings, and prominent decisions. Use actual events, without model
-   calls to invent activity summaries. Extend the existing transcript module and
-   extract only what this feature requires.
-
-Two local MUD runs verified checkpoint expansion and follow-up discussion before
-edits (see `PAIR_PLAN.md`). Individual expandable tool entries are the current
-slice. Next, discuss the working/waiting/finished
-trace mockups before adding turn grouping. Resume currently uses configured
-pairing state; persisted live mode changes remain deferred.
+The next slice belongs on a fresh branch: group the transcript by user turn and
+show working/waiting/finished status. Discuss the existing mockups before starting.
+Use recorded relationships and timings; do not generate labels with a model.
+Worker trees and tabs remain later work. Resume uses configured pairing state;
+persisting live mode changes remains deferred.
 
 ## Deferred work and constraints
 

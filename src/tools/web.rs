@@ -235,11 +235,18 @@ async fn fetch(url: &str) -> Result<String, String> {
         return Err(format!("HTTP {status} from {url}"));
     }
 
+    readable_page(&content_type, &body)
+}
+
+fn readable_page(content_type: &str, body: &str) -> Result<String, String> {
     let text = if content_type.contains("html") || body.trim_start().starts_with('<') {
-        html_to_text(&body)
+        html_to_text(body)
     } else {
-        body
+        body.to_string()
     };
+    if text.trim().is_empty() {
+        return Err("No readable text returned by this page. Try another source; the page may require JavaScript or restrict automated access.".into());
+    }
     Ok(cap(&text, MAX_PAGE_CHARS))
 }
 
@@ -249,13 +256,17 @@ async fn fetch(url: &str) -> Result<String, String> {
 pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let bytes = html.as_bytes();
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let mut i = 0;
-    while i < bytes.len() {
+    'scan: while i < bytes.len() {
         if bytes[i] == b'<' {
             // Skip the entire contents of non-prose elements.
             for tag in ["script", "style", "head", "svg", "noscript"] {
-                if lower[i..].starts_with(&format!("<{tag}")) {
+                let open = format!("<{tag}");
+                if lower[i..].strip_prefix(&open).is_some_and(|rest| {
+                    rest.starts_with('>') || rest.starts_with('/')
+                        || rest.as_bytes().first().is_some_and(u8::is_ascii_whitespace)
+                }) {
                     let close = format!("</{tag}>");
                     if let Some(end) = lower[i..].find(&close) {
                         i += end + close.len();
@@ -263,7 +274,7 @@ pub fn html_to_text(html: &str) -> String {
                         i = bytes.len();
                     }
                     out.push('\n');
-                    continue;
+                    continue 'scan;
                 }
             }
             if i >= bytes.len() {
@@ -352,6 +363,30 @@ mod tests {
         assert!(!text.contains("alert"), "script bodies are dropped: {text}");
         assert!(!text.contains("color:red"), "style bodies are dropped: {text}");
         assert!(!text.contains('<'), "no markup survives: {text}");
+    }
+
+    #[test]
+    fn headers_and_adjacent_scripts_do_not_eat_prose_or_leak_code() {
+        let html = "<head><title>ignored</title></head><header>Navigation</header>\
+                    <script>private_one()</script><script>private_two()</script>\
+                    Actual article<p>İstanbul and 日本語</p>\
+                    <style>hidden_css</style>Closing words";
+        let text = html_to_text(html);
+        for expected in ["Navigation", "Actual article", "İstanbul and 日本語", "Closing words"] {
+            assert!(text.contains(expected), "{text}");
+        }
+        for hidden in ["private_one", "private_two", "hidden_css", "ignored"] {
+            assert!(!text.contains(hidden), "{text}");
+        }
+    }
+
+    #[test]
+    fn empty_pages_are_errors_but_short_readable_pages_are_valid() {
+        for (mime, body) in [("text/plain", " \n"), ("text/html", "<head>x</head><script>x</script>"), ("text/html", "<p>&nbsp;</p>")] {
+            assert!(readable_page(mime, body).unwrap_err().contains("No readable text"));
+        }
+        assert_eq!(readable_page("text/plain", "OK").unwrap(), "OK");
+        assert!(readable_page("text/html", "<header>Menu</header><p>Article</p>").unwrap().contains("Article"));
     }
 
     #[test]

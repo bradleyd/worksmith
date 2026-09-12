@@ -1,6 +1,6 @@
 # Fresh-start handoff — Worksmith
 
-Updated 2026-09-11 after the pairing/session-trace discussion. Read `AGENTS.md` and
+Updated after the pairing branch review. Read `AGENTS.md` and
 [`NEXT.md`](NEXT.md) first. This handoff recommends the next slice; it is not
 authorization to implement every milestone.
 
@@ -25,25 +25,23 @@ Check current branch/status before editing and preserve any local changes. The
 old references to uncommitted MCP planning files and pending release authorization
 are obsolete; Git status is the source of truth.
 
-## Next recommended slice: pairing and session trace
+## Next recommended slice: turn grouping and session status
 
-Read the September 11 discussion proposal in `PAIR_PLAN.md`. M12 internal role
-routing is deferred pending benchmark evidence; workflows and tabs remain later
-work. The user authorized the first phase on a new branch. Pairing guidance and
-checkpoint discussion handling are implemented on `codex/pairing-guidance`, with
-offline validation complete. The trace UI is not implemented.
+The pairing branch implements guidance, bounded follow-up discussion, expandable
+checkpoints/tool entries, and `elapsed_ms` in recorded tool results and the TUI.
+Two local MUD runs exercised pairing. Branch review also fixed web extraction of
+`<header>`/adjacent scripts and explicit failure for empty readable output.
+Read `PAIR_PLAN.md` for validation; check Git for merge status.
 
-Next, dogfood the pairing behavior and discuss the working/waiting/finished
-terminal mockups before starting the trace. Resume uses current configured
-pairing state; persistence of live toggles remains deferred.
-Retain mechanical checkpoints, existing worker behavior, and CLI JSON output.
-`src/tui/transcript.rs` already exists: extend/extract around the feature instead
-of requiring a wholesale `tui.rs` rewrite. No extra model calls for trace labels.
+Next, use a fresh branch for turn grouping and working/waiting/finished status.
+Discuss the mockups before implementation. Worker trees, tabs, model-role routing,
+and workflows remain deferred. Both local and remote worker models can use the
+existing provider configuration and spawn controls. Resume still uses configured
+pairing state; no persistence of live toggles was added.
 
-Acceptance includes pairing toggle/compaction/resume coverage, stable selection
-while streaming, inspectable failures and decisions, honest available timings,
-and meaningful PTY checks. Prompt compliance needs real dogfooding in addition to
-scripted tests; a test that proves injection does not prove useful collaboration.
+Keep UI state separate from session evidence and model context. Continue small
+extractions from `tui.rs`; do not require a wholesale rewrite. Scripted long-session
+checks exercise UI mechanics but do not establish live-model quality.
 
 ## Shipped behavior to preserve
 
