@@ -4,10 +4,10 @@ Updated after the pairing branch review. Read `AGENTS.md` and
 [`NEXT.md`](NEXT.md) first. This handoff recommends the next slice; it is not
 authorization to implement every milestone.
 
-## Checkpoint speaker UI ready
+## Checkpoint speaker UI merged
 
-`codex/checkpoint-conversation-ui` contains the unreleased speaker-label,
-spacing, and user-border fix. Automated checks passed (524 tests, Clippy, PTY,
+The speaker-label, spacing, and user-border fix from
+`codex/checkpoint-conversation-ui` is merged into `main` at `7f2deb6`, unreleased. Automated checks passed (524 tests, Clippy, PTY,
 and docs); the user confirmed collapse, navigation while waiting, and the skip
 message. See `PAIR_PLAN.md` for evidence and the separate skip-policy/model
 comparison follow-ups. No new release or Homebrew update is part of this slice.

@@ -1,6 +1,6 @@
 # Plan: pairing and the session trace
 
-Updated 2026-09-12. **Status: v0.7.0 released; checkpoint speaker UI completed on `codex/checkpoint-conversation-ui`, not yet released; turn grouping remains next.**
+Updated 2026-09-12. **Status: v0.7.0 released; checkpoint speaker UI merged into `main` at `7f2deb6`, not yet released; turn grouping remains next.**
 This is the next recommended milestone in `NEXT.md`. The original checkpoint
 plan is retained below as history, including evidence that prompting alone did
 not reliably produce useful checkpoints.
