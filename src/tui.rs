@@ -40,6 +40,7 @@ mod modals;
 mod overlay;
 mod skill_browser;
 mod transcript;
+mod turn;
 
 use crate::agent::{ActiveModel, Agent, TurnResult};
 use crate::event::{Event, EventBus};
@@ -423,6 +424,13 @@ impl App {
         self.transcript.ensure_rows(width);
     }
 
+    /// The root row says "waiting for you" exactly when the footer does: both
+    /// read the same modal state, so they cannot disagree.
+    fn sync_turn_status(&mut self) {
+        let waiting = self.modals.approval_pending() || self.modals.ask_pending();
+        self.transcript.set_turn_waiting(waiting);
+    }
+
     /// Scroll toward older content.
     fn scroll_up(&mut self, n: u16) {
         self.transcript.scroll_up(n);
@@ -451,11 +459,14 @@ impl App {
         match ev {
             Event::UserMessage { text } => {
                 let is_synthetic = self.synthetic_user_message.as_deref() == Some(text.as_str());
+                // `start_turn` already opened the root for a turn this UI
+                // started; a turn that arrived some other way gets one here.
+                if self.transcript.current_turn().is_none() {
+                    let label = if is_synthetic { format!("synthesis ▸ {text}") } else { text };
+                    self.transcript.start_turn(label);
+                }
                 if is_synthetic {
                     self.synthetic_user_message = None;
-                    self.push(Kind::Notice, format!("synthesis ▸ {text}"));
-                } else {
-                    self.push(Kind::User, text);
                 }
                 self.cur_assistant = None;
                 self.cur_thinking = None;
@@ -584,7 +595,10 @@ impl App {
             Event::Warning { message } => self.push(Kind::Notice, format!("⚠ {message}")),
             Event::Error { message } => self.push(Kind::Error, message),
             Event::SessionStarted { id } => self.show_session_id(&id),
-            Event::TurnComplete { .. } => { self.checkpoint_item = None; }
+            Event::TurnComplete { outcome } => {
+                self.checkpoint_item = None;
+                self.transcript.finish_turn(&outcome);
+            }
             Event::McpOperation { .. } => {}
         }
     }
@@ -860,7 +874,9 @@ async fn run_loop(
         // belongs to one conversation; spend belongs to the run.
         app.agent_spend = workers.token_totals(&app.prices);
         let width = terminal.size().map(|s| s.width).unwrap_or(80);
+        app.sync_turn_status();
         app.ensure_rows(width);
+        app.transcript.refresh_live_turn();
         refresh_skill_overlay(&mut app, &agent);
         refresh_mcp_overlay(&mut app, &agent);
         if let Some(ov) = app.overlay.as_mut().filter(|ov| ov.is_two_pane()) {
@@ -1225,6 +1241,15 @@ async fn run_loop(
                 turn = None;
                 app.running = false;
                 app.turn_start = None;
+                // A finished turn is closed by its own `TurnComplete` event,
+                // which sits behind `UserMessage` on the same channel. Closing
+                // it here would race that channel: a fast turn's join can land
+                // before its events are drained, and the root would then be
+                // opened after it was "finished". Only a turn that died
+                // without an event is closed from the join.
+                if !matches!(res, Ok(Ok(_))) {
+                    app.transcript.finish_turn("error");
+                }
                 match res {
                     Ok(Ok(r)) => {
                         app.status = format!("[{}]", r.outcome.label());
@@ -2889,6 +2914,14 @@ fn start_turn(
     let cwd2 = cwd.to_path_buf();
     app.running = true;
     app.turn_start = Some(std::time::Instant::now());
+    // Open the root here, not on the `UserMessage` event: a checkpoint or an
+    // approval arrives on its own channel and can reach the UI before the
+    // turn's first event is drained, and it must land under this root.
+    let label = match app.synthetic_user_message.as_deref() == Some(message.as_str()) {
+        true => format!("synthesis ▸ {message}"),
+        false => message.clone(),
+    };
+    app.transcript.start_turn(label);
     app.status = "working (Esc aborts)".into();
     app.transcript.follow = true;
     app.transcript.scroll_up = 0;
@@ -5378,11 +5411,26 @@ mod tests {
         a.apply_event(Event::MessageDelta { text: "lo".into() });
 
         assert_eq!(a.transcript.items.len(), 3);
-        assert!(matches!(a.transcript.items[0].kind, Kind::User));
+        assert!(matches!(a.transcript.items[0].kind, Kind::Turn { .. }));
         assert!(matches!(a.transcript.items[1].kind, Kind::Thinking));
         assert_eq!(a.transcript.items[1].text, "let me think");
         assert!(matches!(a.transcript.items[2].kind, Kind::Assistant));
         assert_eq!(a.transcript.items[2].text, "Hello");
+    }
+
+    #[test]
+    fn a_turn_closes_on_its_own_completion_event() {
+        let mut a = app();
+        a.apply_event(Event::UserMessage { text: "fix it".into() });
+        a.apply_event(Event::MessageDelta { text: "done".into() });
+        assert_eq!(a.transcript.current_turn(), Some(0));
+        a.apply_event(Event::TurnComplete { outcome: "done".into() });
+        assert_eq!(a.transcript.current_turn(), None);
+        assert!(matches!(a.transcript.items[0].kind, Kind::Turn { status: turn::Status::Done, .. }));
+        a.apply_event(Event::UserMessage { text: "again".into() });
+        a.apply_event(Event::TurnComplete { outcome: "aborted".into() });
+        assert!(matches!(a.transcript.items[2].kind, Kind::Turn { status: turn::Status::Failed, .. }));
+        assert!(a.transcript.items[2].text.ends_with("[aborted]"));
     }
 
     #[test]
@@ -5395,7 +5443,7 @@ mod tests {
         a.apply_event(Event::UserMessage { text: prompt.to_string() });
 
         assert_eq!(a.transcript.items.len(), 1);
-        assert!(matches!(a.transcript.items[0].kind, Kind::Notice));
+        assert!(matches!(a.transcript.items[0].kind, Kind::Turn { .. }));
         assert!(
             a.transcript.items[0].text.starts_with("synthesis"),
             "synthetic prompts need their own label: {:?}",
@@ -7019,8 +7067,12 @@ mod tests {
             let len: usize = row.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(len <= 16, "row too wide ({len}): {row:?}");
         }
-        // The first row carries the "you ▸" label.
+        // The root row quotes what fits; the rest is labeled beneath it.
         let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(first.contains("you"), "first row should label the user: {first}");
+        assert!(first.starts_with("▼ hel"), "root row quotes the user: {first}");
+        assert!(
+            rows.iter().any(|r| transcript::row_text(r).contains("you ▸ hello")),
+            "a label that did not fit is shown whole: {rows:?}"
+        );
     }
 }

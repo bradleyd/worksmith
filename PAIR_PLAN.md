@@ -1,9 +1,76 @@
 # Plan: pairing and the session trace
 
-Updated 2026-09-12. **Status: v0.7.0 released; checkpoint speaker UI merged into `main` at `7f2deb6`, not yet released; turn grouping remains next.**
+Updated 2026-09-16. **Status: turn grouping implemented on branch `turn-grouping`, unreleased; the decisions in §8 were resolved as recorded below.**
 This is the next recommended milestone in `NEXT.md`. The original checkpoint
 plan is retained below as history, including evidence that prompting alone did
 not reliably produce useful checkpoints.
+
+## Turn grouping slice
+
+Decisions from §8, taken as the plan recommended, with one scope note:
+
+1. The trace is the main transcript. Successful tool output stays collapsed and
+   thinking is now hidden by default (Ctrl+T shows it). No second view mode.
+2. Checkpoint conversation behavior is unchanged: a clear reply continues, a
+   question discusses, Esc skips. No Resume action was added.
+3. Resume-mode persistence stays deferred.
+4. Scope is turn, tool, and checkpoint grouping. Worker branches, multi-call
+   compression, and per-tool persisted timing are not in this slice.
+
+Implementation, in `src/tui/turn.rs` with small hooks in `transcript.rs` and
+`tui.rs`: each turn the TUI starts pushes a `Kind::Turn` root whose text is the
+user's message (or the synthesis prompt, labeled as such). Items are grouped by
+position, never by timing: an item belongs to the most recent root before it.
+The root row quotes the first line of the message, truncated to fit with the
+status on the right; a message that did not fit, or ran to several lines, is
+shown whole beneath the row so nothing typed is hidden. Status is `working`,
+`waiting for you`, `done`, or `ended` with the loop's own outcome label
+appended as a bracketed note to the root text, so search and `y` see it.
+
+The root opens in `start_turn`, not on the `UserMessage` event: a checkpoint or
+approval arrives on its own channel and reached the UI before the first bus
+event in the scripted smoke, which put the checkpoint block above its turn. A
+turn that arrives without `start_turn` still gets a root from the event. The
+turn closes on its own `TurnComplete` event, which is ordered behind
+`UserMessage`; closing from the task join raced the event channel and marked
+fast turns `unfinished`. Only a turn whose task returned an error, with no
+event, is closed from the join. Working/waiting is synced every draw from the
+same modal state the footer reads, so the two cannot disagree.
+
+Elapsed time is a local monotonic clock around the live turn and is frozen at
+completion. While working, the root row is repainted in place each draw rather
+than re-wrapping the turn beneath it, which would rebuild the whole turn on
+every spinner tick. No timing is shown for a turn this process did not run;
+resumed sessions do not replay into the transcript, so there is nothing to mark
+stale. No event schema changes; `--mode json` and sessions are untouched.
+
+Known and left alone: with a zero-latency scripted server the ask can also beat
+`ModelCallStarted`, which clears `checkpoint_item`, so the answer renders as a
+`◆ You:` line rather than inside the checkpoint block. This predates the slice
+and did not reproduce against a real model in earlier runs. Notices pushed
+between turns, such as `/pair on`, nest under the previous turn by position.
+
+Validation:
+
+- Unit coverage: nesting and folding with the incremental cache matching the
+  reference renderer, frozen elapsed and outcome notes, waiting without a
+  duration, a lost turn closed as `unfinished` by the next, in-place live
+  refresh leaving the cache clean, long and multiline labels, search opening a
+  folded turn, Ctrl+O leaving turns alone, narrow headings, and closing from
+  the completion event. Each new guard was deliberately broken (root nesting,
+  event-driven close, search reveal) and its test failed; restored source passes.
+- `cargo test --locked`: all passed (533 across binaries), 2 opt-in live probes
+  ignored. `cargo clippy --locked --all-targets -- -D warnings`: clean.
+- Scripted PTY smoke against a local scripted server, rendered through a
+  terminal emulator at 80 and 40 columns: root rows with `working · Ns`,
+  `waiting for you` with the checkpoint nested beneath, `done · 3s` after the
+  answer, a failed tool open under a `done` turn, Enter folding the root to a
+  single row and unfolding it, and search landing on the root. The build on
+  this machine needed the Command Line Tools toolchain and the 14.4 SDK because
+  the Xcode license is unaccepted; that is an environment note, not a code change.
+
+Not verified here: live model dogfooding on the local 27B and the elapsed time
+of a real multi-minute turn on screen. Those remain the §6 step 5 work.
 
 ## Checkpoint speaker UI follow-up
 

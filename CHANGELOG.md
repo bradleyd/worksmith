@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- The TUI groups the transcript by turn. Each message you send gets a root row
+  quoting your text, with the turn's prose, tool activity, and checkpoints
+  indented beneath it. The row shows `working` with the time so far,
+  `waiting for you` during a checkpoint or approval, `done` with the elapsed
+  time, or `ended` with the loop's reason. Enter in transcript navigation folds
+  a turn; search opens a folded turn around its match. Labels quote the user;
+  no model call produces them. Timing is the local clock around the live turn
+  and is never shown for a turn this process did not run.
+
+### Changed
+
+- Model reasoning is hidden in the transcript by default. Ctrl+T shows it; the
+  footer's `↻` count is unchanged. Requests and session records are unaffected.
+
 ### Fixed
 
 - Pairing checkpoint discussions distinguish Assistant, You, and System with

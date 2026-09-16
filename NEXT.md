@@ -1,9 +1,19 @@
 # What to do next
 
-Updated 2026-09-11 after the pairing/session-trace discussion.
+Updated 2026-09-16 after the turn-grouping slice.
 This is the short operational list;
 `PLAN.md` holds the broader roadmap and `LOOSE_ENDS.md` the forensic notes.
 Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
+
+## Turn grouping built, on a branch
+
+Branch `turn-grouping` groups the transcript by turn with working / waiting /
+done / ended status and elapsed time on the root row, folds turns with Enter,
+and hides thinking by default. Tests, Clippy, deliberate guard breaks, and a
+scripted PTY smoke at 80 and 40 columns passed; see `PAIR_PLAN.md` "Turn
+grouping slice" for decisions, the two ordering races it fixed, and limits.
+Not yet done: dogfooding on the local 27B with a real task, then merge and
+release. Worker trees and tabs remain later work.
 
 ## Checkpoint speaker UI merged
 
@@ -59,7 +69,7 @@ verification and both GitHub release jobs passed. Earlier CLI/REPL/TUI smoke
 checks covered dated sessions, search, worker metrics, and validation output.
 These are release results, not claims of new validation for this Markdown refresh.
 
-## Next: turn grouping and session status
+## Next: dogfood the turn grouping, then release
 
 The pairing branch now implements request guidance, bounded checkpoint discussion,
 expandable checkpoints and tool entries, and recorded tool durations in JSON and
@@ -68,11 +78,12 @@ The final review also fixes HTML extraction that discarded article content and
 makes empty fetches explicit failures. See [`PAIR_PLAN.md`](PAIR_PLAN.md) for
 validation and limits.
 
-The next slice belongs on a fresh branch: group the transcript by user turn and
-show working/waiting/finished status. Discuss the existing mockups before starting.
-Use recorded relationships and timings; do not generate labels with a model.
-Worker trees and tabs remain later work. Resume uses configured pairing state;
-persisting live mode changes remains deferred.
+Turn grouping is built on `turn-grouping`. What remains is the §6 step 5 work:
+run one small real task on the local 27B with pairing off and on, check that a
+multi-minute turn's elapsed time and waiting state read correctly, and record
+any unnecessary interruptions. Then merge, release, and update the website
+guide. Worker trees and tabs remain later work. Resume uses configured pairing
+state; persisting live mode changes remains deferred.
 
 ## Deferred work and constraints
 

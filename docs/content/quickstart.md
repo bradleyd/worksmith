@@ -93,10 +93,17 @@ Type a task in the input area and press **Enter**, for example:
 Explain how this project is organized and where its tests live.
 ```
 
-The transcript shows the response and tool activity. You can ask follow-up
-questions in the same session. Successful tool results start collapsed; failures
-start expanded. Enter transcript navigation with `jj` or Esc while idle, select
-an entry, and press Enter to toggle its details. Press `i` to return to typing.
+Each message you send becomes a turn in the transcript. The turn's root row
+quotes your message and shows its state on the right: `working` with the time
+so far, `waiting for you` while a checkpoint or approval needs an answer, `done`
+with the elapsed time, or `ended` with the reason when the turn stopped short.
+The response, tool activity, and checkpoints sit indented under that row, in the
+order they happened. Nothing is summarized or labeled by a model. You can ask
+follow-up questions in the same session. Successful tool results start
+collapsed; failures start expanded. Model reasoning is hidden by default; Ctrl+T
+shows it. Enter transcript navigation with `jj` or Esc while idle, select an
+entry or a turn's root row, and press Enter to toggle it. A search opens any
+folded turn or entry that matches. Press `i` to return to typing.
 
 Use `/pair on` when you want to discuss decisions as you work. Pairing adds
 collaboration guidance to model requests and offers checkpoints for your direction.
@@ -138,7 +145,8 @@ worksmith --until "cargo test" "make the failing test pass"
 | Send a message | Enter |
 | Add a newline | Ctrl+N |
 | Toggle all tool details | Ctrl+O |
-| Toggle selected entry | Enter in transcript navigation |
+| Toggle selected entry or turn | Enter in transcript navigation |
+| Show or hide model reasoning | Ctrl+T |
 | Enable pairing | `/pair on` |
 | Stop the current turn | Esc |
 | Read the transcript | Esc with an empty input; `i` to return to typing |

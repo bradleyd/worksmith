@@ -40,6 +40,9 @@ pub(super) enum Kind {
     Pair,
     /// One inspectable question/discussion/answer block; raw text stays intact.
     Checkpoint { expanded: bool },
+    /// A user turn's root row. Everything pushed after it, up to the next
+    /// root, is its child (see `turn.rs`). Text is the user's own message.
+    Turn { expanded: bool, status: super::turn::Status, elapsed_ms: Option<u64> },
 }
 
 pub(super) struct Item {
@@ -90,6 +93,9 @@ pub(super) struct Transcript {
     /// when the search pattern changes.
     pub(super) search_hit_rows: Vec<usize>,
     pub(super) search_hits_dirty: bool,
+    /// The turn the loop is running now: its root item and when it started.
+    /// The clock is local and live-only; a replayed session gets no timing.
+    pub(super) live_turn: Option<(usize, std::time::Instant)>,
 }
 
 impl Default for Transcript {
@@ -105,12 +111,16 @@ impl Default for Transcript {
             dirty: true,
             dirty_from: None,
             item_starts: Vec::new(),
-            show_thinking: true,
+            // Hidden by default for the calmer trace; Ctrl+T shows it, and the
+            // footer's ↻ says reasoning is happening either way. Rendering
+            // never changes what is requested or stored.
+            show_thinking: false,
             mode: Mode::Insert,
             cursor_row: 0,
             search: None,
             search_hit_rows: Vec::new(),
             search_hits_dirty: false,
+            live_turn: None,
         }
     }
 }
@@ -119,6 +129,7 @@ impl Transcript {
     pub(super) fn clear_for_new_session(&mut self) {
         self.items.clear();
         self.pending_tools.clear();
+        self.live_turn = None;
         // A fresh transcript has nothing to be scrolled back into.
         self.scroll_up = 0;
         self.dirty = true;
@@ -166,7 +177,7 @@ impl Transcript {
     pub(super) fn toggle_entry(&mut self) -> bool {
         let Some(index) = self.item_at_row(self.cursor_row) else { return false; };
         let expanded = match &mut self.items[index].kind {
-            Kind::Checkpoint { expanded } => expanded,
+            Kind::Checkpoint { expanded } | Kind::Turn { expanded, .. } => expanded,
             Kind::ToolActivity { expanded, chosen, .. } => { *chosen = true; expanded }
             _ => return false,
         };
@@ -180,16 +191,29 @@ impl Transcript {
         let Some(search) = self.search.as_ref().filter(|s| !s.pattern.is_empty()) else { return; };
         let needle = search.pattern.to_lowercase();
         let mut first = None;
-        for (i, item) in self.items.iter_mut().enumerate() {
-            if item.text.to_lowercase().contains(&needle) {
-                match &mut item.kind {
-                    Kind::Checkpoint { expanded } | Kind::ToolActivity { expanded, .. } if !*expanded => {
-                        *expanded = true;
-                        if let Kind::ToolActivity { chosen, .. } = &mut item.kind { *chosen = true; }
-                        first.get_or_insert(i);
-                    }
-                    _ => {}
+        let mut root = None;
+        for i in 0..self.items.len() {
+            if matches!(self.items[i].kind, Kind::Turn { .. }) {
+                root = Some(i);
+            }
+            if !self.items[i].text.to_lowercase().contains(&needle) {
+                continue;
+            }
+            match &mut self.items[i].kind {
+                Kind::Checkpoint { expanded } | Kind::ToolActivity { expanded, .. } if !*expanded => {
+                    *expanded = true;
+                    if let Kind::ToolActivity { chosen, .. } = &mut self.items[i].kind { *chosen = true; }
+                    first.get_or_insert(i);
                 }
+                _ => {}
+            }
+            // A match inside a folded turn is invisible until its root opens.
+            if let Some(r) = root
+                && let Kind::Turn { expanded, .. } = &mut self.items[r].kind
+                && !*expanded
+            {
+                *expanded = true;
+                first = Some(first.map_or(r, |f: usize| f.min(r)));
             }
         }
         if let Some(i) = first {
@@ -304,11 +328,12 @@ impl Transcript {
             self.item_starts.get(from).copied().unwrap_or(self.cached_rows.len());
         self.cached_rows.truncate(keep_rows);
         self.item_starts.truncate(from);
-        for item in &self.items[from..] {
+        for index in from..self.items.len() {
             self.item_starts.push(self.cached_rows.len());
-            item_rows(
+            grouped_item_rows(
                 &mut self.cached_rows,
-                item,
+                &self.items,
+                index,
                 self.collapse_tools,
                 self.show_thinking,
                 width,
@@ -323,6 +348,7 @@ impl Transcript {
         self.cache_width = width;
         self.dirty = false;
         self.dirty_from = None;
+        self.refresh_live_turn();
         self.search_hits_dirty = true;
         self.rebuild_search_hits();
     }
@@ -354,10 +380,36 @@ pub(super) fn build_rows(
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut rows: Vec<Line> = Vec::new();
-    for item in items {
-        item_rows(&mut rows, item, collapse_tools, show_thinking, width);
+    for index in 0..items.len() {
+        grouped_item_rows(&mut rows, items, index, collapse_tools, show_thinking, width);
     }
     rows
+}
+
+/// One item's rows in the context of its turn: hidden under a folded root,
+/// indented under an open one, at the margin otherwise.
+pub(super) fn grouped_item_rows(
+    rows: &mut Vec<Line<'static>>,
+    items: &[Item],
+    index: usize,
+    collapse_tools: bool,
+    show_thinking: bool,
+    width: u16,
+) {
+    let root = if matches!(items[index].kind, Kind::Turn { .. }) {
+        None // a root is never inside the turn before it
+    } else {
+        super::turn::enclosing(items, index)
+    };
+    if super::turn::is_collapsed(items, root) {
+        return;
+    }
+    let from = rows.len();
+    let inner_width = if root.is_some() { width.saturating_sub(2) } else { width };
+    item_rows(rows, &items[index], collapse_tools, show_thinking, inner_width);
+    if root.is_some() {
+        super::turn::indent(rows, from);
+    }
 }
 
 /// Append one item's wrapped rows. Split out of `build_rows` so the cache can
@@ -379,6 +431,10 @@ pub(super) fn item_rows(
         }
         if let Kind::Checkpoint { expanded } = item.kind {
             super::checkpoint::render(rows, &item.text, &item.checkpoint, expanded, width);
+            return;
+        }
+        if let Kind::Turn { expanded, status, elapsed_ms } = item.kind {
+            super::turn::render(rows, item, expanded, status, elapsed_ms, width);
             return;
         }
         if item.kind == Kind::Thinking && !show_thinking {
@@ -453,6 +509,7 @@ fn kind_style(kind: Kind) -> (Style, &'static str) {
         Kind::Error => (Style::default().fg(Color::Red), "! "),
         Kind::ToolActivity { .. } => unreachable!("tool activities have their own renderer"),
         Kind::Checkpoint { .. } => unreachable!("checkpoints have their own renderer"),
+        Kind::Turn { .. } => unreachable!("turn roots have their own renderer"),
         Kind::Diff | Kind::ReviewDiff => unreachable!("diffs are rendered before kind styling"),
     }
 }
