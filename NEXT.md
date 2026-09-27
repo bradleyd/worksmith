@@ -1,19 +1,25 @@
 # What to do next
 
-Updated 2026-09-16 after the turn-grouping slice.
+Updated 2026-09-27 after the turn-grouping live dogfood.
 This is the short operational list;
 `PLAN.md` holds the broader roadmap and `LOOSE_ENDS.md` the forensic notes.
 Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
 
-## Turn grouping built, on a branch
+## Turn grouping dogfooded, ready to merge
 
 Branch `turn-grouping` groups the transcript by turn with working / waiting /
 done / ended status and elapsed time on the root row, folds turns with Enter,
 and hides thinking by default. Tests, Clippy, deliberate guard breaks, and a
 scripted PTY smoke at 80 and 40 columns passed; see `PAIR_PLAN.md` "Turn
 grouping slice" for decisions, the two ordering races it fixed, and limits.
-Not yet done: dogfooding on the local 27B with a real task, then merge and
-release. Worker trees and tabs remain later work.
+
+Live 27B dogfooding is now done (see `PAIR_PLAN.md` "Live 27B dogfood"). The
+same small `mud-test` task run with pairing off had the model narrate a
+discussion and then plow straight into edits (no `checkpoint` tool call; it
+later reverted from git), while the same task with pairing on issued a real
+checkpoint, waited for the answer, and only then edited. The grouped transcript
+read well to the user. Remaining: merge into `main` and release. Worker trees
+and tabs remain later work.
 
 ## Checkpoint speaker UI merged
 
@@ -69,7 +75,7 @@ verification and both GitHub release jobs passed. Earlier CLI/REPL/TUI smoke
 checks covered dated sessions, search, worker metrics, and validation output.
 These are release results, not claims of new validation for this Markdown refresh.
 
-## Next: dogfood the turn grouping, then release
+## Next: merge the turn grouping, then release
 
 The pairing branch now implements request guidance, bounded checkpoint discussion,
 expandable checkpoints and tool entries, and recorded tool durations in JSON and
@@ -78,12 +84,13 @@ The final review also fixes HTML extraction that discarded article content and
 makes empty fetches explicit failures. See [`PAIR_PLAN.md`](PAIR_PLAN.md) for
 validation and limits.
 
-Turn grouping is built on `turn-grouping`. What remains is the §6 step 5 work:
-run one small real task on the local 27B with pairing off and on, check that a
-multi-minute turn's elapsed time and waiting state read correctly, and record
-any unnecessary interruptions. Then merge, release, and update the website
-guide. Worker trees and tabs remain later work. Resume uses configured pairing
-state; persisting live mode changes remains deferred.
+Turn grouping is built on `turn-grouping` and its §6 step 5 live 27B dogfood is
+now done (see "Live 27B dogfood: turn grouping + pairing"): the same small
+`mud-test` task with pairing off plowed into edits without stopping, while
+pairing on issued a real checkpoint and waited; the grouped transcript read well.
+What remains is to merge into `main`, release, and update the website guide.
+Worker trees and tabs remain later work. Resume uses configured pairing state;
+persisting live mode changes remains deferred.
 
 ## Deferred work and constraints
 

@@ -69,8 +69,9 @@ Validation:
   this machine needed the Command Line Tools toolchain and the 14.4 SDK because
   the Xcode license is unaccepted; that is an environment note, not a code change.
 
-Not verified here: live model dogfooding on the local 27B and the elapsed time
-of a real multi-minute turn on screen. Those remain the §6 step 5 work.
+Live model dogfooding on the local 27B and the elapsed time of a real
+multi-minute turn on screen were the §6 step 5 work; they are now done — see
+"Live 27B dogfood: turn grouping + pairing" below.
 
 ## Checkpoint speaker UI follow-up
 
@@ -243,6 +244,43 @@ Final checks:
 - `cargo test --locked`: 522 passed, 0 failed; 2 opt-in live probes ignored.
 - All-target clippy with warnings denied and `git diff --check`: passed.
 - Integrated into local `main` after final validation; turn grouping is next.
+
+## Live 27B dogfood: turn grouping + pairing
+
+The last open item for the turn-grouping slice was live dogfooding on the local
+27B (step 5, "Dogfood and document"): run the same small real task with pairing
+off, then on, and check whether useful decisions happen before edits and whether
+the grouped transcript is easier to read. Both runs used the same prompt in
+`mud-test` — *"add elapsed time for the game so the user knows how long they are
+in the game. Before editing discuss what a time should be. Keep the change
+small."* — so pairing mode was the only variable.
+
+- **Pairing off — session `1e487af2-c1c0-411d-b5d9-87b0932bf37a`.** The model
+  wrote *"Here's the discussion before I touch anything"* as prose, then fired
+  five `edit` calls in the same turn. It never actually stopped; when the user
+  pushed back it admitted *"that was my mistake… I wrote a one-sided 'here's
+  what I'll do' and then went straight [to editing]"* and had to revert the
+  change from git. No `checkpoint` tool call was issued. (A transcript search
+  for "checkpoint" matches the word in that prose, not a checkpoint event.)
+- **Pairing on — session `08f0660c-2f88-4280-be75-5ab01fe24c1a`.** The model
+  read the code, then issued a real `checkpoint` tool call that blocked the turn
+  and waited. The user answered, the decision was filed, and only then did it
+  edit. One clean round of back-and-forth, no revert. The grouped transcript
+  showed the working → waiting (checkpoint) → working → done lifecycle with
+  elapsed time, and the user confirmed the grouping read well.
+
+This is the exact failure the eval measured — a small model narrating "done" or
+"discussed" while barreling forward — and the pairing guidance is what flips it.
+The run does not measure general model reliability from one task; it confirms
+the interaction the grouping was built to surface.
+
+Side note, not a pairing issue: in the pair-on run the model still hit
+`python: command not found` twice before falling back to `python3`; the user
+caught it and the model offered to store it. That is a memory-store candidate.
+
+Validation: live 27B dogfooding for the turn-grouping slice is now complete.
+`cargo test --locked` and all-target clippy with warnings denied still pass on
+the branch. Remaining: merge into `main` and release.
 
 ## 1. Problem and intended result
 
