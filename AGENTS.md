@@ -16,6 +16,8 @@ order and why) and `worksmith-memory-v1.md` for the memory design.
 - `cargo build`: build.
 - `cargo test`: unit + integration tests. **Run before considering work done.**
 - `cargo clippy`: **must be warning-clean** (this repo keeps 0 warnings).
+- `cargo fmt`: run before committing; `cargo fmt --check` must pass. Format
+  your own changes only, never a drive-by reformat mixed into other work.
 - `cargo run -- [ARGS]`: run it. Note: the cargo target dir is customized
   (`~/.cargo/target`), so there is no `./target/debug/worksmith`; use
   `cargo run` or read `cargo metadata` for the path.
