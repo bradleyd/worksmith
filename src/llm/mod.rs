@@ -66,15 +66,46 @@ pub struct Message {
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None, model: None }
+        Self {
+            role: Role::System,
+            content: Some(text.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+            finish_reason: None,
+            model: None,
+        }
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(text.into()), tool_calls: vec![], tool_call_id: None, name: None, reasoning: None, finish_reason: None, model: None }
+        Self {
+            role: Role::User,
+            content: Some(text.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+            finish_reason: None,
+            model: None,
+        }
     }
     pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, content, tool_calls, tool_call_id: None, name: None, reasoning: None, finish_reason: None, model: None }
+        Self {
+            role: Role::Assistant,
+            content,
+            tool_calls,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+            finish_reason: None,
+            model: None,
+        }
     }
-    pub fn tool_result(call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool_result(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: Some(content.into()),
@@ -159,7 +190,8 @@ impl Usage {
     /// Normalize complete, reported disjoint categories at the adapter boundary.
     /// Do not pass inclusive provider totals as uncached/non-reasoning counts.
     pub fn from_parts(input: InputTokens, output: OutputTokens) -> Self {
-        let prompt_tokens = input.uncached
+        let prompt_tokens = input
+            .uncached
             .saturating_add(input.cache_read.unwrap_or(0))
             .saturating_add(input.cache_write.unwrap_or(0));
         let completion_tokens = output.non_reasoning.saturating_add(output.reasoning);
@@ -374,8 +406,12 @@ impl ThinkingDialect {
     /// where that came from.
     pub fn guess_from_url(base_url: &str) -> ThinkingDialect {
         let u = base_url.to_ascii_lowercase();
-        const HOSTED_GATEWAYS: [&str; 4] =
-            ["openrouter.ai", "api.openai.com", "api.together.xyz", "api.groq.com"];
+        const HOSTED_GATEWAYS: [&str; 4] = [
+            "openrouter.ai",
+            "api.openai.com",
+            "api.together.xyz",
+            "api.groq.com",
+        ];
         if HOSTED_GATEWAYS.iter().any(|h| u.contains(h)) {
             ThinkingDialect::Reasoning
         } else {
@@ -415,7 +451,11 @@ pub enum StreamEvent {
     /// field). Display-only — never sent back to the model.
     ReasoningDelta(String),
     /// A tool call began (name known).
-    ToolCallStarted { index: usize, id: String, name: String },
+    ToolCallStarted {
+        index: usize,
+        id: String,
+        name: String,
+    },
     /// A chunk of a tool call's argument JSON.
     ToolCallArgsDelta { index: usize, delta: String },
     /// Final token usage (if the provider reports it).
@@ -472,7 +512,9 @@ const _: () = assert!(
 /// Build a streaming client for a resolved provider+model. Shared by the main
 /// session and by workers running on a different (usually cheaper) model, so
 /// there's one place that knows how a provider becomes a client.
-pub fn client_for(resolved: &crate::config::ResolvedModel) -> anyhow::Result<std::sync::Arc<dyn LlmClient>> {
+pub fn client_for(
+    resolved: &crate::config::ResolvedModel,
+) -> anyhow::Result<std::sync::Arc<dyn LlmClient>> {
     client_and_http(resolved).map(|(c, _)| c)
 }
 
@@ -493,7 +535,10 @@ pub fn client_and_http(
     // exactly what happens: the supervisor's `request-timeout` watches spawned
     // workers and nothing watches the main loop.
     let idle = std::time::Duration::from_secs(
-        resolved.provider.stream_idle_timeout.unwrap_or(DEFAULT_STREAM_IDLE_SECS),
+        resolved
+            .provider
+            .stream_idle_timeout
+            .unwrap_or(DEFAULT_STREAM_IDLE_SECS),
     );
     let http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
@@ -523,7 +568,11 @@ pub fn client_and_http(
                 resolved.provider.base_url.clone(),
                 resolved.api_key.clone(),
             );
-            if let Some(d) = resolved.provider.thinking_param.as_deref().and_then(ThinkingDialect::parse)
+            if let Some(d) = resolved
+                .provider
+                .thinking_param
+                .as_deref()
+                .and_then(ThinkingDialect::parse)
             {
                 c = c.with_thinking_dialect(d, DialectSource::Explicit);
             }
@@ -634,7 +683,10 @@ impl ModelOverride {
             model_key: resolved.model_key.clone(),
             client: client_for(&resolved)?,
             model: resolved.model,
-            context_limit: resolved.settings.context.unwrap_or_else(|| config.context_limit()),
+            context_limit: resolved
+                .settings
+                .context
+                .unwrap_or_else(|| config.context_limit()),
             temperature: resolved.settings.temperature.or(config.temperature),
             settings: resolved.settings,
             missing_key_env: resolved.missing_key_env,

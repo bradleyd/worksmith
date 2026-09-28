@@ -26,7 +26,9 @@ struct MockClient {
 
 impl MockClient {
     fn new(responses: Vec<Completion>) -> Self {
-        Self { responses: Mutex::new(responses.into()) }
+        Self {
+            responses: Mutex::new(responses.into()),
+        }
     }
 }
 
@@ -38,7 +40,12 @@ impl LlmClient for MockClient {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        Ok(self.responses.lock().unwrap().pop_front().unwrap_or_default())
+        Ok(self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default())
     }
 }
 
@@ -98,7 +105,11 @@ fn tool_call(name: &str, args: &str) -> Completion {
     Completion {
         content: None,
         reasoning: None,
-        tool_calls: vec![ToolCall { id: "c1".into(), name: name.into(), arguments: args.into() }],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: args.into(),
+        }],
         usage: Default::default(),
         finish_reason: Some("tool_calls".into()),
         rescued: None,
@@ -106,7 +117,10 @@ fn tool_call(name: &str, args: &str) -> Completion {
 }
 
 fn done(text: &str) -> Completion {
-    Completion { content: Some(text.into()), ..Default::default() }
+    Completion {
+        content: Some(text.into()),
+        ..Default::default()
+    }
 }
 
 /// A tool call whose arguments were cut off (invalid JSON) with finish_reason
@@ -115,7 +129,11 @@ fn truncated_call(name: &str, partial_args: &str) -> Completion {
     Completion {
         content: None,
         reasoning: None,
-        tool_calls: vec![ToolCall { id: "c1".into(), name: name.into(), arguments: partial_args.into() }],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: partial_args.into(),
+        }],
         usage: Default::default(),
         finish_reason: Some("length".into()),
         rescued: None,
@@ -180,7 +198,10 @@ impl LlmClient for FlakyClient {
                 Err(anyhow::anyhow!("LLM HTTP 401: bad key"))
             };
         }
-        Ok(Completion { content: Some("done".into()), ..Default::default() })
+        Ok(Completion {
+            content: Some("done".into()),
+            ..Default::default()
+        })
     }
 }
 
@@ -205,7 +226,10 @@ impl LlmClient for TightWindowClient {
         *self.calls.lock().unwrap() += 1;
         let asked = req.max_tokens.unwrap_or(0);
         if asked < self.accept_below {
-            return Ok(Completion { content: Some("done".into()), ..Default::default() });
+            return Ok(Completion {
+                content: Some("done".into()),
+                ..Default::default()
+            });
         }
         anyhow::bail!(
             "LLM HTTP 400 Bad Request: {{\"error\":{{\"message\":\"This model's maximum \
@@ -227,15 +251,27 @@ async fn a_prompt_bound_request_compacts_instead_of_shrinking_forever() {
     // tokens, the reported prompt grew by 512, and the turn died having never
     // once tried making the prompt smaller.
     let calls = Arc::new(Mutex::new(0));
-    let client = TightWindowClient { calls: calls.clone(), accept_below: 0 };
+    let client = TightWindowClient {
+        calls: calls.clone(),
+        accept_below: 0,
+    };
     let agent = build_agent_with_client(Arc::new(client), dir.path(), 3);
 
     let _ = agent
-        .run_turn(&mut session, "write chapter 10", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "write chapter 10",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await;
 
     let n = *calls.lock().unwrap();
-    assert!(n <= 4, "one shrink, one compaction, then stop — not {n} attempts");
+    assert!(
+        n <= 4,
+        "one shrink, one compaction, then stop — not {n} attempts"
+    );
 }
 
 #[tokio::test]
@@ -254,12 +290,26 @@ async fn a_dropped_connection_is_retried_not_fatal() {
     let agent = build_agent_with_client(Arc::new(client), dir.path(), 3);
 
     let result = agent
-        .run_turn(&mut session, "hello", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "hello",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
-    assert_eq!(*calls.lock().unwrap(), 3, "two failures should cost two retries");
+    assert!(
+        matches!(result.outcome, TurnOutcome::Done),
+        "outcome: {:?}",
+        result.outcome
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        3,
+        "two failures should cost two retries"
+    );
 }
 
 #[tokio::test]
@@ -278,11 +328,21 @@ async fn a_rejected_key_is_not_retried() {
     let agent = build_agent_with_client(Arc::new(client), dir.path(), 3);
 
     let result = agent
-        .run_turn(&mut session, "hello", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "hello",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await;
 
     assert!(result.is_err() || !matches!(result.unwrap().outcome, TurnOutcome::Done));
-    assert_eq!(*calls.lock().unwrap(), 1, "a permanent error should be asked once");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "a permanent error should be asked once"
+    );
 }
 
 #[tokio::test]
@@ -319,8 +379,15 @@ async fn validation_drives_replan_until_pass() {
         .await
         .unwrap();
 
-    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
-    assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "good");
+    assert!(
+        matches!(result.outcome, TurnOutcome::Done),
+        "outcome: {:?}",
+        result.outcome
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "good"
+    );
 }
 
 #[tokio::test]
@@ -344,7 +411,13 @@ async fn validation_fails_after_retries_exhausted() {
     );
 
     let result = agent
-        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "make it good",
+            "system",
+            Some(&validator),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -366,11 +439,21 @@ async fn repeated_identical_calls_escalate_to_stuck() {
     let agent = build_agent(MockClient::new(script), dir.path(), 2);
 
     let result = agent
-        .run_turn(&mut session, "look around", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "look around",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(matches!(result.outcome, TurnOutcome::Stuck(_)), "outcome: {:?}", result.outcome);
+    assert!(
+        matches!(result.outcome, TurnOutcome::Stuck(_)),
+        "outcome: {:?}",
+        result.outcome
+    );
 }
 
 #[tokio::test]
@@ -381,12 +464,19 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
 
     // Pre-fill with several bulky turns so the estimate exceeds a tiny limit.
     for _ in 0..3 {
-        session.append_message(Message::user("x".repeat(300))).unwrap();
-        session.append_message(Message::assistant(Some("y".repeat(300)), vec![])).unwrap();
+        session
+            .append_message(Message::user("x".repeat(300)))
+            .unwrap();
+        session
+            .append_message(Message::assistant(Some("y".repeat(300)), vec![]))
+            .unwrap();
     }
 
     // First stream call = the summarization pass; second = the actual turn.
-    let client = MockClient::new(vec![handover("SUMMARY: earlier work"), done("final answer")]);
+    let client = MockClient::new(vec![
+        handover("SUMMARY: earlier work"),
+        done("final answer"),
+    ]);
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -394,11 +484,11 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
         "mock".into(),
         None,
         None,
-        20,   // max_steps
-        3,    // max_retries
-        3,    // stuck_threshold
-        200,  // context_limit (tiny → triggers compaction)
-        1,    // keep_recent_turns
+        20,  // max_steps
+        3,   // max_retries
+        3,   // stuck_threshold
+        200, // context_limit (tiny → triggers compaction)
+        1,   // keep_recent_turns
         ToolContext {
             cwd: dir.path().to_path_buf(),
             session_id: "test".into(),
@@ -409,15 +499,29 @@ async fn compaction_summarizes_old_turns_when_over_limit() {
     );
 
     let result = agent
-        .run_turn(&mut session, "new question", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "new question",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
     assert_eq!(result.text, "final answer");
     // History collapsed to: [summary, "new question", assistant("final answer")].
-    assert_eq!(session.messages().len(), 3, "should have compacted old turns");
+    assert_eq!(
+        session.messages().len(),
+        3,
+        "should have compacted old turns"
+    );
     assert!(
-        session.messages()[0].content.as_deref().unwrap_or("").starts_with("[Summary"),
+        session.messages()[0]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("[Summary"),
         "first message should be the summary"
     );
 }
@@ -436,25 +540,42 @@ async fn truncated_tool_call_recovers_without_poisoning_history() {
     let agent = build_agent(client, dir.path(), 3);
 
     let result = agent
-        .run_turn(&mut session, "write a file", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "write a file",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
+    assert!(
+        matches!(result.outcome, TurnOutcome::Done),
+        "outcome: {:?}",
+        result.outcome
+    );
 
     // Every stored tool_call must have valid-JSON arguments (so re-sending the
     // history can't be rejected by the provider).
     for m in session.messages() {
         for tc in &m.tool_calls {
-            serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                .unwrap_or_else(|_| panic!("stored tool call has invalid JSON args: {}", tc.arguments));
+            serde_json::from_str::<serde_json::Value>(&tc.arguments).unwrap_or_else(|_| {
+                panic!("stored tool call has invalid JSON args: {}", tc.arguments)
+            });
         }
     }
     // The model got a tool result explaining the failure.
     let saw_error = session.messages().iter().any(|m| {
-        m.content.as_deref().map(|c| c.contains("invalid JSON arguments")).unwrap_or(false)
+        m.content
+            .as_deref()
+            .map(|c| c.contains("invalid JSON arguments"))
+            .unwrap_or(false)
     });
-    assert!(saw_error, "model should have received an invalid-args error result");
+    assert!(
+        saw_error,
+        "model should have received an invalid-args error result"
+    );
 }
 
 #[tokio::test]
@@ -473,11 +594,21 @@ async fn destructive_command_blocks_the_turn() {
     let agent = build_agent(client, dir.path(), 3);
 
     let result = agent
-        .run_turn(&mut session, "clean up", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "clean up",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(matches!(result.outcome, TurnOutcome::Blocked(_)), "outcome: {:?}", result.outcome);
+    assert!(
+        matches!(result.outcome, TurnOutcome::Blocked(_)),
+        "outcome: {:?}",
+        result.outcome
+    );
     assert!(canary.exists(), "the destructive command must not have run");
 }
 
@@ -522,12 +653,25 @@ async fn reasoning_only_completion_is_nudged_not_treated_as_done() {
     let agent = build_agent(client, dir.path(), 3);
 
     let result = agent
-        .run_turn(&mut session, "review it", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "review it",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(matches!(result.outcome, TurnOutcome::Done), "outcome: {:?}", result.outcome);
-    assert_eq!(result.text, "here is the review", "the empty turn must not pass as the answer");
+    assert!(
+        matches!(result.outcome, TurnOutcome::Done),
+        "outcome: {:?}",
+        result.outcome
+    );
+    assert_eq!(
+        result.text, "here is the review",
+        "the empty turn must not pass as the answer"
+    );
 }
 
 #[tokio::test]
@@ -542,14 +686,23 @@ async fn a_model_that_never_answers_ends_stuck_not_done() {
     let agent = build_agent(client, dir.path(), 3);
 
     let result = agent
-        .run_turn(&mut session, "review it", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "review it",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
     let TurnOutcome::Stuck(reason) = &result.outcome else {
         panic!("outcome: {:?}", result.outcome);
     };
-    assert!(reason.contains("max-tokens"), "the reason must name the fix: {reason}");
+    assert!(
+        reason.contains("max-tokens"),
+        "the reason must name the fix: {reason}"
+    );
 }
 
 #[tokio::test]
@@ -562,15 +715,27 @@ async fn the_reasoning_trace_and_finish_reason_are_persisted() {
     let client = MockClient::new(vec![reasoning_only(), done("here is the review")]);
     let agent = build_agent(client, dir.path(), 3);
     agent
-        .run_turn(&mut session, "review it", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "review it",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
     // Diagnosing an empty turn from the transcript alone requires both: what
     // the model was thinking, and whether it was cut off or chose to stop.
     let log = std::fs::read_to_string(&path).unwrap();
-    assert!(log.contains("let me think about this at length"), "reasoning missing from {log}");
-    assert!(log.contains("\"finish_reason\":\"length\""), "finish_reason missing from {log}");
+    assert!(
+        log.contains("let me think about this at length"),
+        "reasoning missing from {log}"
+    );
+    assert!(
+        log.contains("\"finish_reason\":\"length\""),
+        "finish_reason missing from {log}"
+    );
 }
 
 /// Records what the client was actually asked for, so a test can assert on the
@@ -610,7 +775,10 @@ impl LlmClient for RecordingClient {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        self.seen.lock().unwrap().push((req.thinking, req.max_tokens.unwrap_or(0)));
+        self.seen
+            .lock()
+            .unwrap()
+            .push((req.thinking, req.max_tokens.unwrap_or(0)));
         Ok(Completion {
             content: Some(self.reply.clone()),
             usage: worksmith::llm::Usage {
@@ -619,7 +787,8 @@ impl LlmClient for RecordingClient {
                 completion_tokens: 5,
                 total_tokens: self.prompt_tokens + 5,
                 reasoning_tokens: 0,
-                cached_tokens: None, cache_write_tokens: None,
+                cached_tokens: None,
+                cache_write_tokens: None,
             },
             ..Default::default()
         })
@@ -700,10 +869,10 @@ async fn turn_memory_is_a_dynamic_message_after_the_stable_system_prompt() {
 
     let events = worksmith::session::events(session.path()).unwrap();
     assert!(
-        events
-            .iter()
-            .any(|entry| matches!(&entry.event, worksmith::event::Event::MemoryUsed { ids }
-                if ids == &vec!["abc12345-0000-0000-0000-000000000000".to_string()])),
+        events.iter().any(
+            |entry| matches!(&entry.event, worksmith::event::Event::MemoryUsed { ids }
+                if ids == &vec!["abc12345-0000-0000-0000-000000000000".to_string()])
+        ),
         "the injected memory ids should be inspectable in the session log"
     );
 }
@@ -719,13 +888,19 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
     // schemas and skill text are in the request and not in this vector.
     for _ in 0..3 {
         session.append_message(Message::user("hi")).unwrap();
-        session.append_message(Message::assistant(Some("ok".into()), vec![])).unwrap();
+        session
+            .append_message(Message::assistant(Some("ok".into()), vec![]))
+            .unwrap();
     }
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     // The same client answers the turn *and* the summary call, so the reply has
     // to be shaped like handover notes or compaction refuses it.
-    let client = RecordingClient { seen, reply: HANDOVER_NOTES.into(), prompt_tokens: 900 };
+    let client = RecordingClient {
+        seen,
+        reply: HANDOVER_NOTES.into(),
+        prompt_tokens: 900,
+    };
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -750,7 +925,13 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
     // First turn: nothing reported yet, so the estimate applies and nothing
     // compacts. It also records the provider's 900-token prompt.
     agent
-        .run_turn(&mut session, "one", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "one",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let after_first = session.messages().len();
@@ -758,7 +939,13 @@ async fn compaction_uses_the_providers_token_count_not_the_estimate() {
     // Second turn: 900 > 750, so compaction runs even though the estimate is
     // still tiny.
     agent
-        .run_turn(&mut session, "two", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "two",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -783,15 +970,23 @@ async fn compaction_cuts_deeper_when_overhead_dwarfs_the_estimate() {
     // ~300 estimated tokens of messages, in many small pieces so a boundary
     // exists wherever the budget lands.
     for _ in 0..15 {
-        session.append_message(Message::user("x".repeat(40))).unwrap();
-        session.append_message(Message::assistant(Some("y".repeat(40)), vec![])).unwrap();
+        session
+            .append_message(Message::user("x".repeat(40)))
+            .unwrap();
+        session
+            .append_message(Message::assistant(Some("y".repeat(40)), vec![]))
+            .unwrap();
     }
     let est_before = 15 * 2 * 40 / 4; // ~300
 
     // Provider reports 900 against a 1000 window: trigger (750) fires, and the
     // overhead is 900 − ~300 = ~600 — bigger than the naive keep budget of 333.
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let client = RecordingClient { seen, reply: HANDOVER_NOTES.into(), prompt_tokens: 900 };
+    let client = RecordingClient {
+        seen,
+        reply: HANDOVER_NOTES.into(),
+        prompt_tokens: 900,
+    };
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -813,8 +1008,26 @@ async fn compaction_cuts_deeper_when_overhead_dwarfs_the_estimate() {
         },
     );
 
-    agent.run_turn(&mut session, "one", "system", None, CancellationToken::new()).await.unwrap();
-    agent.run_turn(&mut session, "two", "system", None, CancellationToken::new()).await.unwrap();
+    agent
+        .run_turn(
+            &mut session,
+            "one",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    agent
+        .run_turn(
+            &mut session,
+            "two",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
     let est_after: usize = session
         .messages()
@@ -836,11 +1049,18 @@ async fn a_compacted_session_stays_compacted_when_reopened() {
     let mut session = Session::create_at(&path, dir.path()).unwrap();
 
     for _ in 0..3 {
-        session.append_message(Message::user("x".repeat(300))).unwrap();
-        session.append_message(Message::assistant(Some("y".repeat(300)), vec![])).unwrap();
+        session
+            .append_message(Message::user("x".repeat(300)))
+            .unwrap();
+        session
+            .append_message(Message::assistant(Some("y".repeat(300)), vec![]))
+            .unwrap();
     }
 
-    let client = MockClient::new(vec![handover("SUMMARY: earlier work"), done("final answer")]);
+    let client = MockClient::new(vec![
+        handover("SUMMARY: earlier work"),
+        done("final answer"),
+    ]);
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -863,11 +1083,20 @@ async fn a_compacted_session_stays_compacted_when_reopened() {
     );
 
     agent
-        .run_turn(&mut session, "new question", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "new question",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
-    let live: Vec<String> =
-        session.messages().iter().map(|m| m.content.clone().unwrap_or_default()).collect();
+    let live: Vec<String> = session
+        .messages()
+        .iter()
+        .map(|m| m.content.clone().unwrap_or_default())
+        .collect();
     assert_eq!(live.len(), 3, "compacted in memory");
     drop(session);
 
@@ -875,10 +1104,16 @@ async fn a_compacted_session_stays_compacted_when_reopened() {
     // entries instead would rebuild the full pre-compaction history and lose the
     // summary — the session would silently undo its own context management.
     let reopened = Session::open(&path).unwrap();
-    let after: Vec<String> =
-        reopened.messages().iter().map(|m| m.content.clone().unwrap_or_default()).collect();
+    let after: Vec<String> = reopened
+        .messages()
+        .iter()
+        .map(|m| m.content.clone().unwrap_or_default())
+        .collect();
     assert_eq!(after, live, "reopened history must match the compacted one");
-    assert!(after[0].contains("SUMMARY: earlier work"), "the summary survived: {after:?}");
+    assert!(
+        after[0].contains("SUMMARY: earlier work"),
+        "the summary survived: {after:?}"
+    );
 }
 
 #[tokio::test]
@@ -900,7 +1135,10 @@ async fn a_message_that_misses_the_turn_is_recoverable_rather_than_lost() {
     // start. The user pressed Enter, so it has to be recoverable.
     steering.push("actually, use tabs");
     assert_eq!(steering.drain(), vec!["actually, use tabs"]);
-    assert!(steering.drain().is_empty(), "draining twice must not duplicate it");
+    assert!(
+        steering.drain().is_empty(),
+        "draining twice must not duplicate it"
+    );
 }
 
 #[tokio::test]
@@ -923,11 +1161,15 @@ async fn steering_the_agent_consumed_is_not_offered_again() {
         .unwrap();
 
     // The turn drained it, so the caller must not start a second turn with it.
-    assert!(steering.drain().is_empty(), "a delivered message must not be re-sent");
-    let delivered = session
-        .messages()
-        .iter()
-        .any(|m| m.content.as_deref().is_some_and(|c| c.contains("look in src/ instead")));
+    assert!(
+        steering.drain().is_empty(),
+        "a delivered message must not be re-sent"
+    );
+    let delivered = session.messages().iter().any(|m| {
+        m.content
+            .as_deref()
+            .is_some_and(|c| c.contains("look in src/ instead"))
+    });
     assert!(delivered, "and it should have reached the conversation");
 }
 
@@ -940,7 +1182,13 @@ async fn the_session_records_which_model_answered() {
 
     let agent = build_agent(MockClient::new(vec![done("hi")]), dir.path(), 3);
     agent
-        .run_turn(&mut session, "hello", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "hello",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -952,10 +1200,17 @@ async fn the_session_records_which_model_answered() {
         .iter()
         .filter_map(|m| m.model.as_deref())
         .collect::<Vec<_>>();
-    assert_eq!(answered, vec!["mock"], "the answering model is on the message");
+    assert_eq!(
+        answered,
+        vec!["mock"],
+        "the answering model is on the message"
+    );
 
     let log = std::fs::read_to_string(&path).unwrap();
-    assert!(log.contains("\"model\":\"mock\""), "and in the session file: {log}");
+    assert!(
+        log.contains("\"model\":\"mock\""),
+        "and in the session file: {log}"
+    );
 }
 
 #[tokio::test]
@@ -971,7 +1226,13 @@ async fn the_session_records_what_the_loop_did() {
         3,
     );
     agent
-        .run_turn(&mut session, "look around", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "look around",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -991,14 +1252,29 @@ async fn the_session_records_what_the_loop_did() {
         })
         .collect();
 
-    assert!(kinds.contains(&"call-start") && kinds.contains(&"call-end"), "{kinds:?}");
-    assert!(kinds.contains(&"tool"), "tool calls are in the history: {kinds:?}");
-    assert!(kinds.contains(&"turn-complete"), "and how the turn ended: {kinds:?}");
-    assert!(events.iter().all(|e| e.ts > 0), "each event carries when it happened");
+    assert!(
+        kinds.contains(&"call-start") && kinds.contains(&"call-end"),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"tool"),
+        "tool calls are in the history: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"turn-complete"),
+        "and how the turn ended: {kinds:?}"
+    );
+    assert!(
+        events.iter().all(|e| e.ts > 0),
+        "each event carries when it happened"
+    );
 
     // Per-token deltas would multiply the file by the length of every answer.
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(!raw.contains("message_delta"), "streaming deltas are not recorded");
+    assert!(
+        !raw.contains("message_delta"),
+        "streaming deltas are not recorded"
+    );
 
     // And the replayable conversation is unaffected by the extra entries.
     let reopened = Session::open(&path).unwrap();
@@ -1021,18 +1297,31 @@ async fn the_session_records_model_request_metrics() {
                 completion_tokens: 56,
                 total_tokens: 1290,
                 reasoning_tokens: 7,
-                cached_tokens: Some(1000), cache_write_tokens: None,
+                cached_tokens: Some(1000),
+                cache_write_tokens: None,
             },
             finish_reason: Some("stop".into()),
             ..Default::default()
         }]),
         dir.path(),
         3,
-    ).with_accounting("priced/model".into(), worksmith::config::ModelSettings {
-        input: Some(1.0), output: Some(2.0), ..Default::default()
-    });
+    )
+    .with_accounting(
+        "priced/model".into(),
+        worksmith::config::ModelSettings {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        },
+    );
     agent
-        .run_turn(&mut session, "measure this", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "measure this",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -1064,7 +1353,10 @@ async fn the_session_records_model_request_metrics() {
     assert_eq!(*completion_tokens, 56);
     assert_eq!(*reasoning_tokens, 7);
     assert!(*total_ms > 0, "total latency should be recorded");
-    assert_eq!(*first_output_ms, None, "the scripted client does not stream deltas");
+    assert_eq!(
+        *first_output_ms, None,
+        "the scripted client does not stream deltas"
+    );
     let breakdown = context_breakdown.expect("prompt attribution should be recorded");
     assert!(breakdown.system_tokens > 0);
     assert_eq!(breakdown.memory_tokens, 0);
@@ -1091,7 +1383,11 @@ fn a_model_change_round_trips_through_the_session_jsonl() {
     session.append_event(&ev).unwrap();
 
     let events = worksmith::session::events(&path).unwrap();
-    assert_eq!(events.len(), 1, "the event entry is in the file: {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "the event entry is in the file: {events:?}"
+    );
     assert!(
         matches!(&events[0].event, worksmith::event::Event::ModelChanged { from, to }
             if from == "big/model" && to == "cheap/model"),
@@ -1177,7 +1473,10 @@ impl LlmClient for ContextLimitClient {
                 asked as usize + 24_577
             );
         }
-        Ok(Completion { content: Some("fits now".into()), ..Default::default() })
+        Ok(Completion {
+            content: Some("fits now".into()),
+            ..Default::default()
+        })
     }
 }
 
@@ -1213,11 +1512,21 @@ async fn a_request_that_cannot_fit_is_retried_with_the_servers_numbers() {
     );
 
     let result = agent
-        .run_turn(&mut session, "write chapter 10", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "write chapter 10",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert_eq!(result.text, "fits now", "the retry succeeded: {:?}", result.outcome);
+    assert_eq!(
+        result.text, "fits now",
+        "the retry succeeded: {:?}",
+        result.outcome
+    );
     let asks = seen.lock().unwrap().clone();
     assert_eq!(asks.len(), 2, "one rejection, one retry: {asks:?}");
     assert_eq!(asks[0], 8_192, "first ask is what the config wanted");
@@ -1237,7 +1546,9 @@ async fn one_long_turn_can_still_be_compacted() {
     // at user-message boundaries meant keeping the last 6 *turns* was keeping
     // everything, so compaction never fired and the context grew until the
     // server refused the request.
-    session.append_message(Message::user("write chapter 10")).unwrap();
+    session
+        .append_message(Message::user("write chapter 10"))
+        .unwrap();
     for i in 0..40 {
         session
             .append_message(Message::assistant(
@@ -1250,12 +1561,19 @@ async fn one_long_turn_can_still_be_compacted() {
             ))
             .unwrap();
         session
-            .append_message(Message::tool_result(format!("c{i}"), "read", "x".repeat(2_000)))
+            .append_message(Message::tool_result(
+                format!("c{i}"),
+                "read",
+                "x".repeat(2_000),
+            ))
             .unwrap();
     }
     let before = session.messages().len();
 
-    let client = MockClient::new(vec![handover("SUMMARY: read forty files"), done("chapter written")]);
+    let client = MockClient::new(vec![
+        handover("SUMMARY: read forty files"),
+        done("chapter written"),
+    ]);
     let agent = Agent::new(
         Arc::new(client),
         Arc::new(ToolRegistry::with_builtins()),
@@ -1278,7 +1596,13 @@ async fn one_long_turn_can_still_be_compacted() {
     );
 
     agent
-        .run_turn(&mut session, "carry on", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "carry on",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -1305,10 +1629,20 @@ fn a_turn_that_ends_badly_says_what_to_do_next() {
     use worksmith::agent::TurnOutcome;
 
     let hit = TurnOutcome::MaxSteps(50);
-    assert_eq!(hit.label(), "hit step limit (50)", "the number, not just the fact");
+    assert_eq!(
+        hit.label(),
+        "hit step limit (50)",
+        "the number, not just the fact"
+    );
     let advice = hit.advice().expect("the step limit must explain itself");
-    assert!(advice.contains("50"), "names the cap that was hit: {advice}");
-    assert!(advice.contains("continue"), "says the work is resumable: {advice}");
+    assert!(
+        advice.contains("50"),
+        "names the cap that was hit: {advice}"
+    );
+    assert!(
+        advice.contains("continue"),
+        "says the work is resumable: {advice}"
+    );
     assert!(advice.contains("max-steps"), "names the setting: {advice}");
 
     for bad in [
@@ -1316,13 +1650,18 @@ fn a_turn_that_ends_badly_says_what_to_do_next() {
         TurnOutcome::Stuck("read the same file 4 times".into()),
         TurnOutcome::Blocked("rm -rf refused".into()),
     ] {
-        let a = bad.advice().unwrap_or_else(|| panic!("{} says nothing", bad.label()));
+        let a = bad
+            .advice()
+            .unwrap_or_else(|| panic!("{} says nothing", bad.label()));
         assert!(a.len() > 40, "{}: too terse to act on", bad.label());
     }
 
     // Success needs no announcement, and an abort was the user's own doing.
     assert!(TurnOutcome::Done.advice().is_none());
-    assert!(TurnOutcome::Aborted.advice().is_none(), "do not narrate what they just did");
+    assert!(
+        TurnOutcome::Aborted.advice().is_none(),
+        "do not narrate what they just did"
+    );
 }
 
 // ---- harness-raised checkpoints -------------------------------------------
@@ -1336,7 +1675,10 @@ struct Scripted {
 #[async_trait]
 impl worksmith::tools::approval::Asker for Scripted {
     async fn ask_text(&self, subject: &str, question: &str) -> Option<String> {
-        self.asked.lock().unwrap().push((subject.into(), question.into()));
+        self.asked
+            .lock()
+            .unwrap()
+            .push((subject.into(), question.into()));
         self.answer.clone()
     }
 }
@@ -1392,17 +1734,35 @@ async fn a_check_failing_twice_asks_the_user_and_follows_the_answer() {
     );
 
     let _ = agent
-        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "make it good",
+            "system",
+            Some(&validator),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
     let asked = asker.asked.lock().unwrap();
-    assert_eq!(asked.len(), 1, "asked once, on the second failure — not every time");
-    assert!(asked[0].0.contains("failed twice"), "subject: {}", asked[0].0);
+    assert_eq!(
+        asked.len(),
+        1,
+        "asked once, on the second failure — not every time"
+    );
+    assert!(
+        asked[0].0.contains("failed twice"),
+        "subject: {}",
+        asked[0].0
+    );
 
     // The answer has to reach the model, or the checkpoint was theatre.
-    let transcript: String =
-        session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    let transcript: String = session
+        .messages()
+        .iter()
+        .filter_map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         transcript.contains("write the word good, not bad"),
         "the user's answer never reached the model"
@@ -1422,7 +1782,10 @@ async fn a_skipped_or_unwatched_checkpoint_changes_nothing() {
         script.push(tool_call("write", r#"{"path":"out.txt","content":"bad"}"#));
         script.push(done("done"));
     }
-    let asker = Arc::new(Scripted { answer: None, asked: Mutex::new(Vec::new()) });
+    let asker = Arc::new(Scripted {
+        answer: None,
+        asked: Mutex::new(Vec::new()),
+    });
     let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
     let validator = CommandValidator::new(
         r#"test "$(cat out.txt)" = good"#,
@@ -1431,7 +1794,13 @@ async fn a_skipped_or_unwatched_checkpoint_changes_nothing() {
     );
 
     let result = agent
-        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "make it good",
+            "system",
+            Some(&validator),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -1454,7 +1823,10 @@ async fn pairing_off_never_interrupts() {
         script.push(tool_call("write", r#"{"path":"out.txt","content":"bad"}"#));
         script.push(done("done"));
     }
-    let asker = Arc::new(Scripted { answer: Some("x".into()), asked: Mutex::new(Vec::new()) });
+    let asker = Arc::new(Scripted {
+        answer: Some("x".into()),
+        asked: Mutex::new(Vec::new()),
+    });
     // Same agent, pairing left off.
     let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
     agent.set_pairing(false);
@@ -1465,11 +1837,20 @@ async fn pairing_off_never_interrupts() {
     );
 
     let _ = agent
-        .run_turn(&mut session, "make it good", "system", Some(&validator), CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "make it good",
+            "system",
+            Some(&validator),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(asker.asked.lock().unwrap().is_empty(), "/pair off means never asked");
+    assert!(
+        asker.asked.lock().unwrap().is_empty(),
+        "/pair off means never asked"
+    );
 }
 
 /// The cap on its own is not trouble — a long job can want another turn. The
@@ -1495,17 +1876,34 @@ async fn burning_every_step_without_writing_anything_asks_for_a_way_in() {
     let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
 
     let _ = agent
-        .run_turn(&mut session, "do the thing", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "do the thing",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
     let asked = asker.asked.lock().unwrap();
     assert_eq!(asked.len(), 1, "asked once, not once per exhausted budget");
-    assert!(asked[0].0.contains("nothing written"), "subject: {}", asked[0].0);
+    assert!(
+        asked[0].0.contains("nothing written"),
+        "subject: {}",
+        asked[0].0
+    );
 
-    let transcript: String =
-        session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
-    assert!(transcript.contains("the enum is at the top"), "the answer must reach the model");
+    let transcript: String = session
+        .messages()
+        .iter()
+        .filter_map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        transcript.contains("the enum is at the top"),
+        "the answer must reach the model"
+    );
 }
 
 #[tokio::test]
@@ -1517,19 +1915,33 @@ async fn a_turn_that_wrote_something_is_not_interrupted_at_the_cap() {
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
 
     let mut script = vec![tool_call("write", r#"{"path":"a.txt","content":"x"}"#)];
-    script.extend(
-        (0..80).map(|i| tool_call("bash", &format!(r#"{{"command":"echo part {i}"}}"#))),
-    );
-    let asker = Arc::new(Scripted { answer: Some("x".into()), asked: Mutex::new(Vec::new()) });
+    script.extend((0..80).map(|i| tool_call("bash", &format!(r#"{{"command":"echo part {i}"}}"#))));
+    let asker = Arc::new(Scripted {
+        answer: Some("x".into()),
+        asked: Mutex::new(Vec::new()),
+    });
     let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
 
     let result = agent
-        .run_turn(&mut session, "do the thing", "system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "do the thing",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
 
-    assert!(asker.asked.lock().unwrap().is_empty(), "it wrote something; do not interrupt");
-    assert!(matches!(result.outcome, TurnOutcome::MaxSteps(_)), "{:?}", result.outcome);
+    assert!(
+        asker.asked.lock().unwrap().is_empty(),
+        "it wrote something; do not interrupt"
+    );
+    assert!(
+        matches!(result.outcome, TurnOutcome::MaxSteps(_)),
+        "{:?}",
+        result.outcome
+    );
 }
 
 // ---- compaction refuses to trade context for a sentence --------------------
@@ -1548,7 +1960,9 @@ async fn a_summary_that_is_not_one_is_refused_and_the_history_kept() {
     // Enough history that compaction has something to bite on, then a
     // summarizer that replies the way the real one did.
     for i in 0..12 {
-        session.append_message(Message::user(format!("do part {i}: {}", "x".repeat(400)))).unwrap();
+        session
+            .append_message(Message::user(format!("do part {i}: {}", "x".repeat(400))))
+            .unwrap();
         session
             .append_message(Message::assistant(Some(format!("did part {i}")), vec![]))
             .unwrap();
@@ -1575,7 +1989,9 @@ async fn real_handover_notes_are_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
     for i in 0..12 {
-        session.append_message(Message::user(format!("do part {i}: {}", "x".repeat(400)))).unwrap();
+        session
+            .append_message(Message::user(format!("do part {i}: {}", "x".repeat(400))))
+            .unwrap();
         session
             .append_message(Message::assistant(Some(format!("did part {i}")), vec![]))
             .unwrap();
@@ -1598,9 +2014,16 @@ async fn real_handover_notes_are_accepted() {
         before,
         session.messages().len()
     );
-    let kept: String =
-        session.messages().iter().filter_map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
-    assert!(kept.contains("src/tui.rs:2476"), "the locations survive, which is the point");
+    let kept: String = session
+        .messages()
+        .iter()
+        .filter_map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        kept.contains("src/tui.rs:2476"),
+        "the locations survive, which is the point"
+    );
 }
 
 #[tokio::test]
@@ -1611,15 +2034,37 @@ async fn helper_costs_and_model_switches_survive_reopening_without_repricing() {
     let mut session = Session::create_at(&path, dir.path()).unwrap();
     let response = || Completion {
         content: Some("finished".into()),
-        usage: worksmith::llm::Usage { reported: true, prompt_tokens: 1000, completion_tokens: 100,
-            ..Default::default() },
+        usage: worksmith::llm::Usage {
+            reported: true,
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            ..Default::default()
+        },
         ..Default::default()
     };
-    let agent = build_agent(MockClient::new(vec![response(), response(), response()]), dir.path(), 3)
-        .with_accounting("priced/a".into(), worksmith::config::ModelSettings {
-            input: Some(1.0), output: Some(2.0), ..Default::default()
-        });
-    agent.run_turn(&mut session, "first", "system", None, CancellationToken::new()).await.unwrap();
+    let agent = build_agent(
+        MockClient::new(vec![response(), response(), response()]),
+        dir.path(),
+        3,
+    )
+    .with_accounting(
+        "priced/a".into(),
+        worksmith::config::ModelSettings {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        },
+    );
+    agent
+        .run_turn(
+            &mut session,
+            "first",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     agent.ask("helper", "summarize", 512).await.unwrap();
     let mut active = agent.current();
     active.model = "b".into();
@@ -1627,7 +2072,16 @@ async fn helper_costs_and_model_switches_survive_reopening_without_repricing() {
     active.prices.input = Some(10.0);
     active.prices.output = Some(20.0);
     agent.set_model(active);
-    agent.run_turn(&mut session, "second", "system", None, CancellationToken::new()).await.unwrap();
+    agent
+        .run_turn(
+            &mut session,
+            "second",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     drop(session);
     let events = worksmith::session::events(&path).unwrap();
     let stats = worksmith::metrics::Accounting::from_events(&events);
@@ -1635,8 +2089,15 @@ async fn helper_costs_and_model_switches_survive_reopening_without_repricing() {
     assert_eq!(stats.turns.len(), 2);
     assert!((stats.models["priced/a"].known_cost_usd - 0.0024).abs() < 1e-12);
     assert!((stats.models["priced/b"].known_cost_usd - 0.012).abs() < 1e-12);
-    assert_eq!(stats.turns[1].totals.calls, 1, "a helper between turns is not the next turn");
-    assert_eq!(Session::open(&path).unwrap().messages().len(), 4, "helper text is not history");
+    assert_eq!(
+        stats.turns[1].totals.calls, 1,
+        "a helper between turns is not the next turn"
+    );
+    assert_eq!(
+        Session::open(&path).unwrap().messages().len(),
+        4,
+        "helper text is not history"
+    );
 }
 
 #[tokio::test]
@@ -1649,27 +2110,63 @@ async fn disjoint_provider_usage_uses_the_same_events_costs_and_reports() {
     // A synthetic adapter reports disjoint counts, unlike the currently
     // shipped client's inclusive input/output totals. No OpenAI wire types.
     let usage = Usage::from_parts(
-        InputTokens { uncached: 200, cache_read: Some(700), cache_write: Some(100) },
-        OutputTokens { non_reasoning: 80, reasoning: 20 },
+        InputTokens {
+            uncached: 200,
+            cache_read: Some(700),
+            cache_write: Some(100),
+        },
+        OutputTokens {
+            non_reasoning: 80,
+            reasoning: 20,
+        },
     );
     assert_eq!(usage.total_tokens, 1100);
-    let agent = build_agent(MockClient::new(vec![Completion {
-        content: Some("done".into()), usage, ..Default::default()
-    }]), dir.path(), 3).with_accounting("other/provider-model".into(), worksmith::config::ModelSettings {
-        input: Some(1.0), output: Some(2.0), ..Default::default()
-    });
-    agent.run_turn(&mut session, "measure", "system", None, CancellationToken::new()).await.unwrap();
+    let agent = build_agent(
+        MockClient::new(vec![Completion {
+            content: Some("done".into()),
+            usage,
+            ..Default::default()
+        }]),
+        dir.path(),
+        3,
+    )
+    .with_accounting(
+        "other/provider-model".into(),
+        worksmith::config::ModelSettings {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        },
+    );
+    agent
+        .run_turn(
+            &mut session,
+            "measure",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     drop(session);
     let stats = worksmith::metrics::load(&path).unwrap();
     let totals = &stats.parent.totals;
-    assert_eq!(totals.prompt_tokens, 1000, "cache categories belong in input exactly once");
-    assert_eq!(totals.completion_tokens, 100, "reasoning belongs in output exactly once");
+    assert_eq!(
+        totals.prompt_tokens, 1000,
+        "cache categories belong in input exactly once"
+    );
+    assert_eq!(
+        totals.completion_tokens, 100,
+        "reasoning belongs in output exactly once"
+    );
     assert_eq!(totals.reasoning_tokens, 20);
     assert_eq!(totals.cached_tokens, 700);
     assert_eq!(totals.cache_write_tokens, 100);
     assert_eq!(totals.cache_write_reported_calls, 1);
     assert!((totals.known_cost_usd - 0.0012).abs() < 1e-12);
-    let report = worksmith::metrics::session_report(&path).unwrap().join("\n");
+    let report = worksmith::metrics::session_report(&path)
+        .unwrap()
+        .join("\n");
     assert!(report.contains("70.0%; 1/1 calls reported"));
     assert!(report.contains("cache writes 100 tokens (1/1 calls reported)"));
     assert!(report.contains("other/provider-model"));
@@ -1682,10 +2179,24 @@ async fn missing_usage_is_unpriced_even_with_configured_rates() {
     let path = dir.path().join("missing-usage.jsonl");
     let mut session = Session::create_at(&path, dir.path()).unwrap();
     let agent = build_agent(MockClient::new(vec![done("finished")]), dir.path(), 3)
-        .with_accounting("priced/model".into(), worksmith::config::ModelSettings {
-            input: Some(1.0), output: Some(2.0), ..Default::default()
-        });
-    agent.run_turn(&mut session, "measure", "system", None, CancellationToken::new()).await.unwrap();
+        .with_accounting(
+            "priced/model".into(),
+            worksmith::config::ModelSettings {
+                input: Some(1.0),
+                output: Some(2.0),
+                ..Default::default()
+            },
+        );
+    agent
+        .run_turn(
+            &mut session,
+            "measure",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     let stats = worksmith::metrics::load(&path).unwrap();
     assert_eq!(stats.combined.calls, 1);
     assert_eq!(stats.combined.unpriced_calls, 1);
@@ -1699,8 +2210,12 @@ async fn helper_job_keeps_its_origin_across_session_changes() {
     let new = dir.path().join("new.jsonl");
     let _old_session = Session::create_at(&old, dir.path()).unwrap();
     let _new_session = Session::create_at(&new, dir.path()).unwrap();
-    let agent = build_agent(MockClient::new(vec![done("first"), done("second")]), dir.path(), 3)
-        .with_session_path(old.clone());
+    let agent = build_agent(
+        MockClient::new(vec![done("first"), done("second")]),
+        dir.path(),
+        3,
+    )
+    .with_session_path(old.clone());
     let helper = agent.helper_snapshot();
     // A spawned job might not even be polled before /new runs.
     agent.set_session_path(new.clone());
@@ -1709,9 +2224,11 @@ async fn helper_job_keeps_its_origin_across_session_changes() {
     let events = worksmith::session::events(&old).unwrap();
     assert_eq!(events.len(), 2);
     for entry in events {
-        assert!(matches!(entry.event, worksmith::event::Event::ModelMetrics {
+        assert!(
+            matches!(entry.event, worksmith::event::Event::ModelMetrics {
             session_id: Some(ref id), ..
-        } if id == "old"));
+        } if id == "old")
+        );
     }
     assert!(worksmith::session::events(&new).unwrap().is_empty());
 }
@@ -1729,7 +2246,9 @@ async fn helper_metrics_keep_the_dated_session_id() {
     helper.ask("helper", "question", 512).await.unwrap();
     let events = worksmith::session::events(old.path()).unwrap();
     assert_eq!(events.len(), 1);
-    assert!(matches!(&events[0].event, worksmith::event::Event::ModelMetrics { session_id: Some(id), .. } if id == &old.id));
+    assert!(
+        matches!(&events[0].event, worksmith::event::Event::ModelMetrics { session_id: Some(id), .. } if id == &old.id)
+    );
     assert!(worksmith::session::events(new.path()).unwrap().is_empty());
 }
 
@@ -1739,14 +2258,33 @@ async fn explicitly_reported_zero_usage_has_known_zero_cost() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zero-usage.jsonl");
     let mut session = Session::create_at(&path, dir.path()).unwrap();
-    let agent = build_agent(MockClient::new(vec![Completion {
-        content: Some("finished".into()),
-        usage: worksmith::llm::Usage::from_parts(Default::default(), Default::default()),
-        ..Default::default()
-    }]), dir.path(), 3).with_accounting("priced/model".into(), worksmith::config::ModelSettings {
-        input: Some(1.0), output: Some(2.0), ..Default::default()
-    });
-    agent.run_turn(&mut session, "measure", "system", None, CancellationToken::new()).await.unwrap();
+    let agent = build_agent(
+        MockClient::new(vec![Completion {
+            content: Some("finished".into()),
+            usage: worksmith::llm::Usage::from_parts(Default::default(), Default::default()),
+            ..Default::default()
+        }]),
+        dir.path(),
+        3,
+    )
+    .with_accounting(
+        "priced/model".into(),
+        worksmith::config::ModelSettings {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        },
+    );
+    agent
+        .run_turn(
+            &mut session,
+            "measure",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     let stats = worksmith::metrics::load(&path).unwrap();
     assert_eq!(stats.combined.calls, 1);
     assert_eq!(stats.combined.unpriced_calls, 0);
@@ -1792,7 +2330,11 @@ async fn a_manually_loaded_skill_reaches_the_next_request_in_a_running_turn() {
         "---\nname: manual-test\ndescription: fixture\n---\nPINNED_MANUAL_RULE",
     )
     .unwrap();
-    std::fs::write(skill_dir.join("references/style.md"), "# Sentence rules\nBe concise.").unwrap();
+    std::fs::write(
+        skill_dir.join("references/style.md"),
+        "# Sentence rules\nBe concise.",
+    )
+    .unwrap();
     let client = Arc::new(PausedClient {
         started: tokio::sync::Notify::new(),
         resume: tokio::sync::Notify::new(),
@@ -1803,32 +2345,50 @@ async fn a_manually_loaded_skill_reaches_the_next_request_in_a_running_turn() {
     let running = agent.clone();
     let turn = tokio::spawn(async move {
         running
-            .run_turn(&mut session, "work", "system", None, CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "work",
+                "system",
+                None,
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         session
     });
-    tokio::time::timeout(Duration::from_secs(5), client.started.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), client.started.notified())
+        .await
+        .unwrap();
     assert!(agent.load_skill("missing-manual-test").is_err());
     agent.load_skill("manual-test").unwrap();
     agent.load_skill("manual-test").unwrap();
     client.resume.notify_one();
-    let session = tokio::time::timeout(Duration::from_secs(5), turn).await.unwrap().unwrap();
+    let session = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .unwrap()
+        .unwrap();
     let requests = client.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(!requests[0].messages[0].content.as_ref().unwrap().contains("PINNED_MANUAL_RULE"));
+    assert!(
+        !requests[0].messages[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("PINNED_MANUAL_RULE")
+    );
     let system = requests[1].messages[0].content.as_ref().unwrap();
     assert_eq!(system.matches("PINNED_MANUAL_RULE").count(), 1);
     assert!(system.contains("<SKILLS-LOADED>"));
-    assert!(system.contains("Sentence rules"), "the reference map is pinned too");
     assert!(
-        session
-            .messages()
-            .iter()
-            .any(|m| m.content.as_deref().is_some_and(|text| text.contains("already loaded")))
+        system.contains("Sentence rules"),
+        "the reference map is pinned too"
     );
+    assert!(session.messages().iter().any(|m| {
+        m.content
+            .as_deref()
+            .is_some_and(|text| text.contains("already loaded"))
+    }));
 }
-
 
 #[tokio::test]
 async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
@@ -1847,7 +2407,10 @@ async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
     }
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
-    for (name, body) in [("cache-first", "A".repeat(6500)), ("cache-second", "B".repeat(6500))] {
+    for (name, body) in [
+        ("cache-first", "A".repeat(6500)),
+        ("cache-second", "B".repeat(6500)),
+    ] {
         let path = dir.path().join(".worksmith/skills").join(name);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(
@@ -1860,7 +2423,13 @@ async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
     let agent = build_agent_with_client(client.clone(), dir.path(), 3);
     let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
     agent
-        .run_turn(&mut session, "first", "stable system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "first",
+            "stable system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let preview = agent.preview_skill("cache-first").unwrap();
@@ -1868,7 +2437,13 @@ async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
     assert!(agent.load_skill("missing-cache-skill").is_err());
     assert!(agent.unload_skill("cache-first").contains("not loaded"));
     agent
-        .run_turn(&mut session, "second", "stable system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "second",
+            "stable system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     agent.load_skill("cache-first").unwrap();
@@ -1888,7 +2463,13 @@ async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
         "loaded previews show the pinned snapshot"
     );
     agent
-        .run_turn(&mut session, "third", "stable system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "third",
+            "stable system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(agent.unload_skill("cache-first").contains("unloaded"));
@@ -1897,16 +2478,42 @@ async fn skill_lifecycle_preserves_request_prefixes_and_worker_snapshots() {
     worker.load_skill("cache-first").unwrap();
     assert!(agent.loaded_skill_names().is_empty());
     agent
-        .run_turn(&mut session, "fourth", "stable system", None, CancellationToken::new())
+        .run_turn(
+            &mut session,
+            "fourth",
+            "stable system",
+            None,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let requests = client.0.lock().unwrap();
     let messages = |i: usize| serde_json::to_value(&requests[i].messages).unwrap();
     assert_eq!(messages(0)[0], messages(1)[0]);
-    assert_eq!(messages(0)[1], messages(1)[1], "ordinary followups keep earlier history unchanged");
-    assert!(requests[2].messages[0].content.as_ref().unwrap().contains(&preview));
-    assert!(requests[2].messages[0].content.as_ref().unwrap().contains(&"B".repeat(6500)));
-    assert_eq!(messages(0)[0], messages(3)[0], "unload restores the original system bytes");
+    assert_eq!(
+        messages(0)[1],
+        messages(1)[1],
+        "ordinary followups keep earlier history unchanged"
+    );
+    assert!(
+        requests[2].messages[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains(&preview)
+    );
+    assert!(
+        requests[2].messages[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains(&"B".repeat(6500))
+    );
+    assert_eq!(
+        messages(0)[0],
+        messages(3)[0],
+        "unload restores the original system bytes"
+    );
     for request in requests.iter().skip(1) {
         assert_eq!(
             serde_json::to_value(&requests[0].tools).unwrap(),
@@ -1932,7 +2539,10 @@ async fn turn_memory_changes_the_prefix_but_compaction_keeps_standing_instructio
                 &mut session,
                 "next",
                 "stable system",
-                Some(worksmith::memory::MemoryContext { text: memory.into(), ids: vec![] }),
+                Some(worksmith::memory::MemoryContext {
+                    text: memory.into(),
+                    ids: vec![],
+                }),
                 None,
                 CancellationToken::new(),
             )
@@ -1945,7 +2555,10 @@ async fn turn_memory_changes_the_prefix_but_compaction_keeps_standing_instructio
             &mut session,
             "next",
             "stable system",
-            Some(worksmith::memory::MemoryContext { text: "memory B".into(), ids: vec![] }),
+            Some(worksmith::memory::MemoryContext {
+                text: "memory B".into(),
+                ids: vec![],
+            }),
             None,
             CancellationToken::new(),
         )
@@ -1953,13 +2566,24 @@ async fn turn_memory_changes_the_prefix_but_compaction_keeps_standing_instructio
         .unwrap();
     let seen = seen.lock().unwrap();
     let wire = |i: usize| serde_json::to_value(&seen[i]).unwrap();
-    assert_eq!(wire(0), serde_json::to_value(&seen[1][..seen[0].len()]).unwrap());
+    assert_eq!(
+        wire(0),
+        serde_json::to_value(&seen[1][..seen[0].len()]).unwrap()
+    );
     assert_eq!(wire(1)[0], wire(2)[0]);
-    assert_ne!(wire(1)[1], wire(2)[1], "changing memory ends the common prefix before history");
+    assert_ne!(
+        wire(1)[1],
+        wire(2)[1],
+        "changing memory ends the common prefix before history"
+    );
     assert_eq!(wire(1)[2], wire(2)[2]);
     assert_eq!(wire(2)[0], wire(3)[0]);
     assert_eq!(wire(2)[1], wire(3)[1]);
-    assert_ne!(wire(2)[2], wire(3)[2], "compaction deliberately rewrites history");
+    assert_ne!(
+        wire(2)[2],
+        wire(3)[2],
+        "compaction deliberately rewrites history"
+    );
 }
 
 #[test]
@@ -1983,10 +2607,16 @@ fn multiple_large_skills_remain_active_until_explicitly_unloaded() {
     agent.load_skill("oversize-fixture").unwrap();
     agent.load_skill("small-fixture").unwrap();
     agent.load_skill("third-fixture").unwrap();
-    assert_eq!(agent.loaded_skill_names(), ["oversize-fixture", "small-fixture", "third-fixture"]);
+    assert_eq!(
+        agent.loaded_skill_names(),
+        ["oversize-fixture", "small-fixture", "third-fixture"]
+    );
     agent.unload_skill("oversize-fixture");
     agent.load_skill("small-fixture").unwrap();
-    assert_eq!(agent.loaded_skill_names(), ["small-fixture", "third-fixture"]);
+    assert_eq!(
+        agent.loaded_skill_names(),
+        ["small-fixture", "third-fixture"]
+    );
 }
 
 #[tokio::test]
@@ -2001,15 +2631,29 @@ async fn tool_durations_are_recorded_for_success_and_failure_but_not_invalid_cal
         done("finished"),
     ]);
     let agent = build_agent(client, dir.path(), 5);
-    agent.run_turn(&mut session, "check tools", "system", None, CancellationToken::new()).await.unwrap();
-    let results: Vec<_> = worksmith::session::events(session.path()).unwrap().into_iter()
+    agent
+        .run_turn(
+            &mut session,
+            "check tools",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let results: Vec<_> = worksmith::session::events(session.path())
+        .unwrap()
+        .into_iter()
         .filter_map(|entry| match entry.event {
             worksmith::event::Event::ToolResult { ok, elapsed_ms, .. } => Some((ok, elapsed_ms)),
             _ => None,
-        }).collect();
+        })
+        .collect();
     assert_eq!(results.len(), 3);
     assert!(results[0].0);
     assert!(!results[1].0);
-    for (_, elapsed) in &results[..2] { assert!(elapsed.unwrap() >= 50); }
+    for (_, elapsed) in &results[..2] {
+        assert!(elapsed.unwrap() >= 50);
+    }
     assert_eq!(results[2], (false, None));
 }

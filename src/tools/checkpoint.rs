@@ -54,7 +54,11 @@ fn slugify(subject: &str) -> String {
         }
     }
     let s = out.trim_matches('-').to_string();
-    if s.is_empty() { "decision".to_string() } else { s }
+    if s.is_empty() {
+        "decision".to_string()
+    } else {
+        s
+    }
 }
 
 /// Is this path inside something git is ignoring? A decision filed into an
@@ -88,9 +92,7 @@ fn write_decision(ctx: &ToolContext, subject: &str, question: &str, answer: &str
         return format!("(could not create {}: {e})", dir.display());
     }
     let path = dir.join(format!("{:04}-{}.md", next_number(&dir), slugify(subject)));
-    let body = format!(
-        "# {subject}\n\n## Question\n\n{question}\n\n## Decision\n\n{answer}\n",
-    );
+    let body = format!("# {subject}\n\n## Question\n\n{question}\n\n## Decision\n\n{answer}\n",);
     match std::fs::write(&path, body) {
         Err(e) => format!("(could not write {}: {e})", path.display()),
         Ok(()) => {
@@ -155,8 +157,16 @@ impl Tool for CheckpointTool {
 
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolOutput {
         let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("note");
-        let subject = args.get("subject").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let detail = args.get("detail").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let subject = args
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let detail = args
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if subject.is_empty() || detail.is_empty() {
             return ToolOutput::error("checkpoint needs both `subject` and `detail`");
         }
@@ -164,9 +174,10 @@ impl Tool for CheckpointTool {
         // The cap is spent by every kind, not just the blocking one: three
         // notes in a turn is the same chattiness that teaches the user to stop
         // reading them.
-        if ctx.checkpoints_left.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            n.checked_sub(1)
-        }).is_err()
+        if ctx
+            .checkpoints_left
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_err()
         {
             return ToolOutput::error(
                 "no checkpoints left this turn — carry on with the work and raise it in your \
@@ -210,8 +221,8 @@ impl Tool for CheckpointTool {
 mod tests {
     use super::*;
     use crate::tools::approval::Asker;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     fn ctx(dir: &Path, asker: Arc<dyn Asker>) -> ToolContext {
         ToolContext {
@@ -239,16 +250,25 @@ mod tests {
     #[tokio::test]
     async fn an_answer_becomes_a_decision_record_in_the_users_own_words() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = ctx(tmp.path(), Arc::new(Answers("Pin it. A running worker must not move.")));
+        let c = ctx(
+            tmp.path(),
+            Arc::new(Answers("Pin it. A running worker must not move.")),
+        );
         let out = CheckpointTool.run(args("ask"), &c).await;
         assert!(!out.is_error, "{}", out.content);
 
         let dir = tmp.path().join("decisions");
         let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
-        assert_eq!(file.file_name().to_str().unwrap(), "0001-pin-the-worker-model.md");
+        assert_eq!(
+            file.file_name().to_str().unwrap(),
+            "0001-pin-the-worker-model.md"
+        );
         let body = std::fs::read_to_string(file.path()).unwrap();
         assert!(body.contains("# Pin the worker model"));
-        assert!(body.contains("pin or retarget?"), "the question is half the record");
+        assert!(
+            body.contains("pin or retarget?"),
+            "the question is half the record"
+        );
         assert!(body.contains("A running worker must not move."));
         // The model is told the answer, so it can act on it.
         assert!(out.content.contains("A running worker must not move."));
@@ -278,7 +298,13 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["0001-pin-the-worker-model.md", "0002-pin-the-worker-model.md"]);
+        assert_eq!(
+            names,
+            vec![
+                "0001-pin-the-worker-model.md",
+                "0002-pin-the-worker-model.md"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -290,7 +316,10 @@ mod tests {
         let out = CheckpointTool.run(args("ask"), &c).await;
         assert!(!out.is_error, "a skipped checkpoint is not an error");
         assert!(out.content.contains("Decide it yourself"));
-        assert!(!tmp.path().join("decisions").exists(), "nothing was decided, so nothing is filed");
+        assert!(
+            !tmp.path().join("decisions").exists(),
+            "nothing was decided, so nothing is filed"
+        );
     }
 
     #[tokio::test]
@@ -298,7 +327,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let c = ctx(tmp.path(), Arc::new(Answers("sure")));
         for i in 0..super::super::CHECKPOINTS_PER_TURN {
-            assert!(!CheckpointTool.run(args("note"), &c).await.is_error, "call {i}");
+            assert!(
+                !CheckpointTool.run(args("note"), &c).await.is_error,
+                "call {i}"
+            );
         }
         let out = CheckpointTool.run(args("note"), &c).await;
         assert!(out.is_error, "the budget is spent");

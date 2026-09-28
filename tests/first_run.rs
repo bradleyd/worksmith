@@ -19,20 +19,38 @@ fn a_fresh_global_home_is_created_with_a_reference_config() {
     let project = tempfile::tempdir().unwrap();
     let cfg = worksmith::config::Config::load(project.path()).unwrap();
 
-    assert!(home.is_dir(), "the global dir must be created on first load");
+    assert!(
+        home.is_dir(),
+        "the global dir must be created on first load"
+    );
     let example = home.join(worksmith::config::EXAMPLE_CONFIG);
-    assert!(example.is_file(), "an annotated example must be seeded beside it");
+    assert!(
+        example.is_file(),
+        "an annotated example must be seeded beside it"
+    );
     let body = std::fs::read_to_string(&example).unwrap();
-    assert!(body.contains("[providers."), "the example must show a provider section");
+    assert!(
+        body.contains("[providers."),
+        "the example must show a provider section"
+    );
 
     // Seeding a reference is not the same as choosing a model: writing
     // config.toml would pick a provider on the user's behalf.
-    assert!(!home.join("config.toml").exists(), "no config.toml is invented");
+    assert!(
+        !home.join("config.toml").exists(),
+        "no config.toml is invented"
+    );
 
     // And the error a fresh user hits must name both paths, not just "config.toml".
     let err = format!("{:#}", cfg.resolve_model(None).unwrap_err());
-    assert!(err.contains(&home.display().to_string()), "error names the real path: {err}");
-    assert!(err.contains("config.example.toml"), "error points at the example: {err}");
+    assert!(
+        err.contains(&home.display().to_string()),
+        "error names the real path: {err}"
+    );
+    assert!(
+        err.contains("config.example.toml"),
+        "error points at the example: {err}"
+    );
 }
 
 /// The stall guard is per-provider, because the right number is the endpoint's:
@@ -52,7 +70,10 @@ fn a_stream_idle_timeout_is_per_provider_with_a_generous_default() {
     )
     .unwrap();
 
-    assert_eq!(c.providers["local"].stream_idle_timeout, None, "falls back to the default");
+    assert_eq!(
+        c.providers["local"].stream_idle_timeout, None,
+        "falls back to the default"
+    );
     assert_eq!(c.providers["remote"].stream_idle_timeout, Some(90));
 }
 
@@ -65,9 +86,11 @@ async fn a_context_mismatch_is_reported_in_both_directions() {
 
     // No server: best-effort, never an error, never a false alarm.
     let http = reqwest::Client::new();
-    let none =
-        warn_on_context_mismatch(&http, "http://127.0.0.1:1/v1", "some/model", 65_536).await;
-    assert!(none.is_none(), "an unreachable server is not a misconfiguration");
+    let none = warn_on_context_mismatch(&http, "http://127.0.0.1:1/v1", "some/model", 65_536).await;
+    assert!(
+        none.is_none(),
+        "an unreachable server is not a misconfiguration"
+    );
 }
 
 /// Building a `reqwest::Client` is synchronous and, with rustls-native-certs on
@@ -111,10 +134,19 @@ fn a_context_mismatch_is_caught_in_both_directions() {
 
     let under = context_mismatch("m", 65_536, 32_768).expect("under-declared must warn");
     assert!(under.contains("65536"), "names the number to use: {under}");
-    assert!(under.contains("compaction fires early"), "says what goes wrong: {under}");
+    assert!(
+        under.contains("compaction fires early"),
+        "says what goes wrong: {under}"
+    );
 
     // Rounding is not a mismatch: 128000 against a served 131072 is someone
     // being approximate, not someone being wrong.
-    assert!(context_mismatch("m", 131_072, 128_000).is_none(), "128000 vs 131072 is fine");
-    assert!(context_mismatch("m", 65_536, 65_536).is_none(), "exact agreement is fine");
+    assert!(
+        context_mismatch("m", 131_072, 128_000).is_none(),
+        "128000 vs 131072 is fine"
+    );
+    assert!(
+        context_mismatch("m", 65_536, 65_536).is_none(),
+        "exact agreement is fine"
+    );
 }

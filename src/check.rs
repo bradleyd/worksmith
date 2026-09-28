@@ -219,8 +219,7 @@ impl Check {
             }
             None => return,
         };
-        if !self.config.providers.contains_key(&name) && Config::provider_preset(&name).is_none()
-        {
+        if !self.config.providers.contains_key(&name) && Config::provider_preset(&name).is_none() {
             let known: Vec<&str> = self.config.providers.keys().map(String::as_str).collect();
             let known = if known.is_empty() {
                 "none"
@@ -292,8 +291,7 @@ impl Check {
         };
         let base = resolved.provider.base_url.trim_end_matches('/').to_string();
         let model = resolved.model.clone();
-        let mismatch =
-            crate::llm::warn_on_context_mismatch(&http, &base, &model, configured).await;
+        let mismatch = crate::llm::warn_on_context_mismatch(&http, &base, &model, configured).await;
         if let Some(msg) = mismatch {
             self.flags.push(msg);
         }
@@ -611,15 +609,26 @@ mod tests {
             config,
             sources: BTreeMap::new(),
             writers: BTreeMap::from([
-                ("temperature".to_string(), ("/g".to_string(), toml::Value::from(0.5))),
-                ("model".to_string(), ("/g".to_string(), toml::Value::from("p/m"))),
+                (
+                    "temperature".to_string(),
+                    ("/g".to_string(), toml::Value::from(0.5)),
+                ),
+                (
+                    "model".to_string(),
+                    ("/g".to_string(), toml::Value::from("p/m")),
+                ),
             ]),
             files: Vec::new(),
             flags: Vec::new(),
         };
         check.flag_merge();
 
-        assert_eq!(check.flags.len(), 1, "only the dropped key is flagged: {:?}", check.flags);
+        assert_eq!(
+            check.flags.len(),
+            1,
+            "only the dropped key is flagged: {:?}",
+            check.flags
+        );
         assert!(check.flags[0].contains("temperature"));
         assert!(!check.flags[0].contains("model"));
     }
@@ -693,7 +702,10 @@ mod tests {
     /// for the report.
     #[test]
     fn display_key_uses_dots_for_the_report() {
-        assert_eq!(display_key("providers>omlx>base-url"), "providers.omlx.base-url");
+        assert_eq!(
+            display_key("providers>omlx>base-url"),
+            "providers.omlx.base-url"
+        );
         // A dot already in a model name is left alone.
         assert_eq!(
             display_key("models>openrouter/qwen/qwen3.8-27b>temperature"),

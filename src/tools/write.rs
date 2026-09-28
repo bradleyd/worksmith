@@ -41,12 +41,17 @@ impl Tool for WriteTool {
             return ToolOutput::error(refusal);
         }
         let existed = full.exists();
-        let old = if existed { std::fs::read_to_string(&full).unwrap_or_default() } else { String::new() };
+        let old = if existed {
+            std::fs::read_to_string(&full).unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         if let Some(parent) = full.parent()
-            && let Err(e) = std::fs::create_dir_all(parent) {
-                return ToolOutput::error(format!("cannot create {}: {e}", parent.display()));
-            }
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return ToolOutput::error(format!("cannot create {}: {e}", parent.display()));
+        }
         match std::fs::write(&full, content) {
             Ok(()) => {
                 let verb = if existed { "overwrote" } else { "created" };

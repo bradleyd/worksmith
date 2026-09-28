@@ -71,7 +71,10 @@ async fn bash_tool_refuses_without_executing() {
     assert!(out.fatal, "should be fatal (hard stop)");
     assert!(out.content.contains("refused"), "message: {}", out.content);
     // The command never ran — the canary survives.
-    assert!(canary.exists(), "destructive command must not have executed");
+    assert!(
+        canary.exists(),
+        "destructive command must not have executed"
+    );
 }
 
 /// The observed failure: a model ran `git push` unattended. The guard has to
@@ -99,11 +102,22 @@ async fn an_outward_command_is_not_run_without_approval() {
         )
         .await;
 
-    assert!(out.is_error, "a denied command must report as an error: {}", out.content);
+    assert!(
+        out.is_error,
+        "a denied command must report as an error: {}",
+        out.content
+    );
     assert!(!canary.exists(), "the command must not have run");
-    assert!(out.content.contains("did not approve"), "says why: {}", out.content);
+    assert!(
+        out.content.contains("did not approve"),
+        "says why: {}",
+        out.content
+    );
     // The turn continues — the model should route around it, not be killed.
-    assert!(!out.fatal, "denial is not fatal; refusal of a destructive command is");
+    assert!(
+        !out.fatal,
+        "denial is not fatal; refusal of a destructive command is"
+    );
 }
 
 #[tokio::test]
@@ -119,7 +133,12 @@ async fn approval_lets_the_command_through() {
         ..Default::default()
     };
 
-    reg.run("bash", serde_json::json!({ "command": "touch approved.txt" }), &ctx).await;
+    reg.run(
+        "bash",
+        serde_json::json!({ "command": "touch approved.txt" }),
+        &ctx,
+    )
+    .await;
     assert!(dir.path().join("approved.txt").exists());
 }
 
@@ -213,7 +232,11 @@ async fn doc_writes_outside_the_project_need_approval() {
         .await;
 
     assert!(out.is_error, "should be refused: {}", out.content);
-    assert!(out.content.contains("did not approve"), "says why: {}", out.content);
+    assert!(
+        out.content.contains("did not approve"),
+        "says why: {}",
+        out.content
+    );
     assert!(!escaped.exists(), "nothing was written outside the project");
 
     // Extraction writes N files into a directory, so the directory is gated too.

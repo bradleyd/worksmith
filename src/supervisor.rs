@@ -151,15 +151,17 @@ impl Supervisor {
                 self.in_flight_idles = 0;
                 None
             }
-            Event::Usage { completion_tokens, .. } => {
+            Event::Usage {
+                completion_tokens, ..
+            } => {
                 self.completion_tokens += completion_tokens;
                 match self.cfg.token_budget {
-                    Some(budget) if self.completion_tokens > budget => Some(Action::Escalate(
-                        format!(
+                    Some(budget) if self.completion_tokens > budget => {
+                        Some(Action::Escalate(format!(
                             "token budget exceeded ({} > {budget} completion tokens)",
                             self.completion_tokens
-                        ),
-                    )),
+                        )))
+                    }
                     _ => None,
                 }
             }
@@ -168,7 +170,9 @@ impl Supervisor {
                 self.tool_idles = 0;
                 None
             }
-            Event::ToolCall { name, arguments, .. } => {
+            Event::ToolCall {
+                name, arguments, ..
+            } => {
                 self.tool_in_flight = Some(name.clone());
                 self.tool_idles = 0;
                 let sig = format!("{name}::{arguments}");
@@ -335,7 +339,11 @@ mod tests {
         // Four idle ticks — past what used to be the whole budget — and it has
         // neither nudged nor stopped, because a tool is running.
         for tick in 1..=4 {
-            assert_eq!(s.on_idle(), None, "intervened on tick {tick} while a tool was running");
+            assert_eq!(
+                s.on_idle(),
+                None,
+                "intervened on tick {tick} while a tool was running"
+            );
         }
         assert_eq!(s.nudges(), 0, "a running tool must not cost a nudge");
 
@@ -347,7 +355,10 @@ mod tests {
             ok: true,
             output: "test result: ok".into(),
         });
-        assert!(matches!(s.on_idle(), Some(Action::Nudge(_))), "silence after a tool is still idle");
+        assert!(
+            matches!(s.on_idle(), Some(Action::Nudge(_))),
+            "silence after a tool is still idle"
+        );
     }
 
     #[test]
@@ -376,7 +387,10 @@ mod tests {
 
     #[test]
     fn repeated_identical_calls_nudge_once() {
-        let mut s = sup(SupervisorConfig { repeat_threshold: 3, ..Default::default() });
+        let mut s = sup(SupervisorConfig {
+            repeat_threshold: 3,
+            ..Default::default()
+        });
         assert_eq!(s.observe(&call("{}")), None);
         assert_eq!(s.observe(&call("{}")), None);
         assert!(matches!(s.observe(&call("{}")), Some(Action::Nudge(_))));
@@ -389,7 +403,10 @@ mod tests {
 
     #[test]
     fn nudges_are_bounded_then_escalate() {
-        let mut s = sup(SupervisorConfig { max_nudges: 2, ..Default::default() });
+        let mut s = sup(SupervisorConfig {
+            max_nudges: 2,
+            ..Default::default()
+        });
         assert!(matches!(s.on_idle(), Some(Action::Nudge(_))));
         assert!(matches!(s.on_idle(), Some(Action::Nudge(_))));
         assert!(matches!(s.on_idle(), Some(Action::Escalate(_))));
@@ -398,7 +415,10 @@ mod tests {
 
     #[test]
     fn token_budget_escalates() {
-        let mut s = sup(SupervisorConfig { token_budget: Some(100), ..Default::default() });
+        let mut s = sup(SupervisorConfig {
+            token_budget: Some(100),
+            ..Default::default()
+        });
         let usage = |n| Event::Usage {
             reasoning_tokens: 0,
             finish_reason: None,
@@ -408,7 +428,9 @@ mod tests {
         };
         assert_eq!(s.observe(&usage(60)), None);
         match s.observe(&usage(60)) {
-            Some(Action::Escalate(r)) => assert!(r.contains("120"), "reason should show spend: {r}"),
+            Some(Action::Escalate(r)) => {
+                assert!(r.contains("120"), "reason should show spend: {r}")
+            }
             other => panic!("expected escalation, got {other:?}"),
         }
     }
@@ -418,13 +440,23 @@ mod tests {
         let mut s = sup(SupervisorConfig::default());
         let msg = |t: &str| Event::AssistantMessage { text: t.into() };
         assert_eq!(s.observe(&msg("working on it")), None);
-        assert!(matches!(s.observe(&msg("I'm blocked: which file?")), Some(Action::Nudge(_))));
-        assert_eq!(s.observe(&msg("I am blocked again")), None, "flagged only once");
+        assert!(matches!(
+            s.observe(&msg("I'm blocked: which file?")),
+            Some(Action::Nudge(_))
+        ));
+        assert_eq!(
+            s.observe(&msg("I am blocked again")),
+            None,
+            "flagged only once"
+        );
     }
 
     #[test]
     fn off_mode_never_acts() {
-        let mut s = sup(SupervisorConfig { mode: Mode::Off, ..Default::default() });
+        let mut s = sup(SupervisorConfig {
+            mode: Mode::Off,
+            ..Default::default()
+        });
         for _ in 0..10 {
             assert_eq!(s.observe(&call("{}")), None);
         }

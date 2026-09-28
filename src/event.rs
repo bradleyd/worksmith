@@ -12,8 +12,12 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    SessionStarted { id: String },
-    UserMessage { text: String },
+    SessionStarted {
+        id: String,
+    },
+    UserMessage {
+        text: String,
+    },
     /// A model call is in flight. The supervisor's idle rule measures time
     /// since the last event, and a slow request emits nothing at all while it
     /// waits — so without these it counts queueing as spinning. Three workers
@@ -52,16 +56,32 @@ pub enum Event {
     /// The session's active model changed mid-run. The session log is the only
     /// place the switch is visible afterwards — the transcript alone cannot say
     /// which model answered which part of the turn.
-    ModelChanged { from: String, to: String },
+    ModelChanged {
+        from: String,
+        to: String,
+    },
     /// A streamed chunk of model reasoning/thinking (display-only).
-    Thinking { text: String },
+    Thinking {
+        text: String,
+    },
     /// A streamed chunk of assistant text.
-    MessageDelta { text: String },
+    MessageDelta {
+        text: String,
+    },
     /// The final assembled assistant text for a step.
-    AssistantMessage { text: String },
-    ToolCall { id: String, name: String, arguments: String },
+    AssistantMessage {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
     ToolResult {
-        id: String, name: String, ok: bool, output: String,
+        id: String,
+        name: String,
+        ok: bool,
+        output: String,
         /// Wall time inside tool dispatch, including approvals, retries and user waits.
         /// Absent for legacy records and calls not dispatched (deferred/invalid JSON).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,9 +108,15 @@ pub enum Event {
     /// The loop stopped to bring the user in — a pairing checkpoint. Recorded
     /// like anything else structural, so `/history` shows where the user had a
     /// say and where they were only told.
-    Checkpoint { kind: String, subject: String, detail: String },
+    Checkpoint {
+        kind: String,
+        subject: String,
+        detail: String,
+    },
     /// The supervisor/loop nudged the model back on track (stuck detection).
-    Nudge { reason: String },
+    Nudge {
+        reason: String,
+    },
     /// Old history was summarized to stay under the context limit.
     /// Message counts are for orientation; the token numbers are the point.
     /// "33 -> 33 messages" was a true statement about a compaction that freed
@@ -110,13 +136,21 @@ pub enum Event {
     },
     /// Which durable memories were injected into the current turn's dynamic
     /// request context.
-    MemoryUsed { ids: Vec<String> },
+    MemoryUsed {
+        ids: Vec<String>,
+    },
     /// A setting was not honored, or something is off but not fatal.
-    Warning { message: String },
-    Error { message: String },
+    Warning {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
     /// The whole user turn finished, with its final outcome (done, validation
     /// failed, stuck, max steps, aborted).
-    TurnComplete { outcome: String },
+    TurnComplete {
+        outcome: String,
+    },
 }
 
 /// A cheap clonable handle to the broadcast bus.
@@ -155,11 +189,30 @@ mod tests {
     fn tool_duration_json_is_optional_and_preserves_measured_zero() {
         let old = r#"{"type":"tool_result","id":"a","name":"read","ok":true,"output":"text"}"#;
         let mut event: Event = serde_json::from_str(old).unwrap();
-        assert!(matches!(event, Event::ToolResult { elapsed_ms: None, .. }));
-        assert!(serde_json::to_value(&event).unwrap().get("elapsed_ms").is_none());
-        if let Event::ToolResult { elapsed_ms, .. } = &mut event { *elapsed_ms = Some(0); }
+        assert!(matches!(
+            event,
+            Event::ToolResult {
+                elapsed_ms: None,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(&event)
+                .unwrap()
+                .get("elapsed_ms")
+                .is_none()
+        );
+        if let Event::ToolResult { elapsed_ms, .. } = &mut event {
+            *elapsed_ms = Some(0);
+        }
         let encoded = serde_json::to_value(event).unwrap();
         assert_eq!(encoded["elapsed_ms"], 0);
-        assert!(matches!(serde_json::from_value::<Event>(encoded).unwrap(), Event::ToolResult { elapsed_ms: Some(0), .. }));
+        assert!(matches!(
+            serde_json::from_value::<Event>(encoded).unwrap(),
+            Event::ToolResult {
+                elapsed_ms: Some(0),
+                ..
+            }
+        ));
     }
 }

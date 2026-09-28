@@ -80,7 +80,10 @@ pub struct RememberingApprover {
 
 impl RememberingApprover {
     pub fn new(inner: Arc<dyn Approver>) -> Self {
-        Self { inner, allowed: Mutex::new(HashSet::new()) }
+        Self {
+            inner,
+            allowed: Mutex::new(HashSet::new()),
+        }
     }
 
     /// Categories the user has blanket-approved this session.
@@ -268,7 +271,10 @@ mod tests {
     #[tokio::test]
     async fn unattended_runs_refuse_rather_than_allow() {
         // The whole point: nobody to ask must not mean "go ahead".
-        assert_eq!(RefuseWhenUnattended.ask("git push", "pushes").await, Approval::Deny);
+        assert_eq!(
+            RefuseWhenUnattended.ask("git push", "pushes").await,
+            Approval::Deny
+        );
     }
 
     #[tokio::test]
@@ -279,15 +285,28 @@ mod tests {
         });
         let a = RememberingApprover::new(inner.clone());
 
-        assert_eq!(a.ask("git push origin main", "pushes commits to a remote").await, Approval::AlwaysThisSession);
+        assert_eq!(
+            a.ask("git push origin main", "pushes commits to a remote")
+                .await,
+            Approval::AlwaysThisSession
+        );
         // Same category, different command: no second prompt.
-        assert_eq!(a.ask("git push --tags", "pushes commits to a remote").await, Approval::Once);
+        assert_eq!(
+            a.ask("git push --tags", "pushes commits to a remote").await,
+            Approval::Once
+        );
         assert_eq!(*inner.calls.lock().unwrap(), 1, "asked once, not twice");
 
         // A different category is still a fresh question.
-        assert_eq!(a.ask("sudo ls", "runs as root").await, Approval::AlwaysThisSession);
+        assert_eq!(
+            a.ask("sudo ls", "runs as root").await,
+            Approval::AlwaysThisSession
+        );
         assert_eq!(*inner.calls.lock().unwrap(), 2);
-        assert_eq!(a.remembered(), vec!["pushes commits to a remote", "runs as root"]);
+        assert_eq!(
+            a.remembered(),
+            vec!["pushes commits to a remote", "runs as root"]
+        );
     }
 
     #[tokio::test]
@@ -315,11 +334,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_one_time_yes_is_not_remembered() {
-        let inner = Arc::new(CountingApprover { answer: Approval::Once, calls: Mutex::new(0) });
+        let inner = Arc::new(CountingApprover {
+            answer: Approval::Once,
+            calls: Mutex::new(0),
+        });
         let a = RememberingApprover::new(inner.clone());
         a.ask("git push", "pushes commits to a remote").await;
         a.ask("git push", "pushes commits to a remote").await;
-        assert_eq!(*inner.calls.lock().unwrap(), 2, "each time is a fresh question");
+        assert_eq!(
+            *inner.calls.lock().unwrap(),
+            2,
+            "each time is a fresh question"
+        );
         assert!(a.remembered().is_empty());
     }
 }

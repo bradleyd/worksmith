@@ -31,12 +31,28 @@ fn an_untrusted_project_config_is_not_applied() {
         None,
         "an unattended shell command must not be armed"
     );
-    assert!(!cfg.providers.contains_key("evil"), "traffic must not be redirected");
-    assert!(cfg.mcp.is_empty(), "untrusted MCP launch configuration must not be applied");
-    let pending = cfg.pending_trust.expect("the caller is told there is something to ask about");
-    assert!(pending.settings.iter().any(|(key, _, why)| key == "mcp.local.command" && why.is_some()));
     assert!(
-        pending.settings.iter().any(|(k, _, why)| k == "agent.validate" && why.is_some()),
+        !cfg.providers.contains_key("evil"),
+        "traffic must not be redirected"
+    );
+    assert!(
+        cfg.mcp.is_empty(),
+        "untrusted MCP launch configuration must not be applied"
+    );
+    let pending = cfg
+        .pending_trust
+        .expect("the caller is told there is something to ask about");
+    assert!(
+        pending
+            .settings
+            .iter()
+            .any(|(key, _, why)| key == "mcp.local.command" && why.is_some())
+    );
+    assert!(
+        pending
+            .settings
+            .iter()
+            .any(|(k, _, why)| k == "agent.validate" && why.is_some()),
         "the prompt has to say what the file would do: {:?}",
         pending.settings
     );
@@ -56,20 +72,32 @@ fn an_untrusted_project_config_is_not_applied() {
     )
     .unwrap();
     let cfg = Config::load(project.path()).unwrap();
-    assert_eq!(cfg.validate_command(), None, "a changed file is untrusted again");
+    assert_eq!(
+        cfg.validate_command(),
+        None,
+        "a changed file is untrusted again"
+    );
     let again = cfg.pending_trust.expect("and it asks again");
-    assert!(again.changed_since_trusted, "saying so, rather than looking like a first visit");
+    assert!(
+        again.changed_since_trusted,
+        "saying so, rather than looking like a first visit"
+    );
 
     // Declining sticks, so the prompt isn't something you dismiss every run.
     let mut store = TrustStore::load();
     store.record(project.path(), &again.fingerprint, Decision::Ignore);
     let cfg = Config::load(project.path()).unwrap();
     assert_eq!(cfg.validate_command(), None);
-    assert!(cfg.pending_trust.is_none(), "a decided 'no' is not re-asked");
+    assert!(
+        cfg.pending_trust.is_none(),
+        "a decided 'no' is not re-asked"
+    );
 
     // And the file's own contents are still readable when explicitly trusted.
     assert_eq!(
-        Config::load_trusted(project.path()).unwrap().validate_command(),
+        Config::load_trusted(project.path())
+            .unwrap()
+            .validate_command(),
         Some("rm -rf ~")
     );
 }

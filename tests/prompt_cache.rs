@@ -56,9 +56,11 @@ fn messages(
 fn client() -> (OpenAiCompatClient, String) {
     let url = std::env::var("WORKSMITH_CACHE_BASE_URL").expect("set an explicit provider URL");
     let model = std::env::var("WORKSMITH_CACHE_MODEL").expect("set an explicit model");
-    let key = std::env::var("WORKSMITH_CACHE_API_KEY_ENV").ok().map(|name| {
-        std::env::var(&name).expect("the specified API key environment variable must exist")
-    });
+    let key = std::env::var("WORKSMITH_CACHE_API_KEY_ENV")
+        .ok()
+        .map(|name| {
+            std::env::var(&name).expect("the specified API key environment variable must exist")
+        });
     let mut headers = reqwest::header::HeaderMap::new();
     // Explicit OpenRouter session affinity avoids changing the inferred routing
     // key when this experiment changes the opening messages. It is best effort.
@@ -83,7 +85,11 @@ async fn measure(
     let request = ChatRequest {
         model: model.into(),
         messages,
-        tools: if advertise_tools { synthetic_tools() } else { vec![] },
+        tools: if advertise_tools {
+            synthetic_tools()
+        } else {
+            vec![]
+        },
         context_breakdown: None,
         temperature: Some(0.0),
         top_p: None,
@@ -104,8 +110,10 @@ async fn measure(
         }
         first
     };
-    let (completion, first) =
-        tokio::join!(client.stream(request, tx, CancellationToken::new()), collect);
+    let (completion, first) = tokio::join!(
+        client.stream(request, tx, CancellationToken::new()),
+        collect
+    );
     let completion = completion.unwrap();
     let metrics = json!({"model":model, "prompt_tokens":completion.usage.prompt_tokens,
         "completion_tokens":completion.usage.completion_tokens, "cached_tokens":completion.usage.cached_tokens,
@@ -117,7 +125,10 @@ async fn measure(
 
 fn history() -> Vec<Message> {
     let text = (0..160).map(|i| format!("Synthetic record {i}: keep stable instructions, validate changes, and report the result.\n")).collect::<String>();
-    vec![Message::user(text), Message::assistant(Some("Acknowledged.".into()), vec![])]
+    vec![
+        Message::user(text),
+        Message::assistant(Some("Acknowledged.".into()), vec![]),
+    ]
 }
 
 #[tokio::test]
@@ -198,7 +209,10 @@ fn quality_cases() -> Vec<QualityCase> {
                 Message::user(
                     "Our old project convention was NAME: value. That was the rule for the previous version.",
                 ),
-                Message::assistant(Some("The previous version used NAME: value.".into()), vec![]),
+                Message::assistant(
+                    Some("The previous version used NAME: value.".into()),
+                    vec![],
+                ),
             ],
             turn: vec![Message::user(task)],
             expected: json!({"status":"[build] green"}),
@@ -298,25 +312,63 @@ async fn compare_memory_quality() {
 
 #[test]
 fn turn_start_memory_keeps_tool_steps_append_only() {
-    let case = quality_cases().into_iter().find(|c| c.name == "after-tool-result").unwrap();
+    let case = quality_cases()
+        .into_iter()
+        .find(|c| c.name == "after-tool-result")
+        .unwrap();
     let prior = history();
-    let first = messages("system", &prior, &case.turn[..1], case.memory, Placement::TurnStart);
-    let next = messages("system", &prior, &case.turn, case.memory, Placement::TurnStart);
+    let first = messages(
+        "system",
+        &prior,
+        &case.turn[..1],
+        case.memory,
+        Placement::TurnStart,
+    );
+    let next = messages(
+        "system",
+        &prior,
+        &case.turn,
+        case.memory,
+        Placement::TurnStart,
+    );
     assert_eq!(
         serde_json::to_value(&first).unwrap(),
         serde_json::to_value(&next[..first.len()]).unwrap()
     );
-    let changed = messages("system", &prior, &case.turn, "changed memory", Placement::TurnStart);
+    let changed = messages(
+        "system",
+        &prior,
+        &case.turn,
+        "changed memory",
+        Placement::TurnStart,
+    );
     assert_eq!(
         serde_json::to_value(&next[..prior.len() + 1]).unwrap(),
         serde_json::to_value(&changed[..prior.len() + 1]).unwrap()
     );
-    assert_eq!(next.iter().filter(|m| m.content.as_deref() == Some(case.memory)).count(), 1);
     assert_eq!(
-        serde_json::to_value(messages("system", &prior, &case.turn, "", Placement::Prefix))
-            .unwrap(),
-        serde_json::to_value(messages("system", &prior, &case.turn, "", Placement::TurnStart))
-            .unwrap(),
+        next.iter()
+            .filter(|m| m.content.as_deref() == Some(case.memory))
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::to_value(messages(
+            "system",
+            &prior,
+            &case.turn,
+            "",
+            Placement::Prefix
+        ))
+        .unwrap(),
+        serde_json::to_value(messages(
+            "system",
+            &prior,
+            &case.turn,
+            "",
+            Placement::TurnStart
+        ))
+        .unwrap(),
         "without memory the two layouts must be identical"
     );
     let prefix = messages("system", &prior, &case.turn, case.memory, Placement::Prefix);
@@ -327,7 +379,10 @@ fn turn_start_memory_keeps_tool_steps_append_only() {
 #[test]
 fn quality_oracle_rejects_wrong_values_extra_fields_and_truncation() {
     let expected = json!({"status":"[build] green"});
-    let mut completion = Completion { content: Some(expected.to_string()), ..Default::default() };
+    let mut completion = Completion {
+        content: Some(expected.to_string()),
+        ..Default::default()
+    };
     assert!(passes(&completion, &expected));
     completion.tool_calls.push(worksmith::llm::ToolCall {
         id: "unexpected".into(),
@@ -338,10 +393,15 @@ fn quality_oracle_rejects_wrong_values_extra_fields_and_truncation() {
     completion.tool_calls.clear();
     completion.finish_reason = Some("length".into());
     assert!(!passes(&completion, &expected));
-    for text in
-        [r#"{"status":"BUILD: green"}"#, r#"{"status":"[build] green","extra":true}"#, "not json"]
-    {
-        completion = Completion { content: Some(text.into()), ..Default::default() };
+    for text in [
+        r#"{"status":"BUILD: green"}"#,
+        r#"{"status":"[build] green","extra":true}"#,
+        "not json",
+    ] {
+        completion = Completion {
+            content: Some(text.into()),
+            ..Default::default()
+        };
         assert!(!passes(&completion, &expected));
     }
 }

@@ -83,8 +83,12 @@ pub struct MinePlan {
 /// Sessions recorded for `cwd`, newest first — recent work is likelier to still
 /// be true.
 pub fn sessions_for_project(cwd: &Path) -> Result<Vec<PathBuf>> {
-    Ok(crate::session::store::list(crate::session::store::DateRange::default(), Some(cwd))?
-        .into_iter().map(|entry| entry.path).collect())
+    Ok(
+        crate::session::store::list(crate::session::store::DateRange::default(), Some(cwd))?
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect(),
+    )
 }
 
 /// Render a session for the classifier. Tool *output* is dropped: it is exactly
@@ -141,7 +145,11 @@ pub fn plan(mem: &MemoryStore, cwd: &Path, limit: usize) -> Result<MinePlan> {
             }
         };
 
-        let users = session.messages().iter().filter(|m| m.role == Role::User).count();
+        let users = session
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .count();
         let transcript = render_for_mining(&session);
         if users == 0 || session.messages().len() < MIN_MESSAGES || transcript.trim().is_empty() {
             plan.report.too_short += 1;
@@ -197,7 +205,13 @@ pub fn record(
             // Scope is forced. A session ran in this project, so what it taught
             // is this project's; the classifier's guess is not authoritative
             // about that, and a wrong guess pollutes every other repo.
-            match mem.propose(Scope::Project, &c.kind, &c.subject, &c.content, c.importance) {
+            match mem.propose(
+                Scope::Project,
+                &c.kind,
+                &c.subject,
+                &c.content,
+                c.importance,
+            ) {
                 Ok((_, true)) => {
                     report.proposed += 1;
                     kept += 1;
@@ -217,8 +231,10 @@ impl MineReport {
         if self.found == 0 {
             return "no past sessions recorded for this project".to_string();
         }
-        let mut s =
-            format!("mined {} of {} sessions — {} proposals", self.read, self.found, self.proposed);
+        let mut s = format!(
+            "mined {} of {} sessions — {} proposals",
+            self.read, self.found, self.proposed
+        );
         if self.duplicates > 0 {
             s.push_str(&format!(", {} already known", self.duplicates));
         }

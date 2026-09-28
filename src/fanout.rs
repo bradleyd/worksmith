@@ -48,7 +48,10 @@ fn take_value(rest: &str) -> Result<(String, &str), String> {
     };
     let body = &rest[quote.len_utf8()..];
     match body.find(quote) {
-        Some(end) => Ok((body[..end].to_string(), body[end + quote.len_utf8()..].trim_start())),
+        Some(end) => Ok((
+            body[..end].to_string(),
+            body[end + quote.len_utf8()..].trim_start(),
+        )),
         // Loudly, and now: the alternative is a broken command discovered by a
         // worker minutes later, wearing the costume of a failing task.
         None => Err(format!("has an unterminated {quote} quote")),
@@ -84,7 +87,11 @@ pub const SPAWN_USAGE: &str = "usage: /spawn [-n N | --each-files <regex>] [--mo
 /// Parse leading flags off a `/spawn` line; everything after them is the task,
 /// verbatim. Flags take a single token, so no quoting rules are needed.
 pub fn parse_spawn(args: &str, default_auto: bool) -> Result<SpawnRequest, String> {
-    let mut fanout = if default_auto { FanOut::Auto } else { FanOut::Count(1) };
+    let mut fanout = if default_auto {
+        FanOut::Auto
+    } else {
+        FanOut::Count(1)
+    };
     let mut explicit = false;
     let mut shared = false;
     let mut model: Option<String> = None;
@@ -221,9 +228,7 @@ pub fn assign(task: &str, item: &str) -> String {
 
 /// `-n N` fallback when the planner can't be reached: N takes on one goal.
 pub fn variant_task(task: &str, i: usize, n: usize) -> String {
-    format!(
-        "{task}\n\nThis is draft {i} of {n} — take a distinct angle from the other drafts.",
-    )
+    format!("{task}\n\nThis is draft {i} of {n} — take a distinct angle from the other drafts.",)
 }
 
 /// Files whose *name* matches `pattern`, same contract as the `find` tool.
@@ -234,7 +239,9 @@ pub fn matching_files(cwd: &Path, pattern: &str) -> Result<Vec<String>, String> 
     Ok(files
         .iter()
         .filter(|f| {
-            f.file_name().map(|n| re.is_match(&n.to_string_lossy())).unwrap_or(false)
+            f.file_name()
+                .map(|n| re.is_match(&n.to_string_lossy()))
+                .unwrap_or(false)
         })
         .map(|f| crate::tools::display_rel(cwd, f))
         .collect())
@@ -438,8 +445,14 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(r.validate.as_deref(), Some("cd docs && zola check --skip-external-links"));
-        assert_eq!(r.task, "Write the docs", "the task is not eaten by the flag");
+        assert_eq!(
+            r.validate.as_deref(),
+            Some("cd docs && zola check --skip-external-links")
+        );
+        assert_eq!(
+            r.task, "Write the docs",
+            "the task is not eaten by the flag"
+        );
         assert!(matches!(r.fanout, FanOut::Count(3)));
     }
 
@@ -490,8 +503,6 @@ mod tests {
 
     #[test]
     fn spawn_parses_flags_then_takes_the_rest_verbatim() {
-        
-
         let r = parse_spawn("write 3 articles about sqlite", true).unwrap();
         assert!(matches!(r.fanout, FanOut::Auto));
         assert_eq!(r.task, "write 3 articles about sqlite");
@@ -519,10 +530,12 @@ mod tests {
 
     #[test]
     fn spawn_rejects_bad_input() {
-        
         assert!(parse_spawn("", true).is_err(), "no task");
         assert!(parse_spawn("-n 3", true).is_err(), "flags but no task");
-        assert!(parse_spawn("-n zero do it", true).is_err(), "non-numeric count");
+        assert!(
+            parse_spawn("-n zero do it", true).is_err(),
+            "non-numeric count"
+        );
         assert!(parse_spawn("-n 0 do it", true).is_err(), "count below 1");
         assert!(parse_spawn("--wat do it", true).is_err(), "unknown flag");
         assert!(
@@ -533,9 +546,11 @@ mod tests {
 
     #[test]
     fn assignment_is_appended_not_interpolated() {
-        
         let t = assign("proofread this file", "docs/indexing.md");
-        assert!(t.starts_with("proofread this file"), "original prose is preserved");
+        assert!(
+            t.starts_with("proofread this file"),
+            "original prose is preserved"
+        );
         assert!(t.ends_with("Your assignment: docs/indexing.md"));
         assert!(variant_task("draft an intro", 2, 3).contains("draft 2 of 3"));
     }
@@ -560,7 +575,10 @@ mod tests {
         let dupes = "TASK: Summarize the quarterly figures\n\
                      TASK: Summarize the quarterly figures\n\
                      TASK: Summarize the quarterly figures";
-        assert!(parse_subtasks(dupes, Some(3), 4).is_err(), "duplicates aren't a fan-out");
+        assert!(
+            parse_subtasks(dupes, Some(3), 4).is_err(),
+            "duplicates aren't a fan-out"
+        );
 
         // A mix keeps the good ones but can't satisfy an explicit -n 3.
         let mixed = "TASK: Audit the retry policy in the payments client\n\
@@ -595,7 +613,11 @@ mod tests {
         );
 
         // Nothing marked at all is a failure, not an excuse to invent tasks.
-        let err = parse_subtasks("Here are three ideas:\n1. logging\n2. CI\n3. caching", Some(3), 4);
+        let err = parse_subtasks(
+            "Here are three ideas:\n1. logging\n2. CI\n3. caching",
+            Some(3),
+            4,
+        );
         assert!(err.is_err(), "unmarked prose is unusable, got {err:?}");
     }
 
@@ -616,32 +638,47 @@ mod tests {
 
     #[test]
     fn subtasks_parse_out_of_list_formatting() {
-        
-        let text = "1. TASK: write about WAL\n2) TASK: write about FTS5\n- TASK: write about JSON1\n\n";
+        let text =
+            "1. TASK: write about WAL\n2) TASK: write about FTS5\n- TASK: write about JSON1\n\n";
         let got = parse_subtasks(text, Some(3), 4).unwrap();
-        assert_eq!(got, vec!["write about WAL", "write about FTS5", "write about JSON1"]);
+        assert_eq!(
+            got,
+            vec!["write about WAL", "write about FTS5", "write about JSON1"]
+        );
 
         // Auto mode clamps to the worker cap.
-        let many =
-            (1..=9).map(|i| format!("TASK: investigate subsystem {i}")).collect::<Vec<_>>().join("\n");
+        let many = (1..=9)
+            .map(|i| format!("TASK: investigate subsystem {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(parse_subtasks(&many, None, 4).unwrap().len(), 4);
 
         // One line back from auto mode is a normal single spawn.
-        assert_eq!(parse_subtasks("TASK: just run the linter", None, 4).unwrap().len(), 1);
+        assert_eq!(
+            parse_subtasks("TASK: just run the linter", None, 4)
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Explicit -n that the planner under-delivered on is unusable.
         assert!(parse_subtasks("TASK: only one instruction here", Some(3), 4).is_err());
-        assert!(parse_subtasks("   \n\n", None, 4).is_err(), "nothing usable");
+        assert!(
+            parse_subtasks("   \n\n", None, 4).is_err(),
+            "nothing usable"
+        );
     }
 
     #[test]
     fn fallback_honours_an_explicit_count() {
-        
         // Planner unreachable + `-n 3` → three variants, not a dropped request.
         let tasks = fallback_tasks("draft an intro", 3, true);
         assert_eq!(tasks.len(), 3);
         assert!(tasks[0].contains("draft 1 of 3"));
         // Auto mode falls back to a single worker with the original text.
-        assert_eq!(fallback_tasks("refactor the parser", 4, false), vec!["refactor the parser"]);
+        assert_eq!(
+            fallback_tasks("refactor the parser", 4, false),
+            vec!["refactor the parser"]
+        );
     }
 }

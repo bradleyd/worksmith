@@ -41,9 +41,21 @@ async fn edit_unique_match_replaces() {
     assert!(!out.is_error, "expected success: {}", out.content);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello there\n");
     // Output is a unified diff of the change.
-    assert!(out.content.contains("edited"), "no summary: {}", out.content);
-    assert!(out.content.contains("-hello world"), "no removed line: {}", out.content);
-    assert!(out.content.contains("+hello there"), "no added line: {}", out.content);
+    assert!(
+        out.content.contains("edited"),
+        "no summary: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("-hello world"),
+        "no removed line: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("+hello there"),
+        "no added line: {}",
+        out.content
+    );
 }
 
 #[tokio::test]
@@ -55,7 +67,11 @@ async fn edit_ambiguous_match_is_error() {
 
     let reg = ToolRegistry::with_builtins();
     let out = reg
-        .run("edit", json!({ "path": "a.txt", "old_string": "x", "new_string": "y" }), &ctx(dir.path()))
+        .run(
+            "edit",
+            json!({ "path": "a.txt", "old_string": "x", "new_string": "y" }),
+            &ctx(dir.path()),
+        )
         .await;
 
     assert!(out.is_error, "ambiguous match should error");
@@ -72,7 +88,11 @@ async fn edit_not_found_is_error() {
 
     let reg = ToolRegistry::with_builtins();
     let out = reg
-        .run("edit", json!({ "path": "a.txt", "old_string": "zzz", "new_string": "y" }), &ctx(dir.path()))
+        .run(
+            "edit",
+            json!({ "path": "a.txt", "old_string": "zzz", "new_string": "y" }),
+            &ctx(dir.path()),
+        )
         .await;
 
     assert!(out.is_error, "missing old_string should error");
@@ -131,7 +151,13 @@ fn memory_crud_and_supersede() {
     let store = MemoryStore::open_paths(&global, Some(&project)).unwrap();
 
     let row = store
-        .remember(Scope::Project, "decision", "memory.storage", "Use SQLite for v1.", 80)
+        .remember(
+            Scope::Project,
+            "decision",
+            "memory.storage",
+            "Use SQLite for v1.",
+            80,
+        )
         .unwrap();
     assert_eq!(row.status, "active");
 
@@ -169,7 +195,11 @@ fn memory_rejects_bad_kind() {
     let dir = tempfile::tempdir().unwrap();
     let store =
         MemoryStore::open_paths(&dir.path().join("g.db"), Some(&dir.path().join("p.db"))).unwrap();
-    assert!(store.remember(Scope::Global, "notakind", "s", "c", 50).is_err());
+    assert!(
+        store
+            .remember(Scope::Global, "notakind", "s", "c", 50)
+            .is_err()
+    );
 }
 
 #[test]
@@ -264,7 +294,8 @@ fn session_round_trip() {
     {
         let mut s = Session::create_at(&path, dir.path()).unwrap();
         s.append_message(Message::user("hello")).unwrap();
-        s.append_message(Message::assistant(Some("hi there".into()), vec![])).unwrap();
+        s.append_message(Message::assistant(Some("hi there".into()), vec![]))
+            .unwrap();
         assert_eq!(s.messages().len(), 2);
     }
 
@@ -292,7 +323,10 @@ fn a_mistyped_config_section_fails_loudly() {
 
     let err = worksmith::config::Config::load_trusted(dir.path()).unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("supervisor"), "the error must name the offending key: {msg}");
+    assert!(
+        msg.contains("supervisor"),
+        "the error must name the offending key: {msg}"
+    );
 }
 
 #[test]
@@ -329,7 +363,9 @@ fn thinking_accepts_a_mode_or_a_budget() {
             format!("model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\n[agent]\n{line}\n"),
         )
         .unwrap();
-        worksmith::config::Config::load_trusted(dir.path()).unwrap().thinking()
+        worksmith::config::Config::load_trusted(dir.path())
+            .unwrap()
+            .thinking()
     };
 
     common::isolate_home();
@@ -390,9 +426,7 @@ fn an_unknown_provider_sort_is_rejected() {
     let write = |sort: &str| {
         std::fs::write(
             cfg.join("config.toml"),
-            format!(
-                "model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\nsort = \"{sort}\"\n"
-            ),
+            format!("model = \"p/m\"\n[providers.p]\nbase-url = \"http://h\"\nsort = \"{sort}\"\n"),
         )
         .unwrap();
     };
@@ -429,9 +463,16 @@ fn per_model_settings_carry_prices_and_sampling() {
 
     let c = worksmith::config::Config::load_trusted(dir.path()).unwrap();
     let r = c.resolve_model(None).unwrap();
-    assert_eq!(r.settings.temperature, Some(0.6), "the model's number beats the global one");
+    assert_eq!(
+        r.settings.temperature,
+        Some(0.6),
+        "the model's number beats the global one"
+    );
     assert_eq!(r.settings.top_k, Some(20));
-    assert_eq!(r.settings.top_p, None, "unset stays unset, leaving the server's default alone");
+    assert_eq!(
+        r.settings.top_p, None,
+        "unset stays unset, leaving the server's default alone"
+    );
 
     // 1M in + 1M out at 0.20/0.80.
     assert_eq!(r.settings.cost(1_000_000, 1_000_000), Some(1.0));
@@ -440,7 +481,10 @@ fn per_model_settings_carry_prices_and_sampling() {
     // A model with no entry is not free, it is unknown: saying $0.00 would be a
     // claim rather than a fact.
     let unknown = c.resolve_model(Some("openrouter/something/else")).unwrap();
-    assert_eq!(unknown.settings, worksmith::config::ModelSettings::default());
+    assert_eq!(
+        unknown.settings,
+        worksmith::config::ModelSettings::default()
+    );
     assert_eq!(unknown.settings.cost(1_000_000, 1_000_000), None);
 }
 
@@ -460,12 +504,24 @@ fn an_unknown_field_suggests_a_stale_binary() {
     )
     .unwrap();
 
-    let err = format!("{:#}", worksmith::config::Config::load_trusted(dir.path()).unwrap_err());
-    assert!(err.contains("unknown field"), "still says what TOML said: {err}");
-    assert!(err.contains("ahead of the"), "offers the other explanation: {err}");
+    let err = format!(
+        "{:#}",
+        worksmith::config::Config::load_trusted(dir.path()).unwrap_err()
+    );
+    assert!(
+        err.contains("unknown field"),
+        "still says what TOML said: {err}"
+    );
+    assert!(
+        err.contains("ahead of the"),
+        "offers the other explanation: {err}"
+    );
     assert!(
         err.contains(env!("CARGO_PKG_VERSION")),
         "names this build's version so the skew is checkable: {err}"
     );
-    assert!(err.contains("which -a worksmith"), "and how to find the stale copy: {err}");
+    assert!(
+        err.contains("which -a worksmith"),
+        "and how to find the stale copy: {err}"
+    );
 }

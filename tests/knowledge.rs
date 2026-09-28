@@ -15,15 +15,25 @@ fn write(dir: &std::path::Path, name: &str, body: &str) {
 #[test]
 fn indexes_project_text_and_finds_it_by_content() {
     let dir = tempfile::tempdir().unwrap();
-    write(&dir.path().join("docs"), "architecture.md",
+    write(
+        &dir.path().join("docs"),
+        "architecture.md",
         "# Architecture\n\nWorkers are supervised by a foreman that nudges them.\n\n\
-         The supervisor pulls the andon cord when a worker will not recover.");
-    write(dir.path(), "style.md", "Prefer Result<T, E> over panicking in library code.");
+         The supervisor pulls the andon cord when a worker will not recover.",
+    );
+    write(
+        dir.path(),
+        "style.md",
+        "Prefer Result<T, E> over panicking in library code.",
+    );
     write(dir.path(), "logo.png", "\u{0}binary-ish");
 
     let store = KnowledgeStore::open_at(&dir.path().join("k.db"), dir.path()).unwrap();
     let stats = store.index().unwrap();
-    assert_eq!(stats.files, 2, "only indexable text, not the png: {stats:?}");
+    assert_eq!(
+        stats.files, 2,
+        "only indexable text, not the png: {stats:?}"
+    );
     assert!(stats.chunks >= 2);
 
     let hits = store.search("andon cord supervisor", 5).unwrap();
@@ -56,8 +66,14 @@ fn reindexing_skips_unchanged_files_and_prunes_deleted_ones() {
     // A deleted file must stop showing up in search results.
     fs::remove_file(dir.path().join("b.md")).unwrap();
     assert_eq!(store.prune().unwrap(), 1);
-    assert!(store.search("gadgets", 5).unwrap().is_empty(), "pruned source is gone");
-    assert!(!store.search("widgets", 5).unwrap().is_empty(), "the surviving file still hits");
+    assert!(
+        store.search("gadgets", 5).unwrap().is_empty(),
+        "pruned source is gone"
+    );
+    assert!(
+        !store.search("widgets", 5).unwrap().is_empty(),
+        "the surviving file still hits"
+    );
 }
 
 #[test]
@@ -73,15 +89,26 @@ fn an_edited_file_is_reindexed_not_duplicated() {
     write(dir.path(), "notes.md", "a revised claim about batching");
     let stats = store.index().unwrap();
     assert_eq!(stats.files, 1);
-    assert_eq!(store.chunk_count().unwrap(), before, "chunks replaced, not appended");
-    assert!(store.search("caching", 5).unwrap().is_empty(), "stale text is gone");
+    assert_eq!(
+        store.chunk_count().unwrap(),
+        before,
+        "chunks replaced, not appended"
+    );
+    assert!(
+        store.search("caching", 5).unwrap().is_empty(),
+        "stale text is gone"
+    );
     assert!(!store.search("batching", 5).unwrap().is_empty());
 }
 
 #[test]
 fn search_indexes_itself_so_the_first_query_works() {
     let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "notes.md", "The parser uses a hand-rolled recursive descent approach.");
+    write(
+        dir.path(),
+        "notes.md",
+        "The parser uses a hand-rolled recursive descent approach.",
+    );
 
     // No index() call: a fresh store must still answer.
     let store = KnowledgeStore::open_at(&dir.path().join("k.db"), dir.path()).unwrap();

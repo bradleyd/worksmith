@@ -68,7 +68,10 @@ data: [DONE]\n\n";
         sort: None,
     };
 
-    let completion = client.stream(req, tx, CancellationToken::new()).await.unwrap();
+    let completion = client
+        .stream(req, tx, CancellationToken::new())
+        .await
+        .unwrap();
 
     // Assembled tool call: name + arguments joined across chunks.
     assert_eq!(completion.tool_calls.len(), 1);
@@ -127,7 +130,10 @@ async fn a_mid_stream_error_fails_instead_of_returning_nothing() {
     let _ = drain.await;
 
     let msg = format!("{err:#}");
-    assert!(msg.contains("rate-limited upstream"), "the provider's reason must survive: {msg}");
+    assert!(
+        msg.contains("rate-limited upstream"),
+        "the provider's reason must survive: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -174,9 +180,16 @@ data: [DONE]\n\n";
         sort: None,
     };
 
-    let completion = client.stream(req, tx, CancellationToken::new()).await.unwrap();
+    let completion = client
+        .stream(req, tx, CancellationToken::new())
+        .await
+        .unwrap();
 
-    assert_eq!(completion.tool_calls.len(), 1, "the call was read out of the reasoning");
+    assert_eq!(
+        completion.tool_calls.len(),
+        1,
+        "the call was read out of the reasoning"
+    );
     assert_eq!(completion.tool_calls[0].name, "bash");
     assert_eq!(
         completion.tool_calls[0].arguments,
@@ -186,14 +199,22 @@ data: [DONE]\n\n";
     // shown as thinking and executed — but the sentence after it stays.
     let left = completion.reasoning.unwrap();
     assert!(left.contains("Now I check the result."));
-    assert!(!left.contains("<function="), "the block was taken, not copied: {left}");
+    assert!(
+        !left.contains("<function="),
+        "the block was taken, not copied: {left}"
+    );
 
     // And it is said out loud — on the completion, not down the sink. The sink
     // reaches the display and stops there, so a warning sent that way is never
     // written to the session and the rate cannot be recovered afterwards. The
     // agent emits this one through `emit`, which persists it.
-    let note = completion.rescued.expect("the rescue is announced, not silent");
-    assert!(note.contains("bash") && note.contains("reasoning"), "{note}");
+    let note = completion
+        .rescued
+        .expect("the rescue is announced, not silent");
+    assert!(
+        note.contains("bash") && note.contains("reasoning"),
+        "{note}"
+    );
     while rx.try_recv().is_ok() {}
 }
 

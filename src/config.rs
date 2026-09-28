@@ -356,10 +356,11 @@ impl Config {
 
         let mut cfg = Config::default();
         if let Some(global) = global_config_path()
-            && global.exists() {
-                let g: Config = read_toml(&global)?;
-                cfg.merge(g);
-            }
+            && global.exists()
+        {
+            let g: Config = read_toml(&global)?;
+            cfg.merge(g);
+        }
         // A project config is code: it can set `agent.validate` (a shell command
         // the harness runs unattended) and point a provider's base-url anywhere.
         // Applying it because you happened to `cd` into a repo is the hole; it
@@ -456,9 +457,15 @@ impl Config {
         take(&mut self.agents.supervisor, other.agents.supervisor);
         take(&mut self.agents.stuck_timeout, other.agents.stuck_timeout);
         take(&mut self.agents.max_nudges, other.agents.max_nudges);
-        take(&mut self.agents.repeat_threshold, other.agents.repeat_threshold);
+        take(
+            &mut self.agents.repeat_threshold,
+            other.agents.repeat_threshold,
+        );
         take(&mut self.agents.token_budget, other.agents.token_budget);
-        take(&mut self.agents.request_timeout, other.agents.request_timeout);
+        take(
+            &mut self.agents.request_timeout,
+            other.agents.request_timeout,
+        );
         take(&mut self.agents.fanout, other.agents.fanout);
         take(&mut self.agents.synthesize, other.agents.synthesize);
         take(&mut self.agents.validate, other.agents.validate);
@@ -469,11 +476,17 @@ impl Config {
         take(&mut self.agent.token_budget, other.agent.token_budget);
         take(&mut self.agent.validate, other.agent.validate);
         take(&mut self.agent.context_limit, other.agent.context_limit);
-        take(&mut self.agent.keep_recent_turns, other.agent.keep_recent_turns);
+        take(
+            &mut self.agent.keep_recent_turns,
+            other.agent.keep_recent_turns,
+        );
         take(&mut self.agent.thinking, other.agent.thinking);
         take(&mut self.agent.pair, other.agent.pair);
         take(&mut self.decisions_dir, other.decisions_dir);
-        take(&mut self.tools.bash_timeout_secs, other.tools.bash_timeout_secs);
+        take(
+            &mut self.tools.bash_timeout_secs,
+            other.tools.bash_timeout_secs,
+        );
         take(&mut self.web.provider, other.web.provider);
         take(&mut self.web.api_key_env, other.web.api_key_env);
         take(&mut self.web.base_url, other.web.base_url);
@@ -509,7 +522,11 @@ impl Config {
     /// The two-key sequence that leaves the composer, and how fast it must be
     /// typed. `None` when disabled.
     pub fn insert_escape(&self) -> Option<(char, char, std::time::Duration)> {
-        let seq = self.tui.insert_escape.clone().unwrap_or_else(|| "jj".to_string());
+        let seq = self
+            .tui
+            .insert_escape
+            .clone()
+            .unwrap_or_else(|| "jj".to_string());
         let mut chars = seq.chars();
         let (a, b) = (chars.next()?, chars.next()?);
         if chars.next().is_some() {
@@ -534,7 +551,9 @@ impl Config {
 
     /// Where decisions are filed. Relative paths resolve against the project.
     pub fn decisions_dir(&self) -> PathBuf {
-        self.decisions_dir.clone().unwrap_or_else(|| PathBuf::from(".worksmith/decisions"))
+        self.decisions_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".worksmith/decisions"))
     }
 
     /// Whether pairing checkpoints start switched on.
@@ -562,7 +581,10 @@ impl Config {
                     Some(Thinking::Effort(e))
                 } else {
                     // A bare number in quotes is still a budget.
-                    v.parse::<u32>().ok().filter(|n| *n > 0).map(Thinking::Budget)
+                    v.parse::<u32>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .map(Thinking::Budget)
                 }
             }
         }
@@ -576,7 +598,12 @@ impl Config {
     pub fn supervisor(&self) -> SupervisorConfig {
         let d = SupervisorConfig::default();
         SupervisorConfig {
-            mode: self.agents.supervisor.as_deref().map(Mode::parse).unwrap_or(d.mode),
+            mode: self
+                .agents
+                .supervisor
+                .as_deref()
+                .map(Mode::parse)
+                .unwrap_or(d.mode),
             idle_timeout: self
                 .agents
                 .stuck_timeout
@@ -596,7 +623,12 @@ impl Config {
     /// Whether a bare `/spawn` may be split across workers by the planner.
     pub fn fanout_auto(&self) -> bool {
         !matches!(
-            self.agents.fanout.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+            self.agents
+                .fanout
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
             Some("off") | Some("none") | Some("false")
         )
     }
@@ -717,12 +749,17 @@ impl Config {
             .cloned()
             .unwrap_or_default();
         // Only loopback endpoints are inferred free; remote servers may be billed.
-        let local = reqwest::Url::parse(&provider.base_url).ok().is_some_and(|url| {
-            url.host_str().is_some_and(|host| {
-                host == "localhost" || host == "[::1]"
-                    || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
-            })
-        });
+        let local = reqwest::Url::parse(&provider.base_url)
+            .ok()
+            .is_some_and(|url| {
+                url.host_str().is_some_and(|host| {
+                    host == "localhost"
+                        || host == "[::1]"
+                        || host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                })
+            });
         if local {
             settings.input.get_or_insert(0.0);
             settings.output.get_or_insert(0.0);
@@ -748,9 +785,8 @@ pub fn read_toml_value(path: &Path) -> Result<toml::Value> {
     // `from_str`, not `text.parse()`: the latter parses a single TOML *value*,
     // so a config file (a *document* of top-level keys) fails to parse. `Value`
     // deserializes a whole document into a table.
-    let value: toml::Value = toml::from_str(&text).with_context(|| {
-        format!("parsing config {} (is it valid TOML?)", path.display())
-    })?;
+    let value: toml::Value = toml::from_str(&text)
+        .with_context(|| format!("parsing config {} (is it valid TOML?)", path.display()))?;
     Ok(value)
 }
 
@@ -888,9 +924,10 @@ pub fn load_project_instructions(start: &Path) -> String {
         for name in ["AGENTS.md", "CLAUDE.md"] {
             let p = d.join(name);
             if p.exists()
-                && let Ok(text) = std::fs::read_to_string(&p) {
-                    found.push((p, text));
-                }
+                && let Ok(text) = std::fs::read_to_string(&p)
+            {
+                found.push((p, text));
+            }
         }
     }
 
@@ -899,7 +936,10 @@ pub fn load_project_instructions(start: &Path) -> String {
     }
     let mut out = String::new();
     for (path, text) in found {
-        out.push_str(&format!("\n# Project instructions ({})\n\n", path.display()));
+        out.push_str(&format!(
+            "\n# Project instructions ({})\n\n",
+            path.display()
+        ));
         out.push_str(text.trim());
         out.push('\n');
     }
@@ -912,19 +952,25 @@ mod tests {
 
     #[test]
     fn project_mcp_entries_replace_the_entire_launch_identity() {
-        let mut global: Config = toml::from_str(r#"
+        let mut global: Config = toml::from_str(
+            r#"
             [mcp.issues]
             enabled = true
             command = "/global/server"
             args = ["--old"]
             [mcp.issues.env]
             TOKEN = "OLD_TOKEN"
-        "#).unwrap();
-        let project: Config = toml::from_str(r#"
+        "#,
+        )
+        .unwrap();
+        let project: Config = toml::from_str(
+            r#"
             [mcp.issues]
             enabled = true
             command = "/project/server"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         global.merge(project);
         assert_eq!(global.mcp["issues"].command, "/project/server");
         assert!(global.mcp["issues"].args.is_empty());
@@ -933,22 +979,45 @@ mod tests {
 
     #[test]
     fn loopback_prices_default_to_free_but_hosted_prices_remain_unknown() {
-        for endpoint in ["http://127.0.0.1:8000/v1", "http://localhost:8000/v1", "http://[::1]:8000/v1"] {
-            let config: Config = toml::from_str(&format!("[providers.local]\nbase-url = \"{endpoint}\"\n")).unwrap();
+        for endpoint in [
+            "http://127.0.0.1:8000/v1",
+            "http://localhost:8000/v1",
+            "http://[::1]:8000/v1",
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[providers.local]\nbase-url = \"{endpoint}\"\n")).unwrap();
             let resolved = config.resolve_model(Some("local/model")).unwrap();
             assert_eq!(resolved.settings.cost(1000, 100), Some(0.0));
             assert_eq!(resolved.model_key, "local/model");
         }
-        let hosted: Config = toml::from_str("[providers.remote]\nbase-url = \"https://example.com/v1\"\n").unwrap();
-        assert_eq!(hosted.resolve_model(Some("remote/model")).unwrap().settings.cost(1000, 100), None);
-        let priced: Config = toml::from_str(r#"
+        let hosted: Config =
+            toml::from_str("[providers.remote]\nbase-url = \"https://example.com/v1\"\n").unwrap();
+        assert_eq!(
+            hosted
+                .resolve_model(Some("remote/model"))
+                .unwrap()
+                .settings
+                .cost(1000, 100),
+            None
+        );
+        let priced: Config = toml::from_str(
+            r#"
             [providers.local]
             base-url = "http://127.0.0.1:8000/v1"
             [models."local/model"]
             input = 1.0
             output = 2.0
-        "#).unwrap();
-        assert_eq!(priced.resolve_model(Some("local/model")).unwrap().settings.cost(1000, 100), Some(0.0012));
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            priced
+                .resolve_model(Some("local/model"))
+                .unwrap()
+                .settings
+                .cost(1000, 100),
+            Some(0.0012)
+        );
     }
 
     /// Every key a project config sets must survive the merge.
@@ -1038,7 +1107,10 @@ mod tests {
         let got: toml::Value = toml::Value::try_from(&merged).unwrap();
         let mut lost = Vec::new();
         walk(&want, &got, String::new(), &mut lost);
-        assert!(lost.is_empty(), "these keys did not survive `merge`: {lost:?}");
+        assert!(
+            lost.is_empty(),
+            "these keys did not survive `merge`: {lost:?}"
+        );
     }
 
     /// Compare `want` against `got`, collecting the paths of anything missing or
@@ -1047,7 +1119,11 @@ mod tests {
         match want {
             toml::Value::Table(t) => {
                 for (k, v) in t {
-                    let here = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    let here = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
                     match got.get(k) {
                         Some(g) => walk(v, g, here, lost),
                         None => lost.push(here),
@@ -1093,7 +1169,10 @@ mod tests {
         global.merge(project);
 
         let p = &global.providers["omlx"];
-        assert_eq!(p.base_url, "http://127.0.0.1:8100/v1", "the project's URL wins");
+        assert_eq!(
+            p.base_url, "http://127.0.0.1:8100/v1",
+            "the project's URL wins"
+        );
         assert_eq!(
             p.reasoning_budget_param.as_deref(),
             Some("thinking_budget"),
@@ -1137,7 +1216,11 @@ mod tests {
         global.merge(project);
 
         assert!(global.pair(), "the project's `pair` must win");
-        assert_eq!(global.max_steps(), 99, "a key the project omits keeps the global value");
+        assert_eq!(
+            global.max_steps(),
+            99,
+            "a key the project omits keeps the global value"
+        );
         assert_eq!(global.model.as_deref(), Some("g/m"));
     }
 
@@ -1173,7 +1256,11 @@ mod tests {
         let m = &global.models["p/m"];
         assert_eq!(m.input, Some(0.3), "the project's price wins");
         assert_eq!(m.output, Some(1.2), "the project's price wins");
-        assert_eq!(m.temperature, Some(0.6), "a field the block omits keeps the global value");
+        assert_eq!(
+            m.temperature,
+            Some(0.6),
+            "a field the block omits keeps the global value"
+        );
         assert_eq!(m.top_p, Some(0.95));
         assert_eq!(m.top_k, Some(20));
         assert_eq!(m.context, Some(32000));

@@ -56,7 +56,13 @@ fn a_fork_onto_another_model_takes_its_context_window_too() {
         model_key: "test/model".into(),
         client: Arc::new(Silent),
         model: "cheap/model".to_string(),
-        settings: ModelSettings { input: Some(0.1), output: Some(0.2), top_p: Some(0.8), top_k: Some(20), ..Default::default() },
+        settings: ModelSettings {
+            input: Some(0.1),
+            output: Some(0.2),
+            top_p: Some(0.8),
+            top_k: Some(20),
+            ..Default::default()
+        },
         context_limit: 8_192,
         temperature: Some(0.6),
         missing_key_env: None,
@@ -70,12 +76,19 @@ fn a_fork_onto_another_model_takes_its_context_window_too() {
     assert_eq!(active.prices.cost(1_000_000, 1_000_000), Some(0.3_f64));
     // The bug: these four came from the parent, so an 8k worker ran with the
     // session's 32k window and compaction never fired.
-    assert_eq!(active.context_limit, 8_192, "the window must move with the model");
+    assert_eq!(
+        active.context_limit, 8_192,
+        "the window must move with the model"
+    );
     assert_eq!(active.temperature, Some(0.6));
     assert_eq!(active.top_p, Some(0.8));
     assert_eq!(active.top_k, Some(20));
 
-    assert_eq!(parent.current().context_limit, 32_000, "the parent is untouched");
+    assert_eq!(
+        parent.current().context_limit,
+        32_000,
+        "the parent is untouched"
+    );
 }
 
 /// A switch mid-session must not retarget work already running.
@@ -89,7 +102,11 @@ fn a_fork_does_not_share_the_parents_model_cell() {
     swapped.context_limit = 4_096;
     parent.set_model(swapped);
 
-    assert_eq!(worker.current().model, "test/model", "a running worker keeps its model");
+    assert_eq!(
+        worker.current().model,
+        "test/model",
+        "a running worker keeps its model"
+    );
     assert_eq!(worker.current().context_limit, 32_000);
     assert_eq!(parent.current().model, "other/model");
 }

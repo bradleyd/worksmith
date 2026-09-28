@@ -113,9 +113,16 @@ struct SessionFilter {
 }
 #[derive(Subcommand, Debug)]
 enum SessionAction {
-    List { #[command(flatten)] filter: SessionFilter },
+    List {
+        #[command(flatten)]
+        filter: SessionFilter,
+    },
     /// Find sessions whose JSONL transcript matches a ripgrep regular expression.
-    Search { pattern: String, #[command(flatten)] filter: SessionFilter },
+    Search {
+        pattern: String,
+        #[command(flatten)]
+        filter: SessionFilter,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -238,16 +245,38 @@ async fn run(args: Args) -> Result<()> {
     }
 
     if let Some(Cmd::Sessions { action }) = &args.cmd {
-        let filter = match action { SessionAction::List { filter } | SessionAction::Search { filter, .. } => filter };
-        let range = worksmith::session::store::DateRange::new(filter.date.as_deref().or(filter.from.as_deref()), filter.date.as_deref().or(filter.to.as_deref()))?;
-        let project = filter.project.as_ref().map(std::path::absolute).transpose()?;
-        let entries = match action {
-            SessionAction::List { .. } => worksmith::session::store::list(range, project.as_deref())?,
-            SessionAction::Search { pattern, .. } => worksmith::session::store::search(pattern, range, project.as_deref()).await?,
+        let filter = match action {
+            SessionAction::List { filter } | SessionAction::Search { filter, .. } => filter,
         };
-        if entries.is_empty() { println!("No matching sessions."); }
+        let range = worksmith::session::store::DateRange::new(
+            filter.date.as_deref().or(filter.from.as_deref()),
+            filter.date.as_deref().or(filter.to.as_deref()),
+        )?;
+        let project = filter
+            .project
+            .as_ref()
+            .map(std::path::absolute)
+            .transpose()?;
+        let entries = match action {
+            SessionAction::List { .. } => {
+                worksmith::session::store::list(range, project.as_deref())?
+            }
+            SessionAction::Search { pattern, .. } => {
+                worksmith::session::store::search(pattern, range, project.as_deref()).await?
+            }
+        };
+        if entries.is_empty() {
+            println!("No matching sessions.");
+        }
         for entry in entries {
-            println!("{} · {} · {}\n  {}\n  {}", entry.metadata.id, worksmith::session::store::Date::from_unix(entry.metadata.created), entry.metadata.cwd, entry.metadata.title, entry.path.display());
+            println!(
+                "{} · {} · {}\n  {}\n  {}",
+                entry.metadata.id,
+                worksmith::session::store::Date::from_unix(entry.metadata.created),
+                entry.metadata.cwd,
+                entry.metadata.title,
+                entry.path.display()
+            );
         }
         return Ok(());
     }
@@ -274,7 +303,10 @@ async fn run(args: Args) -> Result<()> {
     if let Some(Cmd::Stats { session_id, json }) = &args.cmd {
         let path = Session::path_for_id(session_id)?;
         if *json || args.mode.as_deref() == Some("json") {
-            println!("{}", serde_json::to_string_pretty(&worksmith::metrics::load(&path)?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&worksmith::metrics::load(&path)?)?
+            );
         } else {
             println!("{}", worksmith::metrics::session_report(&path)?.join("\n"));
         }
@@ -310,7 +342,9 @@ async fn run(args: Args) -> Result<()> {
         // The renderer has to exist before the work starts, or `--mode json`
         // reports a silent, tokenless run — which is exactly what it did.
         let renderer = spawn_renderer(bus.subscribe(), mode);
-        bus.emit(Event::SessionStarted { id: session.id.clone() });
+        bus.emit(Event::SessionStarted {
+            id: session.id.clone(),
+        });
         let outcome = run_spawn(
             &args,
             &config,
@@ -717,7 +751,9 @@ async fn run_spawn(
         .filter(|w| w.status == WorkerStatus::Done)
         .count();
     if succeeded == 0 {
-        if json { let _ = writeln!(stdout(), "{body}"); }
+        if json {
+            let _ = writeln!(stdout(), "{body}");
+        }
         // Name the reasons here rather than pointing at output above: worker
         // headlines are only printed when *not* in --mode json, so in the mode
         // an eval harness uses there was nothing above at all. Three separate
@@ -741,7 +777,9 @@ async fn run_spawn(
     }
 
     if *no_synthesis || !config.synthesize() || succeeded < 2 {
-        if json { let _ = writeln!(stdout(), "{body}"); }
+        if json {
+            let _ = writeln!(stdout(), "{body}");
+        }
         return Ok(());
     }
 
@@ -1052,7 +1090,9 @@ async fn handle_command(
                 eprintln!("usage: /stats [session-id]");
                 return CommandResult::Handled;
             }
-            let path = id.map(Session::path_for_id).unwrap_or_else(|| Ok(session.path().to_path_buf()));
+            let path = id
+                .map(Session::path_for_id)
+                .unwrap_or_else(|| Ok(session.path().to_path_buf()));
             match path.and_then(|p| worksmith::metrics::session_report(&p)) {
                 Ok(lines) => println!("{}", lines.join("\n")),
                 Err(e) => eprintln!("stats: {e}"),

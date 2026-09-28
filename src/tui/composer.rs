@@ -216,7 +216,11 @@ impl Composer {
         let (start, candidates) = compute_completions(&self.input, cwd, mem, config)?;
         self.input.truncate(start);
         self.input.push_str(&candidates[0]);
-        let compl = Completion { candidates, idx: 0, token_start: start };
+        let compl = Completion {
+            candidates,
+            idx: 0,
+            token_start: start,
+        };
         let status = completion_status(&compl);
         self.cursor = self.char_len();
         self.completion = Some(compl);
@@ -249,7 +253,12 @@ impl Composer {
         }
         // Keep the highlighted row where it was if it is still in range, so
         // typing one more character doesn't jump the selection around.
-        let selected = self.hint.as_ref().map(|h| h.selected).unwrap_or(0).min(items.len() - 1);
+        let selected = self
+            .hint
+            .as_ref()
+            .map(|h| h.selected)
+            .unwrap_or(0)
+            .min(items.len() - 1);
         let mut ov = Overlay::new("commands", items);
         ov.selected = selected;
         self.hint = Some(ov);
@@ -269,7 +278,12 @@ fn completion_status(c: &Completion) -> String {
         .take(8)
         .map(|s| s.trim().trim_start_matches('@').to_string())
         .collect();
-    format!("⇥ {}/{}  {}", c.idx + 1, c.candidates.len(), preview.join("  "))
+    format!(
+        "⇥ {}/{}  {}",
+        c.idx + 1,
+        c.candidates.len(),
+        preview.join("  ")
+    )
 }
 
 /// Compute completion candidates for the current (last) token. Returns the byte
@@ -285,8 +299,10 @@ pub(super) fn compute_completions(
 
     // @path references anywhere.
     if let Some(rest) = token.strip_prefix('@') {
-        let cands: Vec<String> =
-            complete_path(rest, cwd).into_iter().map(|p| format!("@{p}")).collect();
+        let cands: Vec<String> = complete_path(rest, cwd)
+            .into_iter()
+            .map(|p| format!("@{p}"))
+            .collect();
         return (!cands.is_empty()).then_some((token_start, cands));
     }
 
@@ -344,7 +360,9 @@ fn arg_completions(
         "think" if prev == 1 => {
             // Servers disagree about which levels exist: OpenRouter documents
             // minimal..max, and some vLLM builds accept only xhigh/medium/low.
-            &["on", "off", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "2000"]
+            &[
+                "on", "off", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "2000",
+            ]
         }
         "model" if prev == 1 => {
             // Config-driven, so it cannot go stale the way a hardcoded list
@@ -410,7 +428,12 @@ fn arg_completions(
         },
         _ => return None,
     };
-    Some(opts.iter().filter(|o| o.starts_with(token)).map(|o| format!("{o} ")).collect())
+    Some(
+        opts.iter()
+            .filter(|o| o.starts_with(token))
+            .map(|o| format!("{o} "))
+            .collect(),
+    )
 }
 
 /// Short ids matching `token`. `pending_only` narrows to proposals, which is
@@ -420,7 +443,8 @@ fn memory_id_candidates(mem: &MemoryStore, token: &str, pending_only: bool) -> V
     let ids = if pending_only {
         mem.pending_ids()
     } else {
-        mem.list(None).map(|rows| rows.into_iter().map(|r| r.id).collect())
+        mem.list(None)
+            .map(|rows| rows.into_iter().map(|r| r.id).collect())
     };
     ids.unwrap_or_default()
         .iter()

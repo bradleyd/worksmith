@@ -1,12 +1,12 @@
 //! Built-in tools and the registry that exposes them to the model. Each tool
 //! advertises a JSON Schema and returns a structured [`ToolOutput`].
 
-mod bash;
 pub mod approval;
+mod bash;
 mod checkpoint;
-pub mod policy;
 mod doc;
 mod edit;
+pub mod policy;
 mod read;
 mod recall;
 mod search;
@@ -100,9 +100,9 @@ impl Default for ToolContext {
             approver: std::sync::Arc::new(approval::AutoApprove),
             loaded_skills: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             asker: std::sync::Arc::new(approval::NoOneToAsk),
-            checkpoints_left: std::sync::Arc::new(
-                std::sync::atomic::AtomicUsize::new(CHECKPOINTS_PER_TURN),
-            ),
+            checkpoints_left: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                CHECKPOINTS_PER_TURN,
+            )),
             decisions_dir: PathBuf::from(".worksmith/decisions"),
         }
     }
@@ -135,7 +135,11 @@ fn cap(mut out: ToolOutput) -> ToolOutput {
         .content
         .lines()
         .map(|l| match l.split_once('\t') {
-            Some((n, rest)) if !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()) => rest,
+            Some((n, rest))
+                if !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()) =>
+            {
+                rest
+            }
             _ => l,
         })
         .collect::<Vec<_>>()
@@ -177,7 +181,8 @@ fn cap(mut out: ToolOutput) -> ToolOutput {
         ));
     }
     if !outline.is_empty() {
-        out.content.push_str("\n[the full content is organized under these headings:\n");
+        out.content
+            .push_str("\n[the full content is organized under these headings:\n");
         for h in outline {
             out.content.push_str(&format!("  {h}\n"));
         }
@@ -197,14 +202,26 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false, fatal: false }
+        Self {
+            content: content.into(),
+            is_error: false,
+            fatal: false,
+        }
     }
     pub fn error(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true, fatal: false }
+        Self {
+            content: content.into(),
+            is_error: true,
+            fatal: false,
+        }
     }
     /// A hard stop: the command was refused and the turn should end immediately.
     pub fn blocked(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true, fatal: true }
+        Self {
+            content: content.into(),
+            is_error: true,
+            fatal: true,
+        }
     }
 }
 
@@ -305,7 +322,11 @@ impl ToolRegistry {
 
     /// Tool definitions to advertise to the model, in registration order.
     pub fn defs(&self) -> Vec<ToolDef> {
-        self.order.iter().filter_map(|n| self.tools.get(n)).map(|t| t.to_def()).collect()
+        self.order
+            .iter()
+            .filter_map(|n| self.tools.get(n))
+            .map(|t| t.to_def())
+            .collect()
     }
 
     /// Run a tool by name. Unknown tools return an error output (fed back to the

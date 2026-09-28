@@ -71,7 +71,9 @@ impl Tool for EditTool {
 
         let ops = match collect_ops(&args) {
             Ok(ops) if ops.is_empty() => {
-                return ToolOutput::error("no edits provided (need old_string/new_string or edits[])");
+                return ToolOutput::error(
+                    "no edits provided (need old_string/new_string or edits[])",
+                );
             }
             Ok(ops) => ops,
             Err(e) => return ToolOutput::error(e),
@@ -125,9 +127,19 @@ fn collect_ops(args: &Value) -> Result<Vec<EditOp>, String> {
 
     // Single-edit form.
     if let Some(old) = args.get("old_string").and_then(|v| v.as_str()) {
-        let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
-        ops.push(EditOp { old: old.to_string(), new: new.to_string(), replace_all });
+        let new = args
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        ops.push(EditOp {
+            old: old.to_string(),
+            new: new.to_string(),
+            replace_all,
+        });
     }
 
     // Multi-edit form.
@@ -138,8 +150,15 @@ fn collect_ops(args: &Value) -> Result<Vec<EditOp>, String> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("edits[{i}]: missing old_string"))?;
             let new = e.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-            let replace_all = e.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
-            ops.push(EditOp { old: old.to_string(), new: new.to_string(), replace_all });
+            let replace_all = e
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            ops.push(EditOp {
+                old: old.to_string(),
+                new: new.to_string(),
+                replace_all,
+            });
         }
     }
 

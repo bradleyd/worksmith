@@ -6,7 +6,11 @@ use super::overlay::OverlayItem;
 
 /// `7900` -> `7.9k`. The footer has room for a number, not a paragraph.
 pub(super) fn compact_tokens(n: u32) -> String {
-    if n >= 1000 { format!("{:.1}k", n as f32 / 1000.0) } else { n.to_string() }
+    if n >= 1000 {
+        format!("{:.1}k", n as f32 / 1000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// The left half of the footer: model, context, and the token/cost/thinking/
@@ -23,10 +27,17 @@ pub(super) fn footer_string(app: &App) -> String {
     // nothing is otherwise indistinguishable from one that is merely slow.
     let live = (app.step_reasoning_chars / 4) as u32;
     let reasoning = live.max(app.last_reasoning_tokens);
-    let reasoning =
-        if reasoning > 0 { format!("  ↻{}", compact_tokens(reasoning)) } else { String::new() };
+    let reasoning = if reasoning > 0 {
+        format!("  ↻{}", compact_tokens(reasoning))
+    } else {
+        String::new()
+    };
     // "length" means the model was cut off rather than finished.
-    let cut = if app.last_finish_reason.as_deref() == Some("length") { "  ⚠cut" } else { "" };
+    let cut = if app.last_finish_reason.as_deref() == Some("length") {
+        "  ⚠cut"
+    } else {
+        ""
+    };
     // Sum request-time prices; switching models must not reprice past calls.
     let cost = match &app.recorded_spend {
         s if s.calls == 0 => String::new(),
@@ -81,8 +92,11 @@ pub(super) fn footer_string(app: &App) -> String {
     }
     // A space after the glyph, which is the whole complaint the previous one
     // earned: `⧉1196 tok` ran the symbol into the digits and read as one token.
-    let agents =
-        if bits.is_empty() { String::new() } else { format!("  🤖 {}", bits.join(" · ")) };
+    let agents = if bits.is_empty() {
+        String::new()
+    } else {
+        format!("  🤖 {}", bits.join(" · "))
+    };
     let tail = format!("{agents}{reasoning}{cut}{cost}{fast}");
     format!(
         " {}  ctx {}% ({}/{})  ↓{}{}",
@@ -97,9 +111,17 @@ pub(super) fn footer_status(app: &App) -> String {
         format!("⏸ waiting for you  {}", app.status)
     } else if app.running || app.compacting {
         const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let start = if app.running { app.turn_start } else { app.compact_start };
+        let start = if app.running {
+            app.turn_start
+        } else {
+            app.compact_start
+        };
         let elapsed = start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        format!("{} {elapsed}s  {}", SPIN[app.spinner % SPIN.len()], app.status)
+        format!(
+            "{} {elapsed}s  {}",
+            SPIN[app.spinner % SPIN.len()],
+            app.status
+        )
     } else {
         app.status.clone()
     }
@@ -117,7 +139,9 @@ fn footer_paragraph<'a>(width: u16, left: &'a str, status: &'a str) -> Paragraph
 }
 
 pub(super) fn footer_height(width: u16, left: &str, status: &str) -> u16 {
-    footer_paragraph(width, left, status).line_count(width).min(u16::MAX as usize) as u16
+    footer_paragraph(width, left, status)
+        .line_count(width)
+        .min(u16::MAX as usize) as u16
 }
 
 pub(super) fn render_footer(f: &mut Frame, area: Rect, left: &str, status: &str) {
@@ -164,10 +188,20 @@ mod tests {
             let height = footer_height(width, metrics, status);
             assert!(height > 1);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|f| render_footer(f, f.area(), metrics, status)).unwrap();
-            let text: String =
-                terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-            assert!(text.contains("STATUS_END"), "status clipped at width {width}");
+            terminal
+                .draw(|f| render_footer(f, f.area(), metrics, status))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(
+                text.contains("STATUS_END"),
+                "status clipped at width {width}"
+            );
         }
         assert_eq!(footer_height(10, "界界界", "ok"), 1);
         assert_eq!(footer_height(9, "界界界", "ok"), 2);

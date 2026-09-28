@@ -147,7 +147,10 @@ mod kill_tests {
     #[tokio::test]
     async fn failed_pipeline_stages_do_not_report_success_or_run_the_next_check() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext { cwd: dir.path().to_path_buf(), ..Default::default() };
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         let out = BashTool.run(json!({"command":
             "worksmith_missing_test_executable_7821 2>&1 | tail -1 && printf ran > second-check"
         }), &ctx).await;
@@ -252,9 +255,8 @@ mod kill_tests {
 
         let marker = dir.path().join("survived");
         let cmd = format!("sleep 1; touch {}", marker.display());
-        let running = tokio::spawn(async move {
-            BashTool.run(json!({ "command": cmd }), &ctx).await
-        });
+        let running =
+            tokio::spawn(async move { BashTool.run(json!({ "command": cmd }), &ctx).await });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         cancel.cancel();
@@ -266,6 +268,9 @@ mod kill_tests {
         assert!(out.content.contains("cancelled"), "{}", out.content);
 
         tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert!(!marker.exists(), "cancelling must end the process, not orphan it");
+        assert!(
+            !marker.exists(),
+            "cancelling must end the process, not orphan it"
+        );
     }
 }

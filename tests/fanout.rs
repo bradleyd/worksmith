@@ -27,7 +27,10 @@ impl LlmClient for DoneClient {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        Ok(Completion { content: Some("finished".into()), ..Default::default() })
+        Ok(Completion {
+            content: Some("finished".into()),
+            ..Default::default()
+        })
     }
 }
 
@@ -53,10 +56,12 @@ impl LlmClient for ScriptedClient {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| "finished".to_string());
-        Ok(Completion { content: Some(text), ..Default::default() })
+        Ok(Completion {
+            content: Some(text),
+            ..Default::default()
+        })
     }
 }
-
 
 /// A test override. Settings are what a model with no `[models."…"]` entry
 /// resolves to, so these tests exercise the plain case; the fields exist
@@ -145,7 +150,10 @@ async fn planner_splits_a_request_into_workers() {
     let agent = Arc::new(agent_with(client, dir.path()));
 
     // The planner is just a one-shot `ask`; the TUI wraps it in a task.
-    let text = agent.ask("split it", "3 articles on sqlite", 512).await.unwrap();
+    let text = agent
+        .ask("split it", "3 articles on sqlite", 512)
+        .await
+        .unwrap();
     let tasks: Vec<String> = text.lines().map(str::to_string).collect();
     assert_eq!(tasks.len(), 3);
 
@@ -164,7 +172,10 @@ async fn planner_splits_a_request_into_workers() {
         assert_eq!(mgr.get(id).unwrap().status, WorkerStatus::Done);
     }
     let tasks: Vec<String> = mgr.list().into_iter().map(|w| w.task).collect();
-    assert!(tasks.iter().any(|t| t.contains("FTS5")), "subtask text reached the worker");
+    assert!(
+        tasks.iter().any(|t| t.contains("FTS5")),
+        "subtask text reached the worker"
+    );
 }
 
 /// The parent's own steering mailbox is how a worker report reaches a turn
@@ -182,10 +193,16 @@ impl LlmClient for LoopUntilSeen {
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
         let seen = req.messages.iter().any(|m| {
-            m.content.as_deref().map(|c| c.contains(self.needle)).unwrap_or(false)
+            m.content
+                .as_deref()
+                .map(|c| c.contains(self.needle))
+                .unwrap_or(false)
         });
         if seen {
-            return Ok(Completion { content: Some("got the report".into()), ..Default::default() });
+            return Ok(Completion {
+                content: Some("got the report".into()),
+                ..Default::default()
+            });
         }
         Ok(Completion {
             tool_calls: vec![worksmith::llm::ToolCall {
@@ -203,7 +220,9 @@ async fn a_worker_report_reaches_a_running_parent_turn() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(agent_with(
-        Arc::new(LoopUntilSeen { needle: "[w1] done" }),
+        Arc::new(LoopUntilSeen {
+            needle: "[w1] done",
+        }),
         dir.path(),
     ));
     let mut session = worksmith::session::Session::create(dir.path()).unwrap();
@@ -211,14 +230,24 @@ async fn a_worker_report_reaches_a_running_parent_turn() {
     let steering = agent.steering();
     let a = agent.clone();
     let turn = tokio::spawn(async move {
-        a.run_turn(&mut session, "keep working", "system", None, CancellationToken::new()).await
+        a.run_turn(
+            &mut session,
+            "keep working",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
     });
 
     // A worker finishes while the parent is mid-turn.
     steering.push("A background worker you spawned finished.\n\n[w1] done — task: find hashmaps");
 
     let result = turn.await.unwrap().unwrap();
-    assert_eq!(result.text, "got the report", "the parent turn consumed the worker report");
+    assert_eq!(
+        result.text, "got the report",
+        "the parent turn consumed the worker report"
+    );
 }
 
 /// Records which model name each request asked for, so a test can prove a
@@ -236,7 +265,10 @@ impl LlmClient for ModelRecordingClient {
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
         self.seen.lock().unwrap().push(req.model.clone());
-        Ok(Completion { content: Some("done".into()), ..Default::default() })
+        Ok(Completion {
+            content: Some("done".into()),
+            ..Default::default()
+        })
     }
 }
 
@@ -246,8 +278,12 @@ async fn workers_run_on_the_overridden_model() {
     let dir = tempfile::tempdir().unwrap();
 
     // The parent is on "smart"; workers are pointed at "cheap" with its own client.
-    let parent = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
-    let cheap = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let parent = Arc::new(ModelRecordingClient {
+        seen: Mutex::new(Vec::new()),
+    });
+    let cheap = Arc::new(ModelRecordingClient {
+        seen: Mutex::new(Vec::new()),
+    });
     let agent = Arc::new(agent_with(parent.clone(), dir.path()));
 
     let over = over(cheap.clone(), "cheap-model");
@@ -286,9 +322,15 @@ async fn workers_run_on_the_overridden_model() {
 async fn a_per_spawn_model_beats_the_default_and_queued_work_keeps_it() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
-    let parent = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
-    let default_m = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
-    let chosen = Arc::new(ModelRecordingClient { seen: Mutex::new(Vec::new()) });
+    let parent = Arc::new(ModelRecordingClient {
+        seen: Mutex::new(Vec::new()),
+    });
+    let default_m = Arc::new(ModelRecordingClient {
+        seen: Mutex::new(Vec::new()),
+    });
+    let chosen = Arc::new(ModelRecordingClient {
+        seen: Mutex::new(Vec::new()),
+    });
     let agent = Arc::new(agent_with(parent, dir.path()));
 
     // Cap of 1 so the second and third tasks queue and must carry the override.
@@ -313,7 +355,11 @@ async fn a_per_spawn_model_beats_the_default_and_queued_work_keeps_it() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    assert_eq!(chosen.seen.lock().unwrap().len(), 3, "all three, including queued ones");
+    assert_eq!(
+        chosen.seen.lock().unwrap().len(),
+        3,
+        "all three, including queued ones"
+    );
     assert!(
         default_m.seen.lock().unwrap().is_empty(),
         "an explicit --model must beat agents.model for every worker in the fan-out"

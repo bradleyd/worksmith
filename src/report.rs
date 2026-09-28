@@ -36,7 +36,10 @@ pub fn common_opening(tasks: &[String]) -> Option<(String, Vec<String>)> {
     let mut n = first.len();
     for t in &tasks[1..] {
         n = n.min(
-            t.chars().zip(first.iter()).take_while(|(a, b)| a == *b).count(),
+            t.chars()
+                .zip(first.iter())
+                .take_while(|(a, b)| a == *b)
+                .count(),
         );
         if n == 0 {
             return None;
@@ -54,7 +57,13 @@ pub fn common_opening(tasks: &[String]) -> Option<(String, Vec<String>)> {
     }
     let tails = tasks
         .iter()
-        .map(|t| t.chars().skip(n).collect::<String>().trim_start().to_string())
+        .map(|t| {
+            t.chars()
+                .skip(n)
+                .collect::<String>()
+                .trim_start()
+                .to_string()
+        })
         .collect();
     Some((shared, tails))
 }
@@ -147,7 +156,11 @@ pub fn worker_headline(w: &WorkerSummary) -> String {
         Some(reason) => format!(" · supervisor stopped it ({reason})"),
         None => String::new(),
     };
-    let empty = if w.did_nothing() { " · produced nothing" } else { "" };
+    let empty = if w.did_nothing() {
+        " · produced nothing"
+    } else {
+        ""
+    };
 
     // What to actually do about it. A finished worker is a decision point, and
     // the two things a reader wants are the diff and the full result.
@@ -196,7 +209,10 @@ pub fn worker_detail(w: &WorkerSummary) -> String {
     } else {
         out.push_str(&format!("\n\nWorker summary\n{}", w.result));
     }
-    out.push_str(&format!("\n\n{}", validation_detail(w.validation.as_ref(), None, w.check_passed)));
+    out.push_str(&format!(
+        "\n\n{}",
+        validation_detail(w.validation.as_ref(), None, w.check_passed)
+    ));
     if let Ok(path) = crate::session::Session::path_for_id(&w.session_id) {
         out.push_str(&format!("\n\nSession: {}", path.display()));
     }
@@ -204,7 +220,11 @@ pub fn worker_detail(w: &WorkerSummary) -> String {
 }
 
 /// Old records still render a readable outcome without inventing output.
-pub fn validation_detail(report: Option<&crate::validation::CheckReport>, command: Option<&str>, passed: Option<bool>) -> String {
+pub fn validation_detail(
+    report: Option<&crate::validation::CheckReport>,
+    command: Option<&str>,
+    passed: Option<bool>,
+) -> String {
     if let Some(report) = report {
         return report.display();
     }
@@ -212,7 +232,8 @@ pub fn validation_detail(report: Option<&crate::validation::CheckReport>, comman
         Some(true) => "Validation · Passed (output not recorded)",
         Some(false) => "Validation · Failed (output not recorded)",
         None => "Validation · No recorded result",
-    }.to_string();
+    }
+    .to_string();
     if let Some(command) = command {
         text.push_str(&format!("\n$ {command}"));
     }
@@ -248,7 +269,11 @@ pub fn worker_block(w: &WorkerSummary) -> String {
              Treat this result as unverified — the work may not have happened.",
         );
     }
-    let body = if w.result.trim().is_empty() { &w.last } else { &w.result };
+    let body = if w.result.trim().is_empty() {
+        &w.last
+    } else {
+        &w.result
+    };
     out.push_str(&format!("\n{}", truncate_chars(body, WORKER_REPORT_LIMIT)));
     out
 }
@@ -257,7 +282,10 @@ pub fn worker_block(w: &WorkerSummary) -> String {
 pub const WORKER_REPORT_LIMIT: usize = 4_000;
 
 pub fn single_report(w: &WorkerSummary) -> String {
-    format!("A background worker you spawned finished.\n\n{}", worker_block(w))
+    format!(
+        "A background worker you spawned finished.\n\n{}",
+        worker_block(w)
+    )
 }
 
 pub fn group_report(acc: &GroupAcc) -> String {
@@ -271,7 +299,6 @@ pub fn group_report(acc: &GroupAcc) -> String {
     }
     out
 }
-
 
 /// Cap a block of text on a char boundary, keeping its line structure (unlike
 /// [`truncate`], which flattens to one line for status rows).
@@ -293,7 +320,6 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,18 +336,27 @@ mod tests {
             "Read CONVENTIONS.md and DOCS_PLAN.md, then draft an outline for a \"Why This Harness\" section".to_string(),
         ];
         let (shared, tails) = common_opening(&tasks).expect("a long shared opening");
-        assert_eq!(shared, "Read CONVENTIONS.md and DOCS_PLAN.md, then draft an outline for a");
+        assert_eq!(
+            shared,
+            "Read CONVENTIONS.md and DOCS_PLAN.md, then draft an outline for a"
+        );
         assert_eq!(tails[0], "\"Getting Started\" section");
         assert_eq!(tails[1], "\"Why This Harness\" section");
     }
 
     #[test]
     fn nothing_is_hoisted_when_there_is_little_or_nothing_in_common() {
-        let distinct = vec!["Update the README".to_string(), "Refactor the parser".to_string()];
+        let distinct = vec![
+            "Update the README".to_string(),
+            "Refactor the parser".to_string(),
+        ];
         assert!(common_opening(&distinct).is_none(), "no shared opening");
 
         // Shared but too short to be what is crowding the line out.
-        let short = vec!["Fix the parser bug".to_string(), "Fix the render bug".to_string()];
+        let short = vec![
+            "Fix the parser bug".to_string(),
+            "Fix the render bug".to_string(),
+        ];
         assert!(common_opening(&short).is_none());
 
         let one = vec!["Only one task here, nothing to compare it against".to_string()];
@@ -392,7 +427,11 @@ mod tests {
         let mut groups: Vec<GroupAcc> = Vec::new();
         assert!(record_in_group(&mut groups, 1, "a", 2, summary("w1", "t", "r")).is_none());
         assert!(record_in_group(&mut groups, 2, "b", 1, summary("w2", "t", "r")).is_some());
-        assert_eq!(groups.len(), 1, "group 1 is untouched by group 2 completing");
+        assert_eq!(
+            groups.len(),
+            1,
+            "group 1 is untouched by group 2 completing"
+        );
         assert!(record_in_group(&mut groups, 1, "a", 2, summary("w3", "t", "r")).is_some());
     }
 
@@ -435,7 +474,6 @@ mod tests {
 
     #[test]
     fn a_group_report_carries_every_worker_to_the_parent() {
-        
         let acc = GroupAcc {
             group: 1,
             request: "3 articles on sqlite".into(),
@@ -447,8 +485,18 @@ mod tests {
             ],
         };
         let report = group_report(&acc);
-        assert!(report.contains("3 articles on sqlite"), "the original ask is restated");
-        for needle in ["w1", "w2", "w3", "WAL article done", "FTS5 article done", "JSON1 article done"] {
+        assert!(
+            report.contains("3 articles on sqlite"),
+            "the original ask is restated"
+        );
+        for needle in [
+            "w1",
+            "w2",
+            "w3",
+            "WAL article done",
+            "FTS5 article done",
+            "JSON1 article done",
+        ] {
             assert!(report.contains(needle), "missing {needle} in:\n{report}");
         }
         assert!(report.contains("notes.md"), "changed files are reported");
@@ -456,10 +504,12 @@ mod tests {
 
     #[test]
     fn a_verbose_worker_cannot_blow_the_parent_context() {
-        
         let huge = "x".repeat(WORKER_REPORT_LIMIT * 3);
         let block = worker_block(&summary("w1", "dump everything", &huge));
-        assert!(block.chars().count() < WORKER_REPORT_LIMIT + 200, "result must be capped");
+        assert!(
+            block.chars().count() < WORKER_REPORT_LIMIT + 200,
+            "result must be capped"
+        );
         assert!(block.contains("truncated"));
     }
 
@@ -477,8 +527,14 @@ mod tests {
         let mut busy = summary("w5", "write draft-2.md", "");
         busy.changed.clear();
         busy.tool_calls = 6;
-        assert!(busy.did_nothing(), "read six files, wrote nothing, said nothing");
-        assert!(single_report(&w).contains("WARNING"), "the parent must be told");
+        assert!(
+            busy.did_nothing(),
+            "read six files, wrote nothing, said nothing"
+        );
+        assert!(
+            single_report(&w).contains("WARNING"),
+            "the parent must be told"
+        );
         assert!(worker_headline(&w).contains("produced nothing"));
 
         // Answering a question changes no files and is perfectly good work.
@@ -490,8 +546,11 @@ mod tests {
 
         // A one-line answer after real searching is still work. Only
         // near-silence counts as nothing.
-        let mut terse =
-        summary("w3", "does the parser handle CRLF?", "Yes — parser.rs:88 handles CRLF explicitly.");
+        let mut terse = summary(
+            "w3",
+            "does the parser handle CRLF?",
+            "Yes — parser.rs:88 handles CRLF explicitly.",
+        );
         terse.changed.clear();
         terse.tool_calls = 5;
         assert!(!terse.did_nothing(), "few words, but it looked");
@@ -504,7 +563,6 @@ mod tests {
 
     #[test]
     fn a_stopped_worker_reports_why() {
-        
         let mut w = summary("w1", "spin", "");
         w.status = crate::worker::WorkerStatus::Stopped;
         w.escalation = Some("token budget exceeded".into());
@@ -550,11 +608,23 @@ mod headline_tests {
     #[test]
     fn a_finished_worker_leads_with_whether_its_check_passed() {
         let h = worker_headline(&worker());
-        assert!(h.contains("check passed"), "the deciding fact is present: {h}");
-        assert!(h.starts_with('✓'), "and the glyph follows the check, not the status: {h}");
+        assert!(
+            h.contains("check passed"),
+            "the deciding fact is present: {h}"
+        );
+        assert!(
+            h.starts_with('✓'),
+            "and the glyph follows the check, not the status: {h}"
+        );
         assert!(h.contains("8m12s"), "how long ago it ran: {h}");
-        assert!(h.contains("git diff src/tui.rs"), "what to do about it: {h}");
-        assert!(h.contains("/agents show w1"), "where the full result is: {h}");
+        assert!(
+            h.contains("git diff src/tui.rs"),
+            "what to do about it: {h}"
+        );
+        assert!(
+            h.contains("/agents show w1"),
+            "where the full result is: {h}"
+        );
         // The supervisor's own account survives — it is still true, just no
         // longer the headline.
         assert!(h.contains("still off track"), "{h}");
@@ -568,7 +638,10 @@ mod headline_tests {
         let h = worker_headline(&w);
         assert!(h.contains("CHECK FAILED"), "{h}");
         assert!(h.starts_with('✗'), "{h}");
-        assert!(h.contains("/agents tail w1"), "a failure wants the transcript: {h}");
+        assert!(
+            h.contains("/agents tail w1"),
+            "a failure wants the transcript: {h}"
+        );
     }
 
     /// No `--until` means no verdict to report, and the line must not invent

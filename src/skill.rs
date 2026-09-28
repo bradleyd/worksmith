@@ -95,8 +95,7 @@ impl Skill {
                 let rel = path.strip_prefix(&self.dir).unwrap_or(path);
                 out.push_str(&format!("{}\n", rel.display()));
                 let base = hs.iter().map(|(l, _)| *l).min().unwrap_or(1);
-                let shown: Vec<_> =
-                    hs.iter().filter(|(l, _)| *l - base < max_depth).collect();
+                let shown: Vec<_> = hs.iter().filter(|(l, _)| *l - base < max_depth).collect();
                 let dropped = hs.len() - shown.len();
                 for (level, title) in shown {
                     out.push_str(&format!("  {} {}\n", "#".repeat(*level), title));
@@ -131,11 +130,23 @@ impl Skill {
             return SectionMatch::None;
         }
         for path in self.reference_files() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
             if want.ends_with(&*name) || name == want {
-                let rel = path.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(path.clone());
-                let hs = std::fs::read_to_string(&path).map(|t| headings(&t)).unwrap_or_default();
-                return SectionMatch::File { file: rel, headings: hs };
+                let rel = path
+                    .strip_prefix(&self.dir)
+                    .map(PathBuf::from)
+                    .unwrap_or(path.clone());
+                let hs = std::fs::read_to_string(&path)
+                    .map(|t| headings(&t))
+                    .unwrap_or_default();
+                return SectionMatch::File {
+                    file: rel,
+                    headings: hs,
+                };
             }
         }
         let mut hits: Vec<(PathBuf, String, String)> = Vec::new();
@@ -145,7 +156,11 @@ impl Skill {
             };
             for (level, title) in headings(&text) {
                 if normalize_heading(&title).contains(&want) {
-                    hits.push((path.clone(), title.clone(), section_slice(&text, level, &title)));
+                    hits.push((
+                        path.clone(),
+                        title.clone(),
+                        section_slice(&text, level, &title),
+                    ));
                 }
             }
         }
@@ -153,14 +168,19 @@ impl Skill {
             0 => SectionMatch::None,
             1 => {
                 let (path, heading, content) = hits.remove(0);
-                let rel = path.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(path);
-                SectionMatch::One { file: rel, heading, content }
+                let rel = path
+                    .strip_prefix(&self.dir)
+                    .map(PathBuf::from)
+                    .unwrap_or(path);
+                SectionMatch::One {
+                    file: rel,
+                    heading,
+                    content,
+                }
             }
             _ => SectionMatch::Many(
                 hits.into_iter()
-                    .map(|(p, h, _)| {
-                        (p.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(p), h)
-                    })
+                    .map(|(p, h, _)| (p.strip_prefix(&self.dir).map(PathBuf::from).unwrap_or(p), h))
                     .collect(),
             ),
         }
@@ -178,13 +198,20 @@ pub const MAX_MAP_CHARS: usize = 2_048;
 #[derive(Debug)]
 pub enum SectionMatch {
     None,
-    One { file: PathBuf, heading: String, content: String },
+    One {
+        file: PathBuf,
+        heading: String,
+        content: String,
+    },
     /// Ambiguity returns the candidates, not a guess: a model writing
     /// confidently from the wrong section damages the work invisibly.
     Many(Vec<(PathBuf, String)>),
     /// The query named a whole reference file; answer with its headings so the
     /// next call can name one.
-    File { file: PathBuf, headings: Vec<(usize, String)> },
+    File {
+        file: PathBuf,
+        headings: Vec<(usize, String)>,
+    },
 }
 
 /// Markdown headings (level, title) of `text`, `#` through `####`, skipping
@@ -284,7 +311,11 @@ impl SkillCatalog {
     /// in the wrong place is found by nothing and reported by nothing, so the
     /// empty case has to be able to say where it looked.
     pub fn searched(project_dir: &Path) -> Vec<(PathBuf, bool)> {
-        search_paths(project_dir).into_iter().map(|p| (p.exists(), p)).map(|(e, p)| (p, e)).collect()
+        search_paths(project_dir)
+            .into_iter()
+            .map(|p| (p.exists(), p))
+            .map(|(e, p)| (p, e))
+            .collect()
     }
 
     /// Look for a stray `SKILL.md` near the project that discovery cannot see.
@@ -446,7 +477,9 @@ fn parse_skill(path: &Path) -> Result<Skill, String> {
         return Err("`description` is empty (it's the only thing the model sees)".into());
     }
     if description.chars().count() > MAX_DESCRIPTION {
-        return Err(format!("`description` is over {MAX_DESCRIPTION} characters"));
+        return Err(format!(
+            "`description` is over {MAX_DESCRIPTION} characters"
+        ));
     }
 
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -455,7 +488,9 @@ fn parse_skill(path: &Path) -> Result<Skill, String> {
     if let Some(folder) = dir.file_name().and_then(|f| f.to_str())
         && folder != name
     {
-        return Err(format!("`name: {name}` does not match its directory `{folder}`"));
+        return Err(format!(
+            "`name: {name}` does not match its directory `{folder}`"
+        ));
     }
 
     Ok(Skill {
@@ -477,7 +512,10 @@ fn validate_name(name: &str) -> Result<(), String> {
     if name.contains("--") || name.starts_with('-') || name.ends_with('-') {
         return Err("`name` cannot start or end with `-`, or contain `--`".into());
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return Err("`name` must be lowercase letters, digits, and hyphens".into());
     }
     Ok(())
@@ -549,8 +587,13 @@ fn parse_frontmatter(text: &str) -> Result<Vec<(String, String)>, String> {
                 parts.push(lines[i].trim().to_string());
                 i += 1;
             }
-            let joined =
-                if fold { parts.join(" ") } else { parts.join("\n") }.trim().to_string();
+            let joined = if fold {
+                parts.join(" ")
+            } else {
+                parts.join("\n")
+            }
+            .trim()
+            .to_string();
             fields.push((key, joined));
             continue;
         }
@@ -605,8 +648,14 @@ mod tests {
     fn a_section_slice_keeps_its_subsections_and_stops_at_a_peer() {
         let slice = section_slice(DOC, 2, "8. Writing Style Rules");
         assert!(slice.contains("short sentences"));
-        assert!(slice.contains("### Detail"), "nested stays inside its parent");
-        assert!(!slice.contains("escape them"), "the next peer heading ends it");
+        assert!(
+            slice.contains("### Detail"),
+            "nested stays inside its parent"
+        );
+        assert!(
+            !slice.contains("escape them"),
+            "the next peer heading ends it"
+        );
     }
 
     #[test]
@@ -617,7 +666,10 @@ mod tests {
 
     #[test]
     fn numbered_headings_match_without_their_numbers() {
-        assert_eq!(normalize_heading("8. Writing Style Rules"), "writing style rules");
+        assert_eq!(
+            normalize_heading("8. Writing Style Rules"),
+            "writing style rules"
+        );
         assert_eq!(normalize_heading("Plain Title"), "plain title");
         // "v2. something" is not a list number; leave it alone.
         assert_eq!(normalize_heading("v2. Something"), "v2. something");
@@ -648,7 +700,10 @@ mod tests {
         let map = skill.map();
         assert!(map.contains("references/rules.md"), "{map}");
         assert!(map.contains("## 8. Writing Style Rules"));
-        assert!(map.contains("skill(name: \"t\", section:"), "the usage line is the teaching");
+        assert!(
+            map.contains("skill(name: \"t\", section:"),
+            "the usage line is the teaching"
+        );
     }
 
     #[test]
@@ -659,9 +714,16 @@ mod tests {
         }
         let (_g, skill) = skill_with_references(&[("big.md", &big)]);
         let map = skill.map();
-        assert!(map.len() <= MAX_MAP_CHARS + 200, "bounded: {} chars", map.len());
+        assert!(
+            map.len() <= MAX_MAP_CHARS + 200,
+            "bounded: {} chars",
+            map.len()
+        );
         assert!(map.contains("# Top"), "shallow survives");
-        assert!(map.contains("more, grep the file"), "the cut is named, never silent");
+        assert!(
+            map.contains("more, grep the file"),
+            "the cut is named, never silent"
+        );
     }
 
     #[test]
@@ -679,12 +741,19 @@ mod tests {
         match skill.find_section("references/rules.md") {
             SectionMatch::File { file, headings } => {
                 assert_eq!(file, std::path::PathBuf::from("references/rules.md"));
-                assert!(headings.iter().any(|(_, t)| t.contains("Writing Style Rules")));
+                assert!(
+                    headings
+                        .iter()
+                        .any(|(_, t)| t.contains("Writing Style Rules"))
+                );
             }
             other => panic!("expected File, got {other:?}"),
         }
         // Bare filename works too.
-        assert!(matches!(skill.find_section("rules.md"), SectionMatch::File { .. }));
+        assert!(matches!(
+            skill.find_section("rules.md"),
+            SectionMatch::File { .. }
+        ));
     }
 
     #[test]
@@ -724,7 +793,10 @@ mod tests {
         assert_eq!(s.name, "docs");
         assert_eq!(s.description, "Working with PDFs and DOCX.");
         assert!(s.body().unwrap().contains("Body here."));
-        assert!(!s.body().unwrap().contains("description:"), "frontmatter is stripped");
+        assert!(
+            !s.body().unwrap().contains("description:"),
+            "frontmatter is stripped"
+        );
     }
 
     #[test]
@@ -748,14 +820,29 @@ mod tests {
         let cases = [
             ("nodesc", "---\nname: nodesc\n---\nbody\n", "description"),
             ("noname", "---\ndescription: x\n---\nbody\n", "name"),
-            ("unclosed", "---\nname: unclosed\ndescription: x\nbody\n", "not closed"),
-            ("nofence", "name: nofence\ndescription: x\n", "missing `---`"),
-            ("Bad-Case", "---\nname: Bad-Case\ndescription: x\n---\n", "lowercase"),
+            (
+                "unclosed",
+                "---\nname: unclosed\ndescription: x\nbody\n",
+                "not closed",
+            ),
+            (
+                "nofence",
+                "name: nofence\ndescription: x\n",
+                "missing `---`",
+            ),
+            (
+                "Bad-Case",
+                "---\nname: Bad-Case\ndescription: x\n---\n",
+                "lowercase",
+            ),
         ];
         for (dirname, text, needle) in cases {
             let p = write(dir.path(), dirname, text);
             let err = parse_skill(&p).unwrap_err();
-            assert!(err.contains(needle), "{dirname}: expected {needle:?}, got {err:?}");
+            assert!(
+                err.contains(needle),
+                "{dirname}: expected {needle:?}, got {err:?}"
+            );
         }
     }
 
@@ -763,7 +850,11 @@ mod tests {
     fn name_must_match_its_directory() {
         let dir = tempfile::tempdir().unwrap();
         // Otherwise `/skill <name>` and the folder on disk disagree.
-        let p = write(dir.path(), "folder-name", "---\nname: other-name\ndescription: x\n---\n");
+        let p = write(
+            dir.path(),
+            "folder-name",
+            "---\nname: other-name\ndescription: x\n---\n",
+        );
         assert!(parse_skill(&p).unwrap_err().contains("does not match"));
     }
 
@@ -772,8 +863,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let low = dir.path().join("low");
         let high = dir.path().join("high");
-        write(&low, "dup", "---\nname: dup\ndescription: the low one\n---\n");
-        write(&high, "dup", "---\nname: dup\ndescription: the high one\n---\n");
+        write(
+            &low,
+            "dup",
+            "---\nname: dup\ndescription: the low one\n---\n",
+        );
+        write(
+            &high,
+            "dup",
+            "---\nname: dup\ndescription: the high one\n---\n",
+        );
 
         let mut cat = SkillCatalog::default();
         cat.load_dir(&low);
@@ -791,12 +890,20 @@ mod tests {
     #[test]
     fn a_malformed_skill_is_reported_not_swallowed() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "good", "---\nname: good\ndescription: fine\n---\n");
+        write(
+            dir.path(),
+            "good",
+            "---\nname: good\ndescription: fine\n---\n",
+        );
         write(dir.path(), "broken", "---\nname: broken\n---\n");
         let mut cat = SkillCatalog::default();
         cat.load_dir(dir.path());
         assert_eq!(cat.skills().len(), 1, "the good one still loads");
-        assert!(cat.notes().iter().any(|n| n.contains("broken")), "{:?}", cat.notes());
+        assert!(
+            cat.notes().iter().any(|n| n.contains("broken")),
+            "{:?}",
+            cat.notes()
+        );
     }
 
     #[test]
@@ -812,8 +919,19 @@ mod tests {
             });
         }
         let section = cat.prompt_section(MAX_CATALOG_CHARS);
-        assert!(section.len() <= MAX_CATALOG_CHARS + 200, "len {}", section.len());
-        assert!(section.contains("not listed"), "and it says what it dropped");
-        assert!(SkillCatalog::default().prompt_section(MAX_CATALOG_CHARS).is_empty());
+        assert!(
+            section.len() <= MAX_CATALOG_CHARS + 200,
+            "len {}",
+            section.len()
+        );
+        assert!(
+            section.contains("not listed"),
+            "and it says what it dropped"
+        );
+        assert!(
+            SkillCatalog::default()
+                .prompt_section(MAX_CATALOG_CHARS)
+                .is_empty()
+        );
     }
 }

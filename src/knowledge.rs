@@ -53,7 +53,10 @@ pub struct IndexStats {
 }
 
 fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl KnowledgeStore {
@@ -93,7 +96,10 @@ impl KnowledgeStore {
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .context("initializing knowledge schema")?;
-        Ok(KnowledgeStore { conn, root: root.to_path_buf() })
+        Ok(KnowledgeStore {
+            conn,
+            root: root.to_path_buf(),
+        })
     }
 
     /// Index (or re-index) the project. Files whose mtime hasn't moved since
@@ -108,7 +114,9 @@ impl KnowledgeStore {
             if !INDEXABLE.contains(&ext) {
                 continue;
             }
-            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
             if meta.len() > MAX_FILE_BYTES {
                 continue;
             }
@@ -133,8 +141,11 @@ impl KnowledgeStore {
                 continue;
             }
 
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            self.conn.execute("DELETE FROM chunks WHERE source = ?1", [&source])?;
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            self.conn
+                .execute("DELETE FROM chunks WHERE source = ?1", [&source])?;
             for (ord, chunk) in chunk_text(&text).into_iter().enumerate() {
                 self.conn.execute(
                     "INSERT INTO chunks (source, ord, text, mtime, indexed_at)
@@ -152,12 +163,14 @@ impl KnowledgeStore {
     /// path. Returns how many sources were pruned.
     pub fn prune(&self) -> Result<usize> {
         let mut stmt = self.conn.prepare("SELECT DISTINCT source FROM chunks")?;
-        let sources: Vec<String> =
-            stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let sources: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut pruned = 0;
         for s in sources {
             if !self.root.join(&s).exists() {
-                self.conn.execute("DELETE FROM chunks WHERE source = ?1", [&s])?;
+                self.conn
+                    .execute("DELETE FROM chunks WHERE source = ?1", [&s])?;
                 pruned += 1;
             }
         }
@@ -165,7 +178,9 @@ impl KnowledgeStore {
     }
 
     pub fn chunk_count(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?)
     }
 
     /// Index if the index is empty or stale, so a search never has to answer
@@ -175,9 +190,11 @@ impl KnowledgeStore {
     pub fn ensure_fresh(&self, max_age_secs: i64) -> Result<()> {
         let last: Option<i64> = self
             .conn
-            .query_row("SELECT value FROM meta WHERE key = 'last_index_at'", [], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_index_at'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
             .ok()
             .and_then(|v| v.parse().ok());
         let stale = match last {
@@ -295,7 +312,10 @@ mod tests {
         let text = "para one\n\npara two\n\n".to_string() + &"x".repeat(CHUNK_CHARS * 3);
         let chunks = chunk_text(&text);
         assert!(chunks.len() > 1, "a long document should chunk");
-        assert!(chunks.iter().all(|c| !c.trim().is_empty()), "no empty chunks");
+        assert!(
+            chunks.iter().all(|c| !c.trim().is_empty()),
+            "no empty chunks"
+        );
         assert!(chunks[0].contains("para one"));
     }
 

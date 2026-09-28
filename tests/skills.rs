@@ -37,7 +37,10 @@ fn only_the_description_reaches_the_prompt() {
     );
 
     let prompt = build_system_prompt(dir.path(), &store(dir.path()));
-    assert!(prompt.contains("<SKILLS>"), "catalog block missing:\n{prompt}");
+    assert!(
+        prompt.contains("<SKILLS>"),
+        "catalog block missing:\n{prompt}"
+    );
     assert!(prompt.contains("newsletter: Writing and reviewing the dispatch newsletter."));
     assert!(
         !prompt.contains("SECRET_BODY_MARKER"),
@@ -50,7 +53,10 @@ fn no_skills_means_no_block_at_all() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let prompt = build_system_prompt(dir.path(), &store(dir.path()));
-    assert!(!prompt.contains("<SKILLS>"), "a project with no skills should pay nothing");
+    assert!(
+        !prompt.contains("<SKILLS>"),
+        "a project with no skills should pay nothing"
+    );
 }
 
 #[test]
@@ -62,9 +68,17 @@ fn the_standard_location_is_searched_and_the_project_wins() {
     // A skill shared with every other tool that reads ~/.claude/skills.
     // `isolate_home` only moves WORKSMITH_HOME, so write into the real layout
     // under a temp HOME-like root by using the project-level standard path too.
-    write_skill(&dir.path().join(".claude").join("skills"), "shared", "the shared one", "body A");
+    write_skill(
+        &dir.path().join(".claude").join("skills"),
+        "shared",
+        "the shared one",
+        "body A",
+    );
     let cat = SkillCatalog::discover(dir.path());
-    assert!(cat.get("shared").is_some(), "a .claude/skills skill must be found");
+    assert!(
+        cat.get("shared").is_some(),
+        "a .claude/skills skill must be found"
+    );
 
     // The worksmith-specific copy overrides it, and says so.
     write_skill(
@@ -75,7 +89,11 @@ fn the_standard_location_is_searched_and_the_project_wins() {
     );
     let cat = SkillCatalog::discover(dir.path());
     assert_eq!(cat.get("shared").unwrap().description, "the worksmith one");
-    assert!(cat.notes().iter().any(|n| n.contains("overrides")), "{:?}", cat.notes());
+    assert!(
+        cat.notes().iter().any(|n| n.contains("overrides")),
+        "{:?}",
+        cat.notes()
+    );
     assert!(home.exists());
 }
 
@@ -99,9 +117,15 @@ async fn the_tool_returns_the_body_and_where_it_lives() {
         ..Default::default()
     };
 
-    let out = registry.run("skill", json!({"name": "newsletter"}), &ctx).await;
+    let out = registry
+        .run("skill", json!({"name": "newsletter"}), &ctx)
+        .await;
     assert!(!out.is_error, "{}", out.content);
-    assert!(out.content.contains("Read references/style-guide.md"), "body: {}", out.content);
+    assert!(
+        out.content.contains("Read references/style-guide.md"),
+        "body: {}",
+        out.content
+    );
     assert!(
         out.content.contains(".worksmith/skills/newsletter"),
         "must name the directory so references/ resolves: {}",
@@ -144,10 +168,18 @@ fn a_misplaced_skill_can_be_pointed_at() {
     common::isolate_home();
 
     let dir = tempfile::tempdir().unwrap();
-    write_skill(dir.path(), "bluecollar-newsletter", "house style", "the guide");
+    write_skill(
+        dir.path(),
+        "bluecollar-newsletter",
+        "house style",
+        "the guide",
+    );
     let stray = dir.path().join("bluecollar-newsletter");
 
-    assert!(SkillCatalog::discover(dir.path()).is_empty(), "not in a skills/ dir, so not loaded");
+    assert!(
+        SkillCatalog::discover(dir.path()).is_empty(),
+        "not in a skills/ dir, so not loaded"
+    );
 
     let found = SkillCatalog::misplaced(dir.path());
     assert_eq!(found.len(), 1, "but it can be spotted: {found:?}");
@@ -175,17 +207,37 @@ async fn a_skill_loads_once_and_stays_loaded() {
     let dir = tempfile::tempdir().unwrap();
     let skills = dir.path().join("skills");
     std::fs::create_dir_all(&skills).unwrap();
-    write_skill(&skills, "book-writer", "how chapters are written", "ALWAYS use the outline");
+    write_skill(
+        &skills,
+        "book-writer",
+        "how chapters are written",
+        "ALWAYS use the outline",
+    );
 
     let registry = ToolRegistry::with_builtins();
-    let ctx = ToolContext { cwd: dir.path().to_path_buf(), ..Default::default() };
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        ..Default::default()
+    };
 
-    let first = registry.run("skill", json!({"name": "book-writer"}), &ctx).await;
-    assert!(first.content.contains("ALWAYS use the outline"), "{}", first.content);
+    let first = registry
+        .run("skill", json!({"name": "book-writer"}), &ctx)
+        .await;
+    assert!(
+        first.content.contains("ALWAYS use the outline"),
+        "{}",
+        first.content
+    );
 
-    let second = registry.run("skill", json!({"name": "book-writer"}), &ctx).await;
+    let second = registry
+        .run("skill", json!({"name": "book-writer"}), &ctx)
+        .await;
     assert!(!second.is_error, "asking twice is not an error");
-    assert!(second.content.contains("already loaded"), "{}", second.content);
+    assert!(
+        second.content.contains("already loaded"),
+        "{}",
+        second.content
+    );
     assert!(
         !second.content.contains("ALWAYS use the outline"),
         "the body should not be served twice: {}",
@@ -221,10 +273,15 @@ async fn a_section_is_fetched_through_the_tool_without_loading_whole_files() {
     .unwrap();
 
     let registry = ToolRegistry::with_builtins();
-    let ctx = ToolContext { cwd: dir.path().to_path_buf(), ..Default::default() };
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        ..Default::default()
+    };
 
     // Load: the pinned text carries the map, so the model knows what exists.
-    let load = registry.run("skill", json!({"name": "book-writer"}), &ctx).await;
+    let load = registry
+        .run("skill", json!({"name": "book-writer"}), &ctx)
+        .await;
     assert!(load.content.contains("<skill-map"), "{}", load.content);
     assert!(load.content.contains("## 8. Writing Style Rules"));
     assert!(
@@ -234,16 +291,30 @@ async fn a_section_is_fetched_through_the_tool_without_loading_whole_files() {
 
     // Fetch: one section, named by file, tiny.
     let one = registry
-        .run("skill", json!({"name": "book-writer", "section": "writing style"}), &ctx)
+        .run(
+            "skill",
+            json!({"name": "book-writer", "section": "writing style"}),
+            &ctx,
+        )
         .await;
     assert!(!one.is_error, "{}", one.content);
     assert!(one.content.contains("Short sentences win"));
-    assert!(one.content.contains("writing-rules.md"), "names where it landed");
-    assert!(!one.content.contains("Escape angle brackets"), "and only that section");
+    assert!(
+        one.content.contains("writing-rules.md"),
+        "names where it landed"
+    );
+    assert!(
+        !one.content.contains("Escape angle brackets"),
+        "and only that section"
+    );
 
     // A miss teaches, not just fails: the map and the grep fallback.
     let miss = registry
-        .run("skill", json!({"name": "book-writer", "section": "nonexistent"}), &ctx)
+        .run(
+            "skill",
+            json!({"name": "book-writer", "section": "nonexistent"}),
+            &ctx,
+        )
         .await;
     assert!(miss.is_error);
     assert!(miss.content.contains("<skill-map"), "{}", miss.content);

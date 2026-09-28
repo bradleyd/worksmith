@@ -43,8 +43,15 @@ impl Tool for ReadTool {
             Err(e) => return ToolOutput::error(format!("cannot read {}: {e}", full.display())),
         };
 
-        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-        let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .max(1) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         let mut out = String::new();
         let mut count = 0usize;
@@ -54,9 +61,10 @@ impl Tool for ReadTool {
                 continue;
             }
             if let Some(lim) = limit
-                && count >= lim {
-                    break;
-                }
+                && count >= lim
+            {
+                break;
+            }
             out.push_str(&format!("{lineno:>6}\t{line}\n"));
             count += 1;
         }

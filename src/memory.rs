@@ -67,7 +67,10 @@ pub struct MemoryStore {
 }
 
 fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn open_db(path: &Path) -> Result<Connection> {
@@ -75,8 +78,8 @@ fn open_db(path: &Path) -> Result<Connection> {
         crate::config::ensure_project_dir(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let conn = Connection::open(path)
-        .with_context(|| format!("opening memory db {}", path.display()))?;
+    let conn =
+        Connection::open(path).with_context(|| format!("opening memory db {}", path.display()))?;
     // WAL + a shared busy timeout so concurrent workers (later) don't deadlock.
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.pragma_update(None, "busy_timeout", 5000).ok();
@@ -235,7 +238,10 @@ fn row_exact_term_count(row: &MemoryRow, terms: &[String]) -> usize {
         .filter(|word| !word.is_empty())
         .map(|word| word.to_ascii_lowercase())
         .collect::<HashSet<_>>();
-    terms.iter().filter(|term| row_terms.contains(*term)).count()
+    terms
+        .iter()
+        .filter(|term| row_terms.contains(*term))
+        .count()
 }
 
 fn is_turn_query_noise(word: &str, project_terms: &[String]) -> bool {
@@ -422,11 +428,14 @@ impl MemoryStore {
     /// Delete a memory by id from whichever scope holds it. Returns true if a
     /// row was removed.
     pub fn forget(&self, id: &str) -> Result<bool> {
-        let mut removed = self.global.execute("DELETE FROM memories WHERE id = ?1", [id])?;
+        let mut removed = self
+            .global
+            .execute("DELETE FROM memories WHERE id = ?1", [id])?;
         if removed == 0
-            && let Some(p) = &self.project {
-                removed = p.execute("DELETE FROM memories WHERE id = ?1", [id])?;
-            }
+            && let Some(p) = &self.project
+        {
+            removed = p.execute("DELETE FROM memories WHERE id = ?1", [id])?;
+        }
         Ok(removed > 0)
     }
 
@@ -457,9 +466,10 @@ impl MemoryStore {
             rows.extend(query_active(&self.global)?);
         }
         if scope != Some(Scope::Global)
-            && let Some(p) = &self.project {
-                rows.extend(query_active(p)?);
-            }
+            && let Some(p) = &self.project
+        {
+            rows.extend(query_active(p)?);
+        }
         Ok(rows)
     }
 
@@ -477,7 +487,10 @@ impl MemoryStore {
         if let Some(existing) = self.find_duplicate(scope, kind, subject, content)? {
             return Ok((existing, false));
         }
-        Ok((self.remember(scope, kind, subject, content, importance)?, true))
+        Ok((
+            self.remember(scope, kind, subject, content, importance)?,
+            true,
+        ))
     }
 
     /// An active memory in the same scope with the same subject+kind and the
@@ -525,7 +538,13 @@ impl MemoryStore {
             "UPDATE memories SET status = 'proposed' WHERE id = ?1",
             [&row.id],
         )?;
-        Ok((MemoryRow { status: "proposed".into(), ..row }, true))
+        Ok((
+            MemoryRow {
+                status: "proposed".into(),
+                ..row
+            },
+            true,
+        ))
     }
 
     /// Resolve a possibly-abbreviated id. Memories are keyed by UUID, and a
@@ -703,12 +722,7 @@ impl MemoryStore {
         let signal_terms = turn_query_terms(query, &self.project_terms);
 
         for (conn, is_project) in self.conns().into_iter().zip([false, true]) {
-            for (row, text_score) in fts_rows(
-                conn,
-                query,
-                for_turn_context,
-                &self.project_terms,
-            )? {
+            for (row, text_score) in fts_rows(conn, query, for_turn_context, &self.project_terms)? {
                 let exact = if normalize(&row.subject) == normalize(query) {
                     1.0
                 } else {
@@ -810,7 +824,11 @@ impl MemoryStore {
     /// importance-first, capped. Empty string if there's nothing to inject.
     pub fn memory_section(&self, limit: usize) -> Result<String> {
         let mut rows = self.list(None)?;
-        rows.sort_by(|a, b| b.importance.cmp(&a.importance).then(b.updated_at.cmp(&a.updated_at)));
+        rows.sort_by(|a, b| {
+            b.importance
+                .cmp(&a.importance)
+                .then(b.updated_at.cmp(&a.updated_at))
+        });
         rows.truncate(limit);
         if rows.is_empty() {
             return Ok(String::new());
@@ -963,8 +981,7 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<MemoryRow> {
     })
 }
 
-const COLS: &str =
-    "id, scope, kind, subject, content, importance, confidence, created_at, updated_at, supersedes_id, status";
+const COLS: &str = "id, scope, kind, subject, content, importance, confidence, created_at, updated_at, supersedes_id, status";
 
 fn query_one(conn: &Connection, id: &str) -> Result<Option<MemoryRow>> {
     let sql = format!("SELECT {COLS} FROM memories WHERE id = ?1");
@@ -1011,9 +1028,7 @@ fn query_active(conn: &Connection) -> Result<Vec<MemoryRow>> {
 }
 
 fn query_status(conn: &Connection, status: &str) -> Result<Vec<MemoryRow>> {
-    let sql = format!(
-        "SELECT {COLS} FROM memories WHERE status = ?1 ORDER BY updated_at DESC"
-    );
+    let sql = format!("SELECT {COLS} FROM memories WHERE status = ?1 ORDER BY updated_at DESC");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([status], row_from)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1041,7 +1056,10 @@ fn fts_rows(
          JOIN memories m ON m.id = memories_fts.id
          WHERE memories_fts MATCH ?1 AND m.status = 'active'
          ORDER BY rank LIMIT 50",
-        COLS.split(", ").map(|c| format!("m.{c}")).collect::<Vec<_>>().join(", ")
+        COLS.split(", ")
+            .map(|c| format!("m.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([q], |r| {

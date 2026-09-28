@@ -9,8 +9,14 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolContext, ToolOutput, resolve_path};
 
-const SKIP_DIRS: &[&str] =
-    &["target", "node_modules", "dist", "build", "vendor", "reference"];
+const SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "vendor",
+    "reference",
+];
 const MAX_HITS: usize = 500;
 /// Skip files larger than this when searching contents (lock files, blobs).
 const MAX_FILE_SIZE: u64 = 512 * 1024;
@@ -26,7 +32,9 @@ pub(crate) fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
     if out.len() >= limit {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
@@ -103,7 +111,9 @@ impl Tool for GrepTool {
             if std::fs::metadata(file).map(|m| m.len()).unwrap_or(0) > MAX_FILE_SIZE {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(file) else { continue };
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
             let rel = display_rel(&ctx.cwd, file);
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
@@ -175,7 +185,10 @@ impl Tool for FindTool {
         let mut out = String::new();
         let mut hits = 0usize;
         for file in &files {
-            let fname = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let fname = file
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if re.is_match(&fname) {
                 out.push_str(&format!("{}\n", display_rel(&ctx.cwd, file)));
                 hits += 1;

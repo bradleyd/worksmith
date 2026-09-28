@@ -6,7 +6,10 @@ pub(super) enum OverlayKind {
         active: HashSet<String>,
     },
     Reference,
-    Skills { names: HashSet<String>, loaded: HashSet<String> },
+    Skills {
+        names: HashSet<String>,
+        loaded: HashSet<String>,
+    },
 }
 
 /// Reference navigation is separate from typing so queries may contain j/k/q.
@@ -93,7 +96,10 @@ impl Overlay {
 
     pub(super) fn skills(items: Vec<OverlayItem>, names: HashSet<String>) -> Self {
         let mut overlay = Self::reference("skills", items);
-        overlay.kind = OverlayKind::Skills { names, loaded: HashSet::new() };
+        overlay.kind = OverlayKind::Skills {
+            names,
+            loaded: HashSet::new(),
+        };
         overlay
     }
 
@@ -199,8 +205,10 @@ impl Overlay {
 
     pub(super) fn scroll_by(&mut self, delta: isize) {
         if self.is_two_pane() && self.skill_focus == SkillFocus::Preview {
-            self.preview_scroll =
-                self.preview_scroll.saturating_add_signed(delta).min(self.preview_max_scroll);
+            self.preview_scroll = self
+                .preview_scroll
+                .saturating_add_signed(delta)
+                .min(self.preview_max_scroll);
         } else {
             self.move_by(delta);
         }
@@ -210,7 +218,11 @@ impl Overlay {
         if self.is_two_pane() && self.skill_focus == SkillFocus::Preview {
             self.preview_scroll = if bottom { self.preview_max_scroll } else { 0 };
         } else {
-            self.selected = if bottom { self.matched.len().saturating_sub(1) } else { 0 };
+            self.selected = if bottom {
+                self.matched.len().saturating_sub(1)
+            } else {
+                0
+            };
         }
     }
 

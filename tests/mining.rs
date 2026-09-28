@@ -12,8 +12,10 @@ use worksmith::session::Session;
 fn seed_session(cwd: &std::path::Path, turns: usize) -> String {
     let mut s = Session::create(cwd).unwrap();
     for i in 0..turns {
-        s.append_message(Message::user(format!("question {i}"))).unwrap();
-        s.append_message(Message::assistant(Some(format!("answer {i}")), vec![])).unwrap();
+        s.append_message(Message::user(format!("question {i}")))
+            .unwrap();
+        s.append_message(Message::assistant(Some(format!("answer {i}")), vec![]))
+            .unwrap();
     }
     s.id.clone()
 }
@@ -34,7 +36,10 @@ fn only_this_projects_sessions_are_mined() {
     // A lesson learned in another repo is not this project's memory, and the
     // sessions directory is global — so the cwd filter is the whole safeguard.
     let p = plan(&store(mine_dir.path()), mine_dir.path(), 10).unwrap();
-    assert_eq!(p.report.found, 1, "the other project's session must not appear");
+    assert_eq!(
+        p.report.found, 1,
+        "the other project's session must not appear"
+    );
     assert_eq!(p.items.len(), 1);
 }
 
@@ -68,8 +73,10 @@ fn a_mined_session_is_not_mined_twice() {
 
     let results = vec![(
         id,
-        Ok("project|lesson|pandoc|Round-trip docx through pandoc, never edit XML by hand|70"
-            .to_string()),
+        Ok(
+            "project|lesson|pandoc|Round-trip docx through pandoc, never edit XML by hand|70"
+                .to_string(),
+        ),
     )];
     let report = record(&mem, results, p.report);
     assert_eq!(report.proposed, 1);
@@ -91,14 +98,23 @@ fn mined_memories_are_proposals_in_project_scope() {
     // The classifier says "global"; mining overrides it. A session ran in this
     // project, so what it taught is this project's — a wrong guess here would
     // pollute every other repo.
-    let results =
-        vec![(id, Ok("global|preference|style|Prefers small commits|60".to_string()))];
+    let results = vec![(
+        id,
+        Ok("global|preference|style|Prefers small commits|60".to_string()),
+    )];
     record(&mem, results, p.report);
 
     let pending = mem.pending().unwrap();
-    assert_eq!(pending.len(), 1, "mined memories await approval, never go straight in");
+    assert_eq!(
+        pending.len(),
+        1,
+        "mined memories await approval, never go straight in"
+    );
     assert_eq!(pending[0].scope, Scope::Project.as_str());
-    assert!(mem.list(Some(Scope::Global)).unwrap().is_empty(), "nothing leaked to global");
+    assert!(
+        mem.list(Some(Scope::Global)).unwrap().is_empty(),
+        "nothing leaked to global"
+    );
 }
 
 #[test]
@@ -113,7 +129,11 @@ fn a_failed_classification_is_reported_not_swallowed() {
     let report = record(&mem, results, p.report);
 
     assert_eq!(report.proposed, 0);
-    assert_eq!(report.failed.len(), 1, "a silent failure is how an empty store looks healthy");
+    assert_eq!(
+        report.failed.len(),
+        1,
+        "a silent failure is how an empty store looks healthy"
+    );
     assert!(report.failed[0].contains("no content"));
 }
 
@@ -149,14 +169,22 @@ fn a_short_id_prefix_resolves_like_a_git_hash() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mem = store(dir.path());
-    let row = mem.remember(Scope::Project, "fact", "pandoc", "round-trips docx", 60).unwrap();
+    let row = mem
+        .remember(Scope::Project, "fact", "pandoc", "round-trips docx", 60)
+        .unwrap();
 
     // Nobody is retyping 36 characters out of a terminal, so the short form
     // shown in listings has to be the form the commands accept.
     let short = short_id(&row.id).to_string();
     assert_eq!(short.len(), 8);
-    assert_eq!(mem.resolve_id(&short).unwrap(), IdMatch::Unique(row.id.clone()));
-    assert_eq!(mem.resolve_id(&row.id).unwrap(), IdMatch::Unique(row.id.clone()));
+    assert_eq!(
+        mem.resolve_id(&short).unwrap(),
+        IdMatch::Unique(row.id.clone())
+    );
+    assert_eq!(
+        mem.resolve_id(&row.id).unwrap(),
+        IdMatch::Unique(row.id.clone())
+    );
     assert_eq!(mem.resolve_id("").unwrap(), IdMatch::None);
     assert_eq!(mem.resolve_id("zzzzzzzz").unwrap(), IdMatch::None);
 }
@@ -169,7 +197,8 @@ fn an_ambiguous_prefix_is_reported_rather_than_guessed() {
     let dir = tempfile::tempdir().unwrap();
     let mem = store(dir.path());
     for i in 0..3 {
-        mem.remember(Scope::Project, "fact", &format!("s{i}"), "c", 60).unwrap();
+        mem.remember(Scope::Project, "fact", &format!("s{i}"), "c", 60)
+            .unwrap();
     }
 
     // Every uuid shares the empty prefix; "" is None, but a 1-char prefix will
@@ -188,8 +217,11 @@ fn only_pending_ids_are_offered_for_approval() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mem = store(dir.path());
-    mem.remember(Scope::Project, "fact", "active", "already approved", 60).unwrap();
-    let (proposed, _) = mem.propose(Scope::Project, "fact", "waiting", "needs review", 60).unwrap();
+    mem.remember(Scope::Project, "fact", "active", "already approved", 60)
+        .unwrap();
+    let (proposed, _) = mem
+        .propose(Scope::Project, "fact", "waiting", "needs review", 60)
+        .unwrap();
 
     // Completing ids that `approve` would reject is worse than completing none.
     let ids = mem.pending_ids().unwrap();

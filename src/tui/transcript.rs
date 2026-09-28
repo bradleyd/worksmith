@@ -28,7 +28,12 @@ pub(super) enum Kind {
     Thinking,
     Tool,
     ToolResult,
-    ToolActivity { expanded: bool, chosen: bool, status: super::activity::Status, diff: bool },
+    ToolActivity {
+        expanded: bool,
+        chosen: bool,
+        status: super::activity::Status,
+        diff: bool,
+    },
     Diff,
     /// Explicit review stays expanded even when tool previews are collapsed.
     ReviewDiff,
@@ -39,10 +44,16 @@ pub(super) enum Kind {
     /// someone to stop reading the transcript.
     Pair,
     /// One inspectable question/discussion/answer block; raw text stays intact.
-    Checkpoint { expanded: bool },
+    Checkpoint {
+        expanded: bool,
+    },
     /// A user turn's root row. Everything pushed after it, up to the next
     /// root, is its child (see `turn.rs`). Text is the user's own message.
-    Turn { expanded: bool, status: super::turn::Status, elapsed_ms: Option<u64> },
+    Turn {
+        expanded: bool,
+        status: super::turn::Status,
+        elapsed_ms: Option<u64>,
+    },
 }
 
 pub(super) struct Item {
@@ -53,8 +64,12 @@ pub(super) struct Item {
 
 impl Item {
     pub(super) fn append_checkpoint(&mut self, speaker: super::checkpoint::Speaker, text: &str) {
-        self.text.push_str(&format!("\n\n{}: {text}", speaker.label()));
-        self.checkpoint.push(super::checkpoint::Message { speaker, text: text.into() });
+        self.text
+            .push_str(&format!("\n\n{}: {text}", speaker.label()));
+        self.checkpoint.push(super::checkpoint::Message {
+            speaker,
+            text: text.into(),
+        });
     }
 }
 
@@ -138,7 +153,11 @@ impl Transcript {
 
     pub(super) fn push(&mut self, kind: Kind, text: impl Into<String>) {
         let at = self.items.len();
-        self.items.push(Item { kind, text: text.into(), checkpoint: Vec::new() });
+        self.items.push(Item {
+            kind,
+            text: text.into(),
+            checkpoint: Vec::new(),
+        });
         self.touch(at);
     }
 
@@ -158,8 +177,7 @@ impl Transcript {
     /// Move the cursor by `delta` rows, clamped, keeping it on screen.
     pub(super) fn cursor_by(&mut self, delta: isize) {
         let last = self.cached_rows.len().saturating_sub(1);
-        let next =
-            (self.cursor_row as isize + delta).clamp(0, last as isize) as usize;
+        let next = (self.cursor_row as isize + delta).clamp(0, last as isize) as usize;
         self.cursor_row = next;
     }
 
@@ -171,14 +189,25 @@ impl Transcript {
             return None;
         }
         // Hidden items share the next visible item's start row.
-        Some(self.item_starts.partition_point(|&start| start <= row).saturating_sub(1))
+        Some(
+            self.item_starts
+                .partition_point(|&start| start <= row)
+                .saturating_sub(1),
+        )
     }
 
     pub(super) fn toggle_entry(&mut self) -> bool {
-        let Some(index) = self.item_at_row(self.cursor_row) else { return false; };
+        let Some(index) = self.item_at_row(self.cursor_row) else {
+            return false;
+        };
         let expanded = match &mut self.items[index].kind {
             Kind::Checkpoint { expanded } | Kind::Turn { expanded, .. } => expanded,
-            Kind::ToolActivity { expanded, chosen, .. } => { *chosen = true; expanded }
+            Kind::ToolActivity {
+                expanded, chosen, ..
+            } => {
+                *chosen = true;
+                expanded
+            }
             _ => return false,
         };
         *expanded = !*expanded;
@@ -188,7 +217,9 @@ impl Transcript {
     }
 
     fn reveal_matches(&mut self) {
-        let Some(search) = self.search.as_ref().filter(|s| !s.pattern.is_empty()) else { return; };
+        let Some(search) = self.search.as_ref().filter(|s| !s.pattern.is_empty()) else {
+            return;
+        };
         let needle = search.pattern.to_lowercase();
         let mut first = None;
         let mut root = None;
@@ -200,9 +231,13 @@ impl Transcript {
                 continue;
             }
             match &mut self.items[i].kind {
-                Kind::Checkpoint { expanded } | Kind::ToolActivity { expanded, .. } if !*expanded => {
+                Kind::Checkpoint { expanded } | Kind::ToolActivity { expanded, .. }
+                    if !*expanded =>
+                {
                     *expanded = true;
-                    if let Kind::ToolActivity { chosen, .. } = &mut self.items[i].kind { *chosen = true; }
+                    if let Kind::ToolActivity { chosen, .. } = &mut self.items[i].kind {
+                        *chosen = true;
+                    }
                     first.get_or_insert(i);
                 }
                 _ => {}
@@ -218,7 +253,9 @@ impl Transcript {
         }
         if let Some(i) = first {
             self.touch(i);
-            if self.cache_width > 0 { self.ensure_rows(self.cache_width); }
+            if self.cache_width > 0 {
+                self.ensure_rows(self.cache_width);
+            }
         }
     }
 
@@ -291,8 +328,7 @@ impl Transcript {
     /// Mark item `index` (and everything after it) as needing re-wrapping.
     pub(super) fn touch(&mut self, index: usize) {
         self.dirty = true;
-        self.dirty_from =
-            Some(self.dirty_from.map_or(index, |d| d.min(index)));
+        self.dirty_from = Some(self.dirty_from.map_or(index, |d| d.min(index)));
         self.search_hits_dirty = true;
     }
 
@@ -313,9 +349,14 @@ impl Transcript {
             }
             return;
         }
-        let anchor = self.item_at_row(self.cursor_row)
+        let anchor = self
+            .item_at_row(self.cursor_row)
             .map(|i| (i, self.cursor_row.saturating_sub(self.item_starts[i])));
-        let from = if width_changed { 0 } else { self.dirty_from.unwrap_or(0) };
+        let from = if width_changed {
+            0
+        } else {
+            self.dirty_from.unwrap_or(0)
+        };
         // Never start past the last item with recorded rows: `item_starts` is
         // what says where a rebuild may resume, and indexing past it would
         // truncate the cache to nothing and silently lose the transcript.
@@ -324,8 +365,11 @@ impl Transcript {
         // Drop the stale tail, keep the prefix, and re-wrap only from `from`.
         // A missing start means "nothing recorded yet for this item", i.e. keep
         // every cached row and append.
-        let keep_rows =
-            self.item_starts.get(from).copied().unwrap_or(self.cached_rows.len());
+        let keep_rows = self
+            .item_starts
+            .get(from)
+            .copied()
+            .unwrap_or(self.cached_rows.len());
         self.cached_rows.truncate(keep_rows);
         self.item_starts.truncate(from);
         for index in from..self.items.len() {
@@ -342,7 +386,11 @@ impl Transcript {
         if let Some((i, offset)) = anchor
             && let Some(&start) = self.item_starts.get(i)
         {
-            let end = self.item_starts.get(i + 1).copied().unwrap_or(self.cached_rows.len());
+            let end = self
+                .item_starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or(self.cached_rows.len());
             self.cursor_row = (start + offset).min(end.saturating_sub(1));
         }
         self.cache_width = width;
@@ -381,7 +429,14 @@ pub(super) fn build_rows(
 ) -> Vec<Line<'static>> {
     let mut rows: Vec<Line> = Vec::new();
     for index in 0..items.len() {
-        grouped_item_rows(&mut rows, items, index, collapse_tools, show_thinking, width);
+        grouped_item_rows(
+            &mut rows,
+            items,
+            index,
+            collapse_tools,
+            show_thinking,
+            width,
+        );
     }
     rows
 }
@@ -405,8 +460,18 @@ pub(super) fn grouped_item_rows(
         return;
     }
     let from = rows.len();
-    let inner_width = if root.is_some() { width.saturating_sub(2) } else { width };
-    item_rows(rows, &items[index], collapse_tools, show_thinking, inner_width);
+    let inner_width = if root.is_some() {
+        width.saturating_sub(2)
+    } else {
+        width
+    };
+    item_rows(
+        rows,
+        &items[index],
+        collapse_tools,
+        show_thinking,
+        inner_width,
+    );
     if root.is_some() {
         super::turn::indent(rows, from);
     }
@@ -425,7 +490,13 @@ pub(super) fn item_rows(
 ) {
     let w = (width.max(12) as usize).saturating_sub(1);
     {
-        if let Kind::ToolActivity { expanded, status, diff, .. } = item.kind {
+        if let Kind::ToolActivity {
+            expanded,
+            status,
+            diff,
+            ..
+        } = item.kind
+        {
             super::activity::render(rows, &item.text, expanded, status, diff, width);
             return;
         }
@@ -433,7 +504,12 @@ pub(super) fn item_rows(
             super::checkpoint::render(rows, &item.text, &item.checkpoint, expanded, width);
             return;
         }
-        if let Kind::Turn { expanded, status, elapsed_ms } = item.kind {
+        if let Kind::Turn {
+            expanded,
+            status,
+            elapsed_ms,
+        } = item.kind
+        {
             super::turn::render(rows, item, expanded, status, elapsed_ms, width);
             return;
         }
@@ -441,7 +517,12 @@ pub(super) fn item_rows(
             return;
         }
         if matches!(item.kind, Kind::Diff | Kind::ReviewDiff) {
-            render_diff(rows, &item.text, collapse_tools && item.kind == Kind::Diff, width);
+            render_diff(
+                rows,
+                &item.text,
+                collapse_tools && item.kind == Kind::Diff,
+                width,
+            );
             rows.push(Line::from(""));
             return;
         }
@@ -453,7 +534,10 @@ pub(super) fn item_rows(
             let lines: Vec<&str> = expanded.lines().collect();
             if lines.len() > TOOL_RESULT_PREVIEW_LINES {
                 let shown = lines[..TOOL_RESULT_PREVIEW_LINES].join("\n");
-                format!("{shown}\n… (+{} lines · Ctrl+O)", lines.len() - TOOL_RESULT_PREVIEW_LINES)
+                format!(
+                    "{shown}\n… (+{} lines · Ctrl+O)",
+                    lines.len() - TOOL_RESULT_PREVIEW_LINES
+                )
             } else {
                 expanded
             }
@@ -495,17 +579,28 @@ pub(super) fn item_rows(
 /// at all and inherits the terminal's foreground.
 fn kind_style(kind: Kind) -> (Style, &'static str) {
     match kind {
-        Kind::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "you ▸ "),
+        Kind::User => (
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            "you ▸ ",
+        ),
         Kind::Assistant => (Style::default(), ""),
-        Kind::Thinking => {
-            (Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), "thinking ")
-        }
+        Kind::Thinking => (
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+            "thinking ",
+        ),
         Kind::Tool => (Style::default().fg(Color::Yellow), "⚙ "),
         Kind::ToolResult => (Style::default().fg(Color::DarkGray), "→ "),
         Kind::Notice => (Style::default().fg(Color::Blue), ""),
-        Kind::Pair => {
-            (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆ ")
-        }
+        Kind::Pair => (
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            "◆ ",
+        ),
         Kind::Error => (Style::default().fg(Color::Red), "! "),
         Kind::ToolActivity { .. } => unreachable!("tool activities have their own renderer"),
         Kind::Checkpoint { .. } => unreachable!("checkpoints have their own renderer"),
@@ -520,7 +615,10 @@ fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width:
     let w = (width.max(12) as usize).saturating_sub(1);
     let all: Vec<&str> = text.lines().collect();
     let (shown, extra) = if collapse && all.len() > TOOL_RESULT_PREVIEW_LINES + 5 {
-        (&all[..TOOL_RESULT_PREVIEW_LINES + 5], all.len() - (TOOL_RESULT_PREVIEW_LINES + 5))
+        (
+            &all[..TOOL_RESULT_PREVIEW_LINES + 5],
+            all.len() - (TOOL_RESULT_PREVIEW_LINES + 5),
+        )
     } else {
         (&all[..], 0)
     };
@@ -528,7 +626,9 @@ fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width:
     for (i, raw) in shown.iter().enumerate() {
         let line = raw.replace('\t', "    ");
         let style = if i == 0 {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else if line.starts_with("@@") {
             Style::default().fg(Color::Cyan)
         } else if line.starts_with("+++") || line.starts_with("---") {

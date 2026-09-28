@@ -83,8 +83,9 @@ fn preview_text(ov: &Overlay) -> String {
 pub(super) fn prepare(ov: &mut Overlay, area: Rect, status: &str) {
     let [_, preview, _, _] = panes(area, status, &heading_text(ov), ov.is_mcp_catalog());
     let rows = wrapped(preview_text(ov)).line_count(preview.width.saturating_sub(2));
-    ov.preview_max_scroll =
-        rows.saturating_sub(preview.height.saturating_sub(2) as usize).min(u16::MAX as usize);
+    ov.preview_max_scroll = rows
+        .saturating_sub(preview.height.saturating_sub(2) as usize)
+        .min(u16::MAX as usize);
     ov.preview_scroll = ov.preview_scroll.min(ov.preview_max_scroll);
 }
 
@@ -106,11 +107,18 @@ pub(super) fn render(f: &mut Frame, area: Rect, ov: &Overlay, status: &str) {
     f.render_widget(Clear, area);
     f.render_widget(wrapped(heading_text(ov)), header);
     let border = |focused| {
-        if focused { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() }
+        if focused {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(pane_title(ov.title.clone(), ov.skill_focus == SkillFocus::List))
+        .title(pane_title(
+            ov.title.clone(),
+            ov.skill_focus == SkillFocus::List,
+        ))
         .border_style(border(ov.skill_focus == SkillFocus::List));
     let inner = block.inner(list);
     f.render_widget(block, list);
@@ -166,7 +174,10 @@ pub(super) fn render(f: &mut Frame, area: Rect, ov: &Overlay, status: &str) {
         .border_style(border(ov.skill_focus == SkillFocus::Preview));
     let inner = block.inner(preview);
     f.render_widget(block, preview);
-    f.render_widget(wrapped(preview_text(ov)).scroll((ov.preview_scroll as u16, 0)), inner);
+    f.render_widget(
+        wrapped(preview_text(ov)).scroll((ov.preview_scroll as u16, 0)),
+        inner,
+    );
     f.render_widget(wrapped(footer_text(status, ov.is_mcp_catalog())), footer);
 }
 
@@ -209,7 +220,10 @@ mod tests {
                 .map(|pos| terminal.backend().buffer()[pos].symbol())
                 .collect();
             assert!(text.contains("Filter skills:"));
-            assert!(text.contains("FILTER_END"), "query clipped at width {width}");
+            assert!(
+                text.contains("FILTER_END"),
+                "query clipped at width {width}"
+            );
         }
     }
 

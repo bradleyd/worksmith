@@ -7,9 +7,9 @@
 //! mutex) so the UI keeps rendering and stays responsive to Esc (abort) while
 //! the model streams.
 
-use crate::metrics::{compact_count, fmt_ms, fmt_ms_opt};
 #[cfg(test)]
 use crate::metrics::report as metrics_report;
+use crate::metrics::{compact_count, fmt_ms, fmt_ms_opt};
 use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -44,31 +44,31 @@ mod transcript;
 mod turn;
 
 use crate::agent::{ActiveModel, Agent, TurnResult};
+use crate::config::Config;
 use crate::event::{Event, EventBus};
-use crate::llm::Thinking;
-use crate::memory::{IdMatch, MemoryStore, Scope, short_id};
-use crate::prompt::{build_system_prompt, build_worker_prompt};
-use crate::session::Session;
-use crate::validation::CommandValidator;
 use crate::fanout::{
     FanOut, PendingFanOut, assign, fanout_notice, matching_files, parse_spawn, plan_fanout,
     spawn_notice,
 };
+use crate::llm::ModelOverride;
+use crate::llm::Thinking;
+use crate::memory::{IdMatch, MemoryStore, Scope, short_id};
+use crate::prompt::{build_system_prompt, build_worker_prompt};
 use crate::report::{
     GroupAcc, common_opening, group_report, record_in_group, single_report, truncate,
     truncate_chars, worker_headline,
 };
-use crate::config::Config;
-use crate::llm::ModelOverride;
+use crate::session::Session;
 use crate::supervisor::SupervisorConfig;
+use crate::validation::CommandValidator;
 use crate::worker::{WorkerManager, WorkerSummary};
 
 use composer::Composer;
 #[cfg(test)]
 use composer::{compute_completions, wrap_input};
-use footer::{footer_height, footer_legend, footer_status, footer_string, render_footer};
 #[cfg(test)]
 use footer::compact_tokens;
+use footer::{footer_height, footer_legend, footer_status, footer_string, render_footer};
 use modals::{ApprovalKey, AskAnswer, Modals};
 use overlay::{Overlay, OverlayItem, ReferenceInput, SkillFocus, SkillPreview};
 use transcript::{Item, Kind, Mode, Search, Transcript};
@@ -146,9 +146,18 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/fast", "answer without thinking first"),
     ("/think", "how hard to think: a level or a token budget"),
     ("/route", "which provider serves you (OpenRouter)"),
-    ("/model", "switch model for this session (or list the configured ones)"),
-    ("/pair", "stop at decisions so you learn the code being written"),
-    ("/mouse", "wheel scrolls the transcript (off: the terminal keeps the wheel)"),
+    (
+        "/model",
+        "switch model for this session (or list the configured ones)",
+    ),
+    (
+        "/pair",
+        "stop at decisions so you learn the code being written",
+    ),
+    (
+        "/mouse",
+        "wheel scrolls the transcript (off: the terminal keeps the wheel)",
+    ),
     ("/trust", "is this project's own config in effect?"),
     ("/history", "what the loop did, and when"),
     ("/quit", "exit"),
@@ -328,7 +337,11 @@ impl App {
             self.touch(i);
         } else {
             self.push(Kind::Checkpoint { expanded: true }, subject);
-            self.transcript.items.last_mut().unwrap().append_checkpoint(checkpoint::Speaker::Assistant, question);
+            self.transcript
+                .items
+                .last_mut()
+                .unwrap()
+                .append_checkpoint(checkpoint::Speaker::Assistant, question);
             self.checkpoint_item = Some(self.transcript.items.len() - 1);
         }
     }
@@ -338,7 +351,11 @@ impl App {
     }
 
     fn show_workspace_review(&mut self, action: &str, text: String) {
-        let kind = if action == "diff" { Kind::ReviewDiff } else { Kind::Notice };
+        let kind = if action == "diff" {
+            Kind::ReviewDiff
+        } else {
+            Kind::Notice
+        };
         self.push(kind, text);
     }
 
@@ -463,7 +480,11 @@ impl App {
                 // `start_turn` already opened the root for a turn this UI
                 // started; a turn that arrived some other way gets one here.
                 if self.transcript.current_turn().is_none() {
-                    let label = if is_synthetic { format!("synthesis ▸ {text}") } else { text };
+                    let label = if is_synthetic {
+                        format!("synthesis ▸ {text}")
+                    } else {
+                        text
+                    };
                     self.transcript.start_turn(label);
                 }
                 if is_synthetic {
@@ -482,7 +503,11 @@ impl App {
                         i
                     }
                     None => {
-                        self.transcript.items.push(Item { kind: Kind::Thinking, text, checkpoint: Vec::new() });
+                        self.transcript.items.push(Item {
+                            kind: Kind::Thinking,
+                            text,
+                            checkpoint: Vec::new(),
+                        });
                         self.cur_thinking = Some(self.transcript.items.len() - 1);
                         self.transcript.items.len() - 1
                     }
@@ -496,7 +521,11 @@ impl App {
                         i
                     }
                     None => {
-                        self.transcript.items.push(Item { kind: Kind::Assistant, text, checkpoint: Vec::new() });
+                        self.transcript.items.push(Item {
+                            kind: Kind::Assistant,
+                            text,
+                            checkpoint: Vec::new(),
+                        });
                         self.cur_assistant = Some(self.transcript.items.len() - 1);
                         self.transcript.items.len() - 1
                     }
@@ -504,10 +533,15 @@ impl App {
                 self.touch(at);
             }
             // Bookkeeping for the supervisor and /metrics; nothing to draw.
-            Event::ModelCallStarted => { self.checkpoint_item = None; }
+            Event::ModelCallStarted => {
+                self.checkpoint_item = None;
+            }
             Event::ModelCallFinished => {}
             event @ Event::ModelMetrics { .. } => {
-                if let Event::ModelMetrics { session_id: Some(ref id), .. } = event
+                if let Event::ModelMetrics {
+                    session_id: Some(ref id),
+                    ..
+                } = event
                     && Session::id_from_path(&self.session_path) != Some(id.as_str())
                 {
                     return;
@@ -518,19 +552,34 @@ impl App {
                 self.push(Kind::Notice, format!("model changed: {from} → {to}"));
             }
             Event::AssistantMessage { .. } => {} // already streamed via deltas
-            Event::ToolCall { id, name, arguments } => {
+            Event::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 if name != "checkpoint" {
-                    self.transcript.start_tool(id, tool_summary(&name, &arguments));
+                    self.transcript
+                        .start_tool(id, tool_summary(&name, &arguments));
                 }
                 self.cur_assistant = None;
                 self.cur_thinking = None;
             }
-            Event::ToolResult { id, ok, output, name, elapsed_ms } => {
+            Event::ToolResult {
+                id,
+                ok,
+                output,
+                name,
+                elapsed_ms,
+            } => {
                 if name == "checkpoint" && ok {
                     self.checkpoint_item = None;
                     return;
                 }
-                if name != "checkpoint" && self.transcript.finish_tool(&id, &name, ok, &output, elapsed_ms) {
+                if name != "checkpoint"
+                    && self
+                        .transcript
+                        .finish_tool(&id, &name, ok, &output, elapsed_ms)
+                {
                     return;
                 }
                 // Successful edit/write results are unified diffs → render as such.
@@ -541,7 +590,11 @@ impl App {
                     self.push(Kind::ToolResult, format!("{prefix}{output}"));
                 }
             }
-            Event::Checkpoint { kind, subject, detail } => {
+            Event::Checkpoint {
+                kind,
+                subject,
+                detail,
+            } => {
                 // Blocking asks render from the UI request channel; the event
                 // and tool channels must not create a second copy.
                 let head = match kind.as_str() {
@@ -679,8 +732,13 @@ fn setup_terminal() -> Result<Term> {
     //
     // `/mouse off` restores the old behaviour for anyone whose terminal does
     // not do Shift+drag.
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)
-        .context("entering alternate screen")?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )
+    .context("entering alternate screen")?;
     Terminal::new(CrosstermBackend::new(out)).context("creating terminal")
 }
 
@@ -847,10 +905,7 @@ async fn run_loop(
     let mut workers = WorkerManager::new(agent.clone(), cwd.clone(), agents_max)
         .with_supervisor(supervisor)
         .with_default_model(worker_model)
-        .with_default_validate(
-            config.agents_validate().map(str::to_string),
-            bash_timeout,
-        );
+        .with_default_validate(config.agents_validate().map(str::to_string), bash_timeout);
 
     let mut app = App::new(model, context_limit, validate_cmd);
     {
@@ -876,14 +931,23 @@ async fn run_loop(
     // Startup header.
     app.push(Kind::Notice, format!("worksmith · {}", app.model));
     app.push(Kind::Notice, format!("cwd: {}", cwd.display()));
-    if !crate::config::load_project_instructions(&cwd).trim().is_empty() {
-        app.push(Kind::Notice, "loaded project instructions (AGENTS.md/CLAUDE.md)".to_string());
+    if !crate::config::load_project_instructions(&cwd)
+        .trim()
+        .is_empty()
+    {
+        app.push(
+            Kind::Notice,
+            "loaded project instructions (AGENTS.md/CLAUDE.md)".to_string(),
+        );
     }
     if let Some(c) = app.validate_cmd.clone() {
         app.push(Kind::Notice, format!("validation: {c}"));
     }
     if !workers.supervisor_config().is_on() {
-        app.push(Kind::Notice, "supervisor: off (workers run unwatched)".to_string());
+        app.push(
+            Kind::Notice,
+            "supervisor: off (workers run unwatched)".to_string(),
+        );
     }
     app.push(
         Kind::Notice,
@@ -902,7 +966,10 @@ async fn run_loop(
     let mut extract: Option<JoinHandle<Result<String, String>>> = None;
     // A mining run in flight: the model half only — the proposals are filed back
     // on this task, where the memory store lives.
-    type MineResults = (Vec<(String, Result<String, String>)>, crate::mining::MineReport);
+    type MineResults = (
+        Vec<(String, Result<String, String>)>,
+        crate::mining::MineReport,
+    );
     let mut mine: Option<JoinHandle<MineResults>> = None;
     let mut compact: Option<JoinHandle<Result<()>>> = None;
 
@@ -921,15 +988,19 @@ async fn run_loop(
 
             // A grouped worker waits for its siblings so the parent gets one
             // combined report instead of N disconnected ones.
-            match w.group.and_then(|g| workers.group_info(g).map(|(r, t)| (g, r.to_string(), t))) {
+            match w
+                .group
+                .and_then(|g| workers.group_info(g).map(|(r, t)| (g, r.to_string(), t)))
+            {
                 Some((group, request, total)) => {
-                    let Some(acc) =
-                        record_in_group(&mut groups, group, &request, total, w)
-                    else {
+                    let Some(acc) = record_in_group(&mut groups, group, &request, total, w) else {
                         continue; // siblings still running
                     };
                     let report = group_report(&acc);
-                    app.push(Kind::Notice, format!("all {} workers finished", acc.done.len()));
+                    app.push(
+                        Kind::Notice,
+                        format!("all {} workers finished", acc.done.len()),
+                    );
                     deliver_to_parent(&app, &agent, &session, report).await;
                     // Ask the parent to turn the pieces into one answer.
                     if app.synthesize && turn.is_none() {
@@ -940,8 +1011,15 @@ async fn run_loop(
                             acc.request
                         );
                         start_synthetic_turn(
-                            ask, &mut app, &agent, &session, &mem, &cwd, bash_timeout,
-                            &mut turn, &mut cancel,
+                            ask,
+                            &mut app,
+                            &agent,
+                            &session,
+                            &mem,
+                            &cwd,
+                            bash_timeout,
+                            &mut turn,
+                            &mut cancel,
                         );
                     }
                 }
@@ -1640,7 +1718,12 @@ fn handle_search_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Option<Flow> {
         KeyCode::Enter => {
             app.mutate_search(|s| s.typing = false);
             if !app.jump_match(true) {
-                let p = app.transcript.search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
+                let p = app
+                    .transcript
+                    .search
+                    .as_ref()
+                    .map(|s| s.pattern.clone())
+                    .unwrap_or_default();
                 app.status = format!("no match for `{p}`");
                 app.set_search(None);
             }
@@ -1689,7 +1772,10 @@ fn handle_normal_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Result<Option<
             // to disambiguate from and a hidden two-key chord is worse.
             app.transcript.cursor_row = 0;
         }
-        KeyCode::Char('/') => app.set_search(Some(Search { pattern: String::new(), typing: true })),
+        KeyCode::Char('/') => app.set_search(Some(Search {
+            pattern: String::new(),
+            typing: true,
+        })),
         KeyCode::Char('n') => {
             if !app.jump_match(true) {
                 app.status = "no matches".into();
@@ -1892,7 +1978,11 @@ async fn handle_insert_key(
             app.touch_all();
             app.status = format!(
                 "tool output {}",
-                if app.transcript.collapse_tools { "collapsed" } else { "expanded" }
+                if app.transcript.collapse_tools {
+                    "collapsed"
+                } else {
+                    "expanded"
+                }
             );
         }
         KeyCode::Char('t') if ctrl => {
@@ -1900,7 +1990,11 @@ async fn handle_insert_key(
             app.touch_all();
             app.status = format!(
                 "thinking {}",
-                if app.transcript.show_thinking { "shown" } else { "hidden" }
+                if app.transcript.show_thinking {
+                    "shown"
+                } else {
+                    "hidden"
+                }
             );
         }
         KeyCode::Char('p') if ctrl => {
@@ -2061,11 +2155,17 @@ async fn handle_command(input: &str, app: &mut App, ctx: &mut CommandContext<'_>
                 .collect();
             app.overlay = Some(Overlay::new("commands · type to filter", items));
         }
-        "help" | "h" if parts.clone().next().map(|s| s.to_ascii_lowercase()) == Some("footer".to_string()) => {
+        "help" | "h"
+            if parts.clone().next().map(|s| s.to_ascii_lowercase())
+                == Some("footer".to_string()) =>
+        {
             // The footer's glyphs are unguessable (its own author had to ask);
             // a legend explains them without changing the footer. A reference,
             // not a picker: there is nothing to select.
-            app.overlay = Some(Overlay::reference("footer legend · Esc close", footer_legend()));
+            app.overlay = Some(Overlay::reference(
+                "footer legend · Esc close",
+                footer_legend(),
+            ));
         }
         "help" | "h" => {
             // One wrapped paragraph of everything was unreadable. Group it, put
@@ -2215,7 +2315,9 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     match req.fanout {
                         // Planner-driven: hand off to the caller, which runs it
                         // off the UI thread (a model call would freeze the TUI).
-                        FanOut::Auto | FanOut::Count(_) if !matches!(req.fanout, FanOut::Count(1)) => {
+                        FanOut::Auto | FanOut::Count(_)
+                            if !matches!(req.fanout, FanOut::Count(1)) =>
+                        {
                             let want = match req.fanout {
                                 FanOut::Count(n) => Some(n),
                                 _ => None,
@@ -2230,29 +2332,34 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                                 validate: req.validate.clone(),
                             });
                         }
-                        FanOut::Files(pattern) => {
-                            match matching_files(cwd, &pattern) {
-                                Err(e) => app.push(Kind::Error, e),
-                                Ok(files) if files.is_empty() => {
-                                    app.push(Kind::Notice, format!("no files match `{pattern}`"));
-                                }
-                                Ok(files) => {
-                                    let tasks: Vec<String> =
-                                        files.iter().map(|f| assign(&req.task, f)).collect();
-                                    let report = workers.spawn_many_checked(
-                                        tasks,
-                                        system,
-                                        req.task.clone(),
-                                        over,
-                                        req.validate.clone(),
-                                    );
-                                    app.push(Kind::Notice, fanout_notice(&report));
-                                }
+                        FanOut::Files(pattern) => match matching_files(cwd, &pattern) {
+                            Err(e) => app.push(Kind::Error, e),
+                            Ok(files) if files.is_empty() => {
+                                app.push(Kind::Notice, format!("no files match `{pattern}`"));
                             }
-                        }
+                            Ok(files) => {
+                                let tasks: Vec<String> =
+                                    files.iter().map(|f| assign(&req.task, f)).collect();
+                                let report = workers.spawn_many_checked(
+                                    tasks,
+                                    system,
+                                    req.task.clone(),
+                                    over,
+                                    req.validate.clone(),
+                                );
+                                app.push(Kind::Notice, fanout_notice(&report));
+                            }
+                        },
                         // -n 1 (or an explicit single): today's path, no planner.
-                        _ => match workers.spawn_checked(req.task.clone(), system, over, req.validate.clone()) {
-                            Ok(outcome) => app.push(Kind::Notice, spawn_notice(&outcome, &req.task)),
+                        _ => match workers.spawn_checked(
+                            req.task.clone(),
+                            system,
+                            over,
+                            req.validate.clone(),
+                        ) {
+                            Ok(outcome) => {
+                                app.push(Kind::Notice, spawn_notice(&outcome, &req.task))
+                            }
                             Err(e) => app.push(Kind::Error, format!("spawn failed: {e}")),
                         },
                     }
@@ -2286,7 +2393,11 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
                     for e in evs.iter().rev().take(60).rev() {
                         app.push(
                             Kind::Notice,
-                            format!("  +{:>4}s  {}", e.ts.saturating_sub(start), describe(&e.event)),
+                            format!(
+                                "  +{:>4}s  {}",
+                                e.ts.saturating_sub(start),
+                                describe(&e.event)
+                            ),
                         );
                     }
                     app.push(
@@ -2389,11 +2500,7 @@ fn validate_command<'a>(app: &mut App, parts: impl Iterator<Item = &'a str>) {
     }
 }
 
-fn pair_command<'a>(
-    app: &mut App,
-    agent: &Agent,
-    mut parts: impl Iterator<Item = &'a str>,
-) {
+fn pair_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Item = &'a str>) {
     match parts.next() {
         None => app.push(Kind::Notice, pair_status(agent.pairing_on())),
         Some("on") => {
@@ -2404,10 +2511,7 @@ fn pair_command<'a>(
             agent.set_pairing(false);
             app.push(Kind::Notice, pair_status(false));
         }
-        Some(other) => app.push(
-            Kind::Error,
-            format!("usage: /pair [on|off] (got {other})"),
-        ),
+        Some(other) => app.push(Kind::Error, format!("usage: /pair [on|off] (got {other})")),
     }
 }
 
@@ -2655,7 +2759,10 @@ fn mouse_status(on: bool) -> &'static str {
 /// its model part matches. If two providers shared a bare name both would be
 /// marked: a degenerate config, and marking both is more honest than
 /// guessing. Empty when nothing is configured; the caller then reports that.
-fn model_list(current: &str, models: &std::collections::HashMap<String, crate::config::ModelSettings>) -> Vec<String> {
+fn model_list(
+    current: &str,
+    models: &std::collections::HashMap<String, crate::config::ModelSettings>,
+) -> Vec<String> {
     let mut specs: Vec<&String> = models.keys().collect();
     specs.sort();
     specs
@@ -2757,13 +2864,13 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
         "show" => {
             if let Some(id) = parts.next().and_then(|t| resolve_memory_id(app, mem, t)) {
                 match mem.get(&id) {
-                Ok(Some(r)) => app.push(
-                    Kind::Notice,
-                    format!(
-                        "[{}/{}] {} (importance {}, {})\n{}",
-                        r.scope, r.kind, r.subject, r.importance, r.status, r.content
+                    Ok(Some(r)) => app.push(
+                        Kind::Notice,
+                        format!(
+                            "[{}/{}] {} (importance {}, {})\n{}",
+                            r.scope, r.kind, r.subject, r.importance, r.status, r.content
+                        ),
                     ),
-                ),
                     Ok(None) => app.push(Kind::Notice, format!("(no memory {id})")),
                     Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
                 }
@@ -2784,17 +2891,22 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                 app.push(Kind::Notice, "usage: /memory search <query>".to_string());
             } else {
                 match mem.search(&query, 10) {
-                    Ok(hits) if hits.is_empty() => {
-                        app.push(Kind::Notice, format!("(nothing remembered about \"{query}\")"))
-                    }
+                    Ok(hits) if hits.is_empty() => app.push(
+                        Kind::Notice,
+                        format!("(nothing remembered about \"{query}\")"),
+                    ),
                     Ok(hits) => {
                         for h in hits {
                             app.push(
                                 Kind::Notice,
                                 format!(
                                     "{:.2}  {}  [{}/{}] {}: {}",
-                                    h.score, short_id(&h.row.id), h.row.scope, h.row.kind,
-                                    h.row.subject, h.row.content
+                                    h.score,
+                                    short_id(&h.row.id),
+                                    h.row.scope,
+                                    h.row.kind,
+                                    h.row.subject,
+                                    h.row.content
                                 ),
                             );
                         }
@@ -2810,7 +2922,10 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
         "mine" => {
             // Default to a small bite: each session read is one model call, and
             // an archive of a thousand should not be one blocking command.
-            let limit = parts.next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(10);
+            let limit = parts
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(10);
             if limit == 0 {
                 app.push(Kind::Error, "usage: /memory mine [sessions]".to_string());
             } else {
@@ -2818,9 +2933,7 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
             }
         }
         "pending" | "proposed" => match mem.pending_review() {
-            Ok(rows) if rows.is_empty() => {
-                app.push(Kind::Notice, "(nothing pending)".to_string())
-            }
+            Ok(rows) if rows.is_empty() => app.push(Kind::Notice, "(nothing pending)".to_string()),
             Ok(rows) => {
                 let n = rows.len();
                 for review in rows {
@@ -2829,17 +2942,17 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                         Kind::Notice,
                         format!(
                             "{}  [{}/{}] {}: {}",
-                            short_id(&r.id), r.scope, r.kind, r.subject, r.content
+                            short_id(&r.id),
+                            r.scope,
+                            r.kind,
+                            r.subject,
+                            r.content
                         ),
                     );
                     for old in &review.existing {
                         app.push(
                             Kind::Notice,
-                            format!(
-                                "  replaces? {}: {}",
-                                short_id(&old.id),
-                                old.content
-                            ),
+                            format!("  replaces? {}: {}", short_id(&old.id), old.content),
                         );
                         app.push(
                             Kind::Notice,
@@ -2888,8 +3001,9 @@ fn memory_command<'a>(app: &mut App, mem: &MemoryStore, mut parts: impl Iterator
                 if let Some(id) = resolve_memory_id(app, mem, t) {
                     match mem.approve(&id) {
                         Ok(true) => app.push(Kind::Notice, format!("approved {}", short_id(&id))),
-                        Ok(false) => app
-                            .push(Kind::Notice, format!("(not pending: {})", short_id(&id))),
+                        Ok(false) => {
+                            app.push(Kind::Notice, format!("(not pending: {})", short_id(&id)))
+                        }
                         Err(e) => app.push(Kind::Error, format!("memory error: {e}")),
                     }
                 }
@@ -2986,7 +3100,11 @@ fn memory_list(app: &mut App, mem: &MemoryStore, scope: Option<Scope>) {
                     Kind::Notice,
                     format!(
                         "{}  [{}/{}] {}: {}",
-                        short_id(&r.id), r.scope, r.kind, r.subject, r.content
+                        short_id(&r.id),
+                        r.scope,
+                        r.kind,
+                        r.subject,
+                        r.content
                     ),
                 );
             }
@@ -3006,7 +3124,8 @@ async fn deliver_to_parent(
 ) {
     if !app.running
         && let Ok(mut s) = session.try_lock()
-        && s.append_message(crate::llm::Message::user(report.clone())).is_ok()
+        && s.append_message(crate::llm::Message::user(report.clone()))
+            .is_ok()
     {
         return;
     }
@@ -3083,7 +3202,17 @@ fn start_synthetic_turn(
     cancel: &mut CancellationToken,
 ) {
     app.synthetic_user_message = Some(message.clone());
-    start_turn(message, app, agent, session, mem, cwd, bash_timeout, turn, cancel);
+    start_turn(
+        message,
+        app,
+        agent,
+        session,
+        mem,
+        cwd,
+        bash_timeout,
+        turn,
+        cancel,
+    );
 }
 
 /// Render the tail of a session as plain text for the memory classifier. Tool
@@ -3131,7 +3260,10 @@ fn show_accounting_overlay(app: &mut App, id: Option<String>, title: &str) {
         Ok(lines) => {
             let items = lines
                 .into_iter()
-                .map(|line| OverlayItem { label: line, description: String::new() })
+                .map(|line| OverlayItem {
+                    label: line,
+                    description: String::new(),
+                })
                 .collect();
             app.overlay = Some(Overlay::reference(title, items));
             app.transcript.dirty = true;
@@ -3145,10 +3277,14 @@ fn describe(ev: &Event) -> String {
     match ev {
         Event::UserMessage { text } => format!("you: {}", truncate(text.trim(), 60)),
         Event::AssistantMessage { text } => format!("said: {}", truncate(text.trim(), 60)),
-        Event::ToolCall { name, arguments, .. } => {
+        Event::ToolCall {
+            name, arguments, ..
+        } => {
             format!("⚙ {name} {}", truncate(arguments.trim(), 50))
         }
-        Event::ToolResult { name, ok, output, .. } => format!(
+        Event::ToolResult {
+            name, ok, output, ..
+        } => format!(
             "  {} {name}: {}",
             if *ok { "→" } else { "✗" },
             truncate(output.trim(), 50)
@@ -3171,7 +3307,12 @@ fn describe(ev: &Event) -> String {
             completion_tokens_per_second
         ),
         Event::ModelChanged { from, to } => format!("model changed: {from} → {to}"),
-        Event::Usage { completion_tokens, reasoning_tokens, finish_reason, .. } => format!(
+        Event::Usage {
+            completion_tokens,
+            reasoning_tokens,
+            finish_reason,
+            ..
+        } => format!(
             "usage: {completion_tokens} tok ({reasoning_tokens} reasoning), finish={}",
             finish_reason.as_deref().unwrap_or("none")
         ),
@@ -3183,7 +3324,11 @@ fn describe(ev: &Event) -> String {
             format!("{} validation: {detail}", if *ok { "✓" } else { "✗" })
         }
         Event::MemoryUsed { ids } => memory_used_summary(ids),
-        Event::Compaction { tokens_before, tokens_after, .. } => {
+        Event::Compaction {
+            tokens_before,
+            tokens_after,
+            ..
+        } => {
             format!("⟲ compacted ~{tokens_before} → ~{tokens_after} tokens")
         }
         Event::Warning { message } => format!("⚠ {}", truncate(message.trim(), 60)),
@@ -3204,7 +3349,11 @@ fn describe(ev: &Event) -> String {
 }
 
 fn memory_used_summary(ids: &[String]) -> String {
-    let shown = ids.iter().map(|id| short_id(id)).collect::<Vec<_>>().join(" ");
+    let shown = ids
+        .iter()
+        .map(|id| short_id(id))
+        .collect::<Vec<_>>()
+        .join(" ");
     if shown.is_empty() {
         "memory: using 0 item(s)".to_string()
     } else {
@@ -3266,13 +3415,15 @@ fn skill_command<'a>(
         label: skill.name.clone(),
         description: skill.description.clone(),
     }));
-    items.extend(
-        catalog
-            .notes()
-            .iter()
-            .map(|note| OverlayItem { label: note.clone(), description: String::new() }),
-    );
-    let names = catalog.skills().iter().map(|skill| skill.name.clone()).collect();
+    items.extend(catalog.notes().iter().map(|note| OverlayItem {
+        label: note.clone(),
+        description: String::new(),
+    }));
+    let names = catalog
+        .skills()
+        .iter()
+        .map(|skill| skill.name.clone())
+        .collect();
     app.overlay = Some(Overlay::skills(items, names));
     refresh_skill_overlay(app, agent);
     app.transcript.dirty = true;
@@ -3281,10 +3432,16 @@ fn skill_command<'a>(
 fn refresh_skill_overlay(app: &mut App, agent: &Agent) {
     if let Some(overlay) = app.overlay.as_mut().filter(|ov| ov.is_skill_catalog()) {
         overlay.set_loaded_skills(agent.loaded_skill_names().into_iter().collect());
-        let chosen = overlay.chosen().filter(|name| overlay.skill_loaded(name).is_some());
+        let chosen = overlay
+            .chosen()
+            .filter(|name| overlay.skill_loaded(name).is_some());
         if let Some(name) = chosen {
             let loaded = overlay.skill_loaded(&name) == Some(true);
-            if !overlay.preview.as_ref().is_some_and(|p| p.name == name && p.loaded == loaded) {
+            if !overlay
+                .preview
+                .as_ref()
+                .is_some_and(|p| p.name == name && p.loaded == loaded)
+            {
                 let text = agent
                     .preview_skill(&name)
                     .unwrap_or_else(|e| format!("could not preview `{name}`: {e}"));
@@ -3356,7 +3513,11 @@ fn refresh_mcp_overlay(app: &mut App, agent: &Agent) {
 }
 
 fn load_overlay_skill(app: &mut App, agent: &Agent, name: &str) {
-    app.status = if agent.loaded_skill_names().iter().any(|loaded| loaded == name) {
+    app.status = if agent
+        .loaded_skill_names()
+        .iter()
+        .any(|loaded| loaded == name)
+    {
         format!("skill `{name}` is already loaded")
     } else {
         match agent.load_skill(name) {
@@ -3369,11 +3530,7 @@ fn load_overlay_skill(app: &mut App, agent: &Agent, name: &str) {
 
 /// `/knowledge [index | search <query> | status]` — the project's own text,
 /// chunked and searchable. Rebuildable, so `index` is always safe to re-run.
-fn knowledge_command<'a>(
-    app: &mut App,
-    cwd: &Path,
-    mut parts: impl Iterator<Item = &'a str>,
-) {
+fn knowledge_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = &'a str>) {
     let store = match crate::knowledge::KnowledgeStore::open(cwd) {
         Ok(s) => s,
         Err(e) => {
@@ -3402,9 +3559,10 @@ fn knowledge_command<'a>(
                 return;
             }
             match store.search(&query, 5) {
-                Ok(hits) if hits.is_empty() => {
-                    app.push(Kind::Notice, "(no matches — try /knowledge index)".to_string())
-                }
+                Ok(hits) if hits.is_empty() => app.push(
+                    Kind::Notice,
+                    "(no matches — try /knowledge index)".to_string(),
+                ),
                 Ok(hits) => {
                     for h in hits {
                         app.push(
@@ -3420,7 +3578,10 @@ fn knowledge_command<'a>(
             Ok(n) => app.push(Kind::Notice, format!("knowledge index: {n} chunk(s)")),
             Err(e) => app.push(Kind::Error, format!("knowledge error: {e}")),
         },
-        other => app.push(Kind::Error, format!("unknown /knowledge subcommand: {other}")),
+        other => app.push(
+            Kind::Error,
+            format!("unknown /knowledge subcommand: {other}"),
+        ),
     }
 }
 
@@ -3438,7 +3599,10 @@ fn knowledge_command<'a>(
 /// arithmetic.
 fn worker_timing(w: &WorkerSummary) -> String {
     let clock = |t: SystemTime| {
-        let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = t
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         // Local wall clock without pulling in a date library: the session is
         // today, so hh:mm:ss is all that is wanted.
         let day = secs % 86_400;
@@ -3451,12 +3615,7 @@ fn worker_timing(w: &WorkerSummary) -> String {
         Err(_) => "?".to_string(),
     };
     match w.finished {
-        Some(end) => format!(
-            "{}→{} ({} ago)",
-            clock(w.started),
-            clock(end),
-            ago(end)
-        ),
+        Some(end) => format!("{}→{} ({} ago)", clock(w.started), clock(end), ago(end)),
         None => format!("{} (running {})", clock(w.started), ago(w.started)),
     }
 }
@@ -3521,8 +3680,11 @@ async fn agents_command<'a>(
                 app.push(Kind::Notice, "(no agents)".to_string());
             } else {
                 for w in list {
-                    let nudges =
-                        if w.nudges > 0 { format!(" · {} nudges", w.nudges) } else { String::new() };
+                    let nudges = if w.nudges > 0 {
+                        format!(" · {} nudges", w.nudges)
+                    } else {
+                        String::new()
+                    };
                     let on = match &w.model {
                         Some(m) => format!(" · on {m}"),
                         None => String::new(),
@@ -3566,7 +3728,10 @@ async fn agents_command<'a>(
                         Err(why) => app.push(Kind::Notice, format!("not nudged: {why}")),
                     }
                 }
-                _ => app.push(Kind::Notice, "usage: /agents nudge <id> <message>".to_string()),
+                _ => app.push(
+                    Kind::Notice,
+                    "usage: /agents nudge <id> <message>".to_string(),
+                ),
             }
         }
         "kill" | "stop" => match parts.next() {
@@ -3636,7 +3801,10 @@ fn external_edit_with(editor: &str, current: &str) -> Option<String> {
     // `EDITOR` may include args (e.g. "code -w"); the file path goes last.
     let mut parts = editor.split_whitespace();
     let prog = parts.next()?;
-    let status = std::process::Command::new(prog).args(parts).arg(&path).status();
+    let status = std::process::Command::new(prog)
+        .args(parts)
+        .arg(&path)
+        .status();
 
     let result = match status {
         Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
@@ -3662,7 +3830,11 @@ fn expand_file_mentions(input: &str, cwd: &Path) -> String {
             }
         }
     }
-    if appended.is_empty() { input.to_string() } else { format!("{input}{appended}") }
+    if appended.is_empty() {
+        input.to_string()
+    } else {
+        format!("{input}{appended}")
+    }
 }
 
 // ---- rendering ------------------------------------------------------------
@@ -3694,7 +3866,12 @@ fn ui(f: &mut Frame, app: &App) {
     let footer_left = footer_string(app);
     let footer_status = footer_status(app);
     let footer_rows = footer_height(f.area().width, &footer_left, &footer_status)
-        .min(f.area().height.saturating_sub(input_height).saturating_sub(3))
+        .min(
+            f.area()
+                .height
+                .saturating_sub(input_height)
+                .saturating_sub(3),
+        )
         .max(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3736,7 +3913,9 @@ fn hint_enter_accepts(input: &str) -> bool {
 fn key_inserts_newline(key: &KeyEvent) -> bool {
     (matches!(key.code, KeyCode::Char('n')) && key.modifiers.contains(KeyModifiers::CONTROL))
         || (matches!(key.code, KeyCode::Enter)
-            && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
+            && key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
 }
 
 /// Draw the command hint anchored to the bottom of `above`, growing upward.
@@ -3745,15 +3924,28 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
     if matches.is_empty() {
         return;
     }
-    let label_w = matches.iter().map(|(_, i)| i.label.chars().count()).max().unwrap_or(0);
-    let desc_w = matches.iter().map(|(_, i)| i.description.chars().count()).max().unwrap_or(0);
+    let label_w = matches
+        .iter()
+        .map(|(_, i)| i.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let desc_w = matches
+        .iter()
+        .map(|(_, i)| i.description.chars().count())
+        .max()
+        .unwrap_or(0);
     let width = (label_w + desc_w + 8).clamp(20, above.width.saturating_sub(2) as usize) as u16;
     let rows = (matches.len() as u16).min(8);
     let height = rows + 2;
     if above.y < height {
         return; // no room above the composer; the footer hint still applies
     }
-    let rect = Rect { x: above.x, y: above.y - height, width, height };
+    let rect = Rect {
+        x: above.x,
+        y: above.y - height,
+        width,
+        height,
+    };
 
     f.render_widget(ratatui::widgets::Clear, rect);
     // Say when the list is longer than the window; eight of fourteen looks
@@ -3788,7 +3980,11 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
                 Span::styled(format!("{marker}{:<label_w$}  ", item.label), style),
                 Span::styled(
                     item.description.clone(),
-                    if i == sel { style } else { Style::default().fg(Color::DarkGray) },
+                    if i == sel {
+                        style
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
                 ),
             ])
         })
@@ -3818,7 +4014,12 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     let height = (rows + OVERLAY_BORDER_ROWS).min(area.height.saturating_sub(OVERLAY_BORDER_ROWS));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / OVERLAY_VERTICAL_ANCHOR_DIVISOR;
-    let rect = Rect { x, y, width, height };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     f.render_widget(ratatui::widgets::Clear, rect);
 
@@ -3838,7 +4039,12 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     let visible = inner.height as usize;
     let sel = ov.sel_index(matches.len());
     let first = sel.saturating_sub(visible.saturating_sub(1));
-    let label_w = matches.iter().map(|(_, i)| i.label.chars().count()).max().unwrap_or(0).min(20);
+    let label_w = matches
+        .iter()
+        .map(|(_, i)| i.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(20);
 
     let lines: Vec<Line> = matches
         .iter()
@@ -3861,14 +4067,21 @@ fn render_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
                 Span::styled(format!("{marker}{label}"), style),
                 Span::styled(
                     format!("  {}", item.description),
-                    if selected { style } else { Style::default().fg(Color::DarkGray) },
+                    if selected {
+                        style
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
                 ),
             ])
         })
         .collect();
 
     let body = if lines.is_empty() {
-        vec![Line::from(Span::styled("(nothing matches)", Style::default().fg(Color::DarkGray)))]
+        vec![Line::from(Span::styled(
+            "(nothing matches)",
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
         lines
     };
@@ -3889,12 +4102,18 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
         .map(|(_, item)| {
             if let Some(loaded) = ov.skill_loaded(&item.label) {
                 let state = if loaded { "loaded" } else { "available" };
-                (format!("[{state}] {}  {}", item.label, item.description), false)
+                (
+                    format!("[{state}] {}  {}", item.label, item.description),
+                    false,
+                )
             } else if item.description.is_empty() {
                 let heading = is_reference_heading(&item.label);
                 (item.label.clone(), heading)
             } else {
-                (format!("{:<label_w$}  {}", item.label, item.description), false)
+                (
+                    format!("{:<label_w$}  {}", item.label, item.description),
+                    false,
+                )
             }
         })
         .collect();
@@ -3914,24 +4133,38 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
     } else {
         " jk · gg/G · /filter · Esc close "
     };
-    let max_width =
-        area.width.saturating_sub(REFERENCE_HORIZONTAL_MARGIN).max(REFERENCE_MIN_WIDTH as u16)
-            as usize;
-    let line_width =
-        rendered.iter().map(|(line, _)| line.chars().count()).max().unwrap_or(REFERENCE_MIN_WIDTH)
-            + REFERENCE_CONTENT_PADDING;
+    let max_width = area
+        .width
+        .saturating_sub(REFERENCE_HORIZONTAL_MARGIN)
+        .max(REFERENCE_MIN_WIDTH as u16) as usize;
+    let line_width = rendered
+        .iter()
+        .map(|(line, _)| line.chars().count())
+        .max()
+        .unwrap_or(REFERENCE_MIN_WIDTH)
+        + REFERENCE_CONTENT_PADDING;
     // Short catalogs still need enough room to explain navigation and closing.
-    let line_width = line_width.max(title.chars().count() + 2).max(hint.chars().count() + 2);
+    let line_width = line_width
+        .max(title.chars().count() + 2)
+        .max(hint.chars().count() + 2);
     let width = line_width.clamp(REFERENCE_MIN_WIDTH, max_width) as u16;
     let rows = (matches.len() as u16).clamp(OVERLAY_EMPTY_ROWS, REFERENCE_MAX_ROWS);
     let height = (rows + OVERLAY_BORDER_ROWS).min(area.height.saturating_sub(OVERLAY_BORDER_ROWS));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / OVERLAY_VERTICAL_ANCHOR_DIVISOR;
-    let rect = Rect { x, y, width, height };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     f.render_widget(ratatui::widgets::Clear, rect);
 
-    let block = Block::default().borders(Borders::ALL).title(title).title_bottom(hint);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(hint);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -3955,7 +4188,10 @@ fn render_reference_overlay(f: &mut Frame, area: Rect, ov: &Overlay) {
         })
         .collect();
     let body = if lines.is_empty() {
-        vec![Line::from(Span::styled("(nothing matches)", Style::default().fg(Color::DarkGray)))]
+        vec![Line::from(Span::styled(
+            "(nothing matches)",
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
         lines
     };
@@ -3971,7 +4207,12 @@ fn render_compaction_overlay(f: &mut Frame, area: Rect, app: &App) {
     let height = COMPACTION_HEIGHT;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / OVERLAY_VERTICAL_ANCHOR_DIVISOR;
-    let rect = Rect { x, y, width, height };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     f.render_widget(ratatui::widgets::Clear, rect);
 
@@ -3982,7 +4223,10 @@ fn render_compaction_overlay(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let elapsed = app.compact_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    let elapsed = app
+        .compact_start
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
     let body = vec![
         Line::from("working: summarizing older turns"),
         Line::from(format!("elapsed {elapsed}s")),
@@ -4156,7 +4400,9 @@ pub fn bench_rows() {
         let start = std::time::Instant::now();
         let n = 200;
         for _ in 0..n {
-            app.apply_event(crate::event::Event::MessageDelta { text: "token ".into() });
+            app.apply_event(crate::event::Event::MessageDelta {
+                text: "token ".into(),
+            });
             app.ensure_rows(100);
         }
         let each = start.elapsed() / n;
@@ -4179,13 +4425,22 @@ pub fn print_normal_preview() {
 
     let mut app = App::new("qwen/qwen3.8-27b".into(), 128_000, None);
     app.push(Kind::User, "review chapter 9".to_string());
-    app.push(Kind::Assistant, "The listing captions are missing for 9-3 and 9-14.".to_string());
+    app.push(
+        Kind::Assistant,
+        "The listing captions are missing for 9-3 and 9-14.".to_string(),
+    );
     app.push(Kind::Tool, "⚙ read Chapter9.docx".to_string());
-    app.push(Kind::ToolResult, "styles: Body, CodeAnnotated, ListPlain".to_string());
+    app.push(
+        Kind::ToolResult,
+        "styles: Body, CodeAnnotated, ListPlain".to_string(),
+    );
     app.ensure_rows(78);
     app.enter_normal();
     app.cursor_by(-4);
-    app.set_search(Some(Search { pattern: "listing".into(), typing: false }));
+    app.set_search(Some(Search {
+        pattern: "listing".into(),
+        typing: false,
+    }));
 
     let mut term = Terminal::new(TestBackend::new(78, 14)).unwrap();
     term.draw(|f| ui(f, &app)).unwrap();
@@ -4253,13 +4508,28 @@ mod tests {
     #[test]
     fn workspace_review_diff_is_colored_and_never_collapsed() {
         let mut a = app();
-        let patch = format!("Ready\ncheck passed\ndiff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n{}+last addition\n", "+new\n".repeat(40));
+        let patch = format!(
+            "Ready\ncheck passed\ndiff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n{}+last addition\n",
+            "+new\n".repeat(40)
+        );
         a.show_workspace_review("diff", patch);
         let rows = transcript::build_rows(&a.transcript.items, true, true, 100);
-        for (text, color) in [("-old", Color::Red), ("+last addition", Color::Green), ("@@ -1 +1 @@", Color::Cyan)] {
-            assert!(rows.iter().flat_map(|row| &row.spans).any(|span| span.content == text && span.style.fg == Some(color)));
+        for (text, color) in [
+            ("-old", Color::Red),
+            ("+last addition", Color::Green),
+            ("@@ -1 +1 @@", Color::Cyan),
+        ] {
+            assert!(
+                rows.iter()
+                    .flat_map(|row| &row.spans)
+                    .any(|span| span.content == text && span.style.fg == Some(color))
+            );
         }
-        assert!(!rows.iter().any(|row| transcript::row_text(row).contains("more diff lines")));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| transcript::row_text(row).contains("more diff lines"))
+        );
         a.show_workspace_review("apply", "applied 1 file".into());
         assert!(a.transcript.items.last().unwrap().kind == Kind::Notice);
     }
@@ -4269,13 +4539,26 @@ mod tests {
         let mut a = app();
         let event = Event::ModelMetrics {
             session_id: None,
-            model: "old/model".into(), purpose: "agent".into(), cost_usd: Some(0.25),
-            cached_tokens: None, cache_write_tokens: None, prompt_tokens: 1000, completion_tokens: 100,
-            reasoning_tokens: 0, context_breakdown: None, total_ms: 100,
-            first_output_ms: None, prompt_tokens_per_second: 0.0, completion_tokens_per_second: 1000.0,
+            model: "old/model".into(),
+            purpose: "agent".into(),
+            cost_usd: Some(0.25),
+            cached_tokens: None,
+            cache_write_tokens: None,
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            reasoning_tokens: 0,
+            context_breakdown: None,
+            total_ms: 100,
+            first_output_ms: None,
+            prompt_tokens_per_second: 0.0,
+            completion_tokens_per_second: 1000.0,
         };
         a.apply_event(event);
-        a.prices = crate::config::ModelSettings { input: Some(100.0), output: Some(200.0), ..Default::default() };
+        a.prices = crate::config::ModelSettings {
+            input: Some(100.0),
+            output: Some(200.0),
+            ..Default::default()
+        };
         assert!(footer_string(&a).contains("$0.25"));
         a.reset_for_new_session(PathBuf::from("new.jsonl"));
         assert_eq!(a.recorded_spend.calls, 0);
@@ -4287,12 +4570,20 @@ mod tests {
         let mut a = app();
         a.session_path = PathBuf::from("old.jsonl");
         let mut event = Event::ModelMetrics {
-            session_id: Some("old".into()), model: "priced/model".into(),
-            purpose: "helper".into(), cost_usd: Some(0.25),
-            cached_tokens: None, cache_write_tokens: None, prompt_tokens: 1000,
-            completion_tokens: 100, reasoning_tokens: 0, context_breakdown: None,
-            total_ms: 100, first_output_ms: None,
-            prompt_tokens_per_second: 0.0, completion_tokens_per_second: 1000.0,
+            session_id: Some("old".into()),
+            model: "priced/model".into(),
+            purpose: "helper".into(),
+            cost_usd: Some(0.25),
+            cached_tokens: None,
+            cache_write_tokens: None,
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            reasoning_tokens: 0,
+            context_breakdown: None,
+            total_ms: 100,
+            first_output_ms: None,
+            prompt_tokens_per_second: 0.0,
+            completion_tokens_per_second: 1000.0,
         };
         a.apply_event(event.clone());
         assert_eq!(a.recorded_spend.known_cost_usd, 0.25);
@@ -4316,7 +4607,8 @@ mod tests {
                     session_id: None,
                     model: String::new(),
                     purpose: String::new(),
-                    cached_tokens: None, cache_write_tokens: None,
+                    cached_tokens: None,
+                    cache_write_tokens: None,
                     cost_usd: None,
                     prompt_tokens: 1500,
                     completion_tokens: 40,
@@ -4343,7 +4635,8 @@ mod tests {
                     session_id: None,
                     model: String::new(),
                     purpose: String::new(),
-                    cached_tokens: None, cache_write_tokens: None,
+                    cached_tokens: None,
+                    cache_write_tokens: None,
                     cost_usd: None,
                     prompt_tokens: 2000,
                     completion_tokens: 100,
@@ -4388,11 +4681,12 @@ mod tests {
         let mut session = Session::create_at(&path, dir.path()).unwrap();
         session
             .append_event(&Event::ModelMetrics {
-                    session_id: None,
-                    model: String::new(),
-                    purpose: String::new(),
-                    cached_tokens: None, cache_write_tokens: None,
-                    cost_usd: None,
+                session_id: None,
+                model: String::new(),
+                purpose: String::new(),
+                cached_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: None,
                 prompt_tokens: 2000,
                 completion_tokens: 100,
                 reasoning_tokens: 10,
@@ -4419,7 +4713,10 @@ mod tests {
         show_accounting_overlay(&mut app, None, "metrics");
 
         assert_eq!(app.transcript.items.len(), before);
-        let overlay = app.overlay.as_ref().expect("metrics should open an overlay");
+        let overlay = app
+            .overlay
+            .as_ref()
+            .expect("metrics should open an overlay");
         assert!(!overlay.is_picker());
         let labels = overlay
             .matches()
@@ -4429,7 +4726,11 @@ mod tests {
         assert!(labels.contains(&"Summary"));
         assert!(labels.contains(&"Latest Call"));
         assert!(labels.contains(&"Context Breakdown"));
-        assert!(!labels.iter().any(|line| line.starts_with("latest breakdown (est):")));
+        assert!(
+            !labels
+                .iter()
+                .any(|line| line.starts_with("latest breakdown (est):"))
+        );
     }
 
     #[test]
@@ -4446,7 +4747,8 @@ mod tests {
                     session_id: None,
                     model: String::new(),
                     purpose: String::new(),
-                    cached_tokens: None, cache_write_tokens: None,
+                    cached_tokens: None,
+                    cache_write_tokens: None,
                     cost_usd: None,
                     prompt_tokens: 4800,
                     completion_tokens: 36,
@@ -4498,7 +4800,10 @@ mod tests {
         app.overlay = Some(Overlay::reference(
             "metrics",
             (0..40)
-                .map(|i| OverlayItem { label: format!("line {i}"), description: String::new() })
+                .map(|i| OverlayItem {
+                    label: format!("line {i}"),
+                    description: String::new(),
+                })
                 .collect(),
         ));
         let flow = handle_overlay_key(
@@ -4509,12 +4814,27 @@ mod tests {
         assert!(matches!(flow, Some(Flow::Continue)));
         assert_eq!(app.overlay.as_ref().unwrap().selected, 10);
         assert_eq!(app.transcript.scroll_up, 0);
-        handle_overlay_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut app, false);
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
         assert_eq!(app.transcript.scroll_up, 0);
-        handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
-        assert!(app.overlay.is_some(), "Enter must not select a reference row");
-        handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app, false);
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
+        assert!(
+            app.overlay.is_some(),
+            "Enter must not select a reference row"
+        );
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         assert!(app.overlay.is_none());
     }
 
@@ -4522,26 +4842,43 @@ mod tests {
     fn reference_navigation_filter_and_wheel_leave_streaming_untouched() {
         let mut app = app();
         app.running = true;
-        app.apply_event(Event::Thinking { text: "before".into() });
+        app.apply_event(Event::Thinking {
+            text: "before".into(),
+        });
         app.overlay = Some(Overlay::reference(
             "stats",
             (0..40)
-                .map(|i| OverlayItem { label: format!("row {i} jkgq"), description: String::new() })
+                .map(|i| OverlayItem {
+                    label: format!("row {i} jkgq"),
+                    description: String::new(),
+                })
                 .collect(),
         ));
         let key = |app: &mut App, c| {
-            handle_overlay_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), app, false);
+            handle_overlay_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                app,
+                false,
+            );
         };
         key(&mut app, 'j');
         assert_eq!(app.overlay.as_ref().unwrap().selected, 1);
         key(&mut app, 'G');
         assert_eq!(app.overlay.as_ref().unwrap().selected, 39);
         key(&mut app, 'g');
-        assert_eq!(app.overlay.as_ref().unwrap().selected, 39, "g waits for its second key");
+        assert_eq!(
+            app.overlay.as_ref().unwrap().selected,
+            39,
+            "g waits for its second key"
+        );
         key(&mut app, 'g');
         assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
         key(&mut app, 'k');
-        assert_eq!(app.overlay.as_ref().unwrap().selected, 0, "references do not wrap");
+        assert_eq!(
+            app.overlay.as_ref().unwrap().selected,
+            0,
+            "references do not wrap"
+        );
         app.scroll_wheel(3);
         assert_eq!(app.overlay.as_ref().unwrap().selected, 3);
         app.scroll_wheel(-3);
@@ -4567,11 +4904,21 @@ mod tests {
         assert!(app.overlay.as_ref().unwrap().matches().is_empty());
         app.scroll_wheel(3);
         assert_eq!(app.overlay.as_ref().unwrap().selected, 0);
-        handle_overlay_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &mut app, false);
-        handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         key(&mut app, 'q');
         assert!(app.overlay.is_none());
-        app.apply_event(Event::Thinking { text: " after".into() });
+        app.apply_event(Event::Thinking {
+            text: " after".into(),
+        });
         assert_eq!(app.transcript.items.len(), 1);
         assert_eq!(app.transcript.items[0].text, "before after");
         assert_eq!(app.transcript.scroll_up, 0);
@@ -4594,7 +4941,9 @@ mod tests {
         // An empty append-only log is a valid zero-call report.
         std::fs::write(&app.session_path, "").unwrap();
         app.running = true;
-        app.apply_event(Event::Thinking { text: "thinking".into() });
+        app.apply_event(Event::Thinking {
+            text: "thinking".into(),
+        });
         show_accounting_overlay(&mut app, None, "stats");
         assert_eq!(app.overlay.as_ref().unwrap().title, "stats");
         assert!(!app.overlay.as_ref().unwrap().is_picker());
@@ -4606,15 +4955,35 @@ mod tests {
         let overlay = app.overlay.as_ref().unwrap();
         assert!(!overlay.is_picker());
         assert!(overlay.items.iter().any(|i| i.label == "command-test"));
-        assert!(!overlay.items.iter().any(|i| i.label.contains("COMMAND_BODY")));
+        assert!(
+            !overlay
+                .items
+                .iter()
+                .any(|i| i.label.contains("COMMAND_BODY"))
+        );
         app.overlay = None;
         skill_command(&mut app, dir.path(), &agent, ["command-test"].into_iter());
-        assert!(app.status.contains("loaded; applies from the next model request"));
-        skill_command(&mut app, dir.path(), &agent, ["missing-command-test"].into_iter());
+        assert!(
+            app.status
+                .contains("loaded; applies from the next model request")
+        );
+        skill_command(
+            &mut app,
+            dir.path(),
+            &agent,
+            ["missing-command-test"].into_iter(),
+        );
         assert!(app.status.contains("no skill named"));
-        skill_command(&mut app, dir.path(), &agent, ["command-test", "extra"].into_iter());
+        skill_command(
+            &mut app,
+            dir.path(),
+            &agent,
+            ["command-test", "extra"].into_iter(),
+        );
         assert_eq!(app.status, "usage: /skill [name]");
-        app.apply_event(Event::Thinking { text: " continues".into() });
+        app.apply_event(Event::Thinking {
+            text: " continues".into(),
+        });
         assert_eq!(app.transcript.items.len(), 1);
         assert_eq!(app.transcript.items[0].text, "thinking continues");
         assert!(app.overlay.is_none());
@@ -4635,10 +5004,18 @@ mod tests {
         let agent = test_agent_at(dir.path());
         let mut app = app();
         app.running = true;
-        app.apply_event(Event::Thinking { text: "before".into() });
+        app.apply_event(Event::Thinking {
+            text: "before".into(),
+        });
         skill_command(&mut app, dir.path(), &agent, std::iter::empty());
-        assert!(agent.loaded_skill_names().is_empty(), "browsing does not load anything");
-        assert_eq!(app.overlay.as_ref().unwrap().skill_loaded("select-second"), Some(false));
+        assert!(
+            agent.loaded_skill_names().is_empty(),
+            "browsing does not load anything"
+        );
+        assert_eq!(
+            app.overlay.as_ref().unwrap().skill_loaded("select-second"),
+            Some(false)
+        );
         for c in "/select-second".chars() {
             handle_overlay_key(
                 KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
@@ -4646,8 +5023,11 @@ mod tests {
                 false,
             );
         }
-        let action =
-            handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        let action = handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         let Some(Flow::LoadSkill(name)) = action else {
             panic!("Enter must load the highlighted skill")
         };
@@ -4665,8 +5045,13 @@ mod tests {
         // A load outside the picker (including the model's tool) appears on refresh.
         agent.load_skill("select-first").unwrap();
         refresh_skill_overlay(&mut app, &agent);
-        assert_eq!(app.overlay.as_ref().unwrap().skill_loaded("select-first"), Some(true));
-        app.apply_event(Event::Thinking { text: " after".into() });
+        assert_eq!(
+            app.overlay.as_ref().unwrap().skill_loaded("select-first"),
+            Some(true)
+        );
+        app.apply_event(Event::Thinking {
+            text: " after".into(),
+        });
         assert_eq!(app.transcript.items.len(), 1);
         assert_eq!(app.transcript.items[0].text, "before after");
         assert!(app.composer.input.is_empty());
@@ -4691,7 +5076,16 @@ mod tests {
         app.overlay.as_mut().unwrap().set_filter("preview-fixture");
         refresh_skill_overlay(&mut app, &agent);
         skill_browser::prepare(app.overlay.as_mut().unwrap(), Rect::new(0, 0, 120, 30), "");
-        assert!(app.overlay.as_ref().unwrap().preview.as_ref().unwrap().text.contains("instruction"));
+        assert!(
+            app.overlay
+                .as_ref()
+                .unwrap()
+                .preview
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("instruction")
+        );
         for key in [KeyCode::Tab, KeyCode::Char('G')] {
             handle_overlay_key(KeyEvent::new(key, KeyModifiers::NONE), &mut app, false);
         }
@@ -4701,14 +5095,25 @@ mod tests {
         assert!(ov.preview_scroll > 0);
         assert!(agent.loaded_skill_names().is_empty());
         load_overlay_skill(&mut app, &agent, "preview-fixture");
-        let action =
-            handle_overlay_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), &mut app, false);
+        let action = handle_overlay_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         let Some(Flow::UnloadSkill(name)) = action else {
             panic!("u must unload the highlighted skill")
         };
         agent.unload_skill(&name);
         refresh_skill_overlay(&mut app, &agent);
-        assert!(!app.overlay.as_ref().unwrap().preview.as_ref().unwrap().loaded);
+        assert!(
+            !app.overlay
+                .as_ref()
+                .unwrap()
+                .preview
+                .as_ref()
+                .unwrap()
+                .loaded
+        );
         app.overlay.as_mut().unwrap().set_filter("no-such-preview");
         refresh_skill_overlay(&mut app, &agent);
         assert!(app.overlay.as_ref().unwrap().preview.is_none());
@@ -4722,11 +5127,20 @@ mod tests {
             for query in ["", "rust"] {
                 let mut app = app();
                 let items = vec![
-                    OverlayItem { label: "rust-one".into(), description: String::new() },
-                    OverlayItem { label: "rust-two".into(), description: String::new() },
+                    OverlayItem {
+                        label: "rust-one".into(),
+                        description: String::new(),
+                    },
+                    OverlayItem {
+                        label: "rust-two".into(),
+                        description: String::new(),
+                    },
                 ];
                 app.overlay = Some(if skills {
-                    Overlay::skills(items, ["rust-one".into(), "rust-two".into()].into_iter().collect())
+                    Overlay::skills(
+                        items,
+                        ["rust-one".into(), "rust-two".into()].into_iter().collect(),
+                    )
                 } else {
                     Overlay::reference("stats", items)
                 });
@@ -4755,7 +5169,11 @@ mod tests {
                 let ov = app.overlay.as_ref().unwrap();
                 assert_eq!(ov.chosen().as_deref(), Some("rust-two"));
                 assert_eq!(ov.filter, query, "navigation must not append to the query");
-                handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app, false);
+                handle_overlay_key(
+                    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                    &mut app,
+                    false,
+                );
                 assert!(app.overlay.is_none());
                 assert!(app.transcript.items.is_empty());
             }
@@ -4768,7 +5186,11 @@ mod tests {
         app.overlay = Some(Overlay::skills(vec![], Default::default()));
         app.overlay.as_mut().unwrap().skill_focus = SkillFocus::Preview;
         for c in "/rust".chars() {
-            handle_overlay_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), &mut app, false);
+            handle_overlay_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut app,
+                false,
+            );
         }
         let ov = app.overlay.as_ref().unwrap();
         assert_eq!(ov.skill_focus, SkillFocus::List);
@@ -4784,11 +5206,17 @@ mod tests {
             let mut app = app();
             app.composer.set_input("COMPOSER_SENTINEL".into());
             app.status =
-                "skill `idiomatic-rust` loaded; applies from the next model request STATUS_END".into();
+                "skill `idiomatic-rust` loaded; applies from the next model request STATUS_END"
+                    .into();
             let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
             terminal.draw(|f| ui(f, &app)).unwrap();
-            let text: String =
-                terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
             assert!(text.contains("COMPOSER_SENTINEL"));
             assert!(
                 text.contains("STATUS_END"),
@@ -4892,16 +5320,31 @@ mod tests {
             app.composer.set_input("COMPOSER_SENTINEL".into());
             app.status = "Skill instructions activated for the next model request. This deliberately long status must remain readable through STATUS_END".into();
             app.overlay = Some(Overlay::skills(
-                vec![OverlayItem { label: "fixture".into(), description: "fixture".into() }],
+                vec![OverlayItem {
+                    label: "fixture".into(),
+                    description: "fixture".into(),
+                }],
                 ["fixture".into()].into_iter().collect(),
             ));
             let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
             term.draw(|f| ui(f, &app)).unwrap();
-            let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+            let text: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
             assert!(!text.contains("COMPOSER_SENTINEL"));
             assert!(text.contains("[catalog] fixture"));
-            assert!(text.contains("STATUS_END"), "status clipped at {width}x{height}");
-            assert!(text.contains("back/close"), "controls clipped at {width}x{height}");
+            assert!(
+                text.contains("STATUS_END"),
+                "status clipped at {width}x{height}"
+            );
+            assert!(
+                text.contains("back/close"),
+                "controls clipped at {width}x{height}"
+            );
         }
     }
 
@@ -4921,26 +5364,52 @@ mod tests {
         skill_command(&mut app, dir.path(), &agent, std::iter::empty());
         app.overlay.as_mut().unwrap().set_filter("vanishing-skill");
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap())).unwrap();
-        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap()))
+            .unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("[catalog] vanishing-skill"));
         assert!(text.contains("Enter activate"));
         std::fs::remove_file(path.join("SKILL.md")).unwrap();
         load_overlay_skill(&mut app, &agent, "vanishing-skill");
         assert!(app.status.starts_with("skill:"));
         assert!(agent.loaded_skill_names().is_empty());
-        assert_eq!(app.overlay.as_ref().unwrap().skill_loaded("vanishing-skill"), Some(false));
+        assert_eq!(
+            app.overlay
+                .as_ref()
+                .unwrap()
+                .skill_loaded("vanishing-skill"),
+            Some(false)
+        );
         // Rendering reads explicit state rather than inferring it from the label.
         app.overlay
             .as_mut()
             .unwrap()
             .set_loaded_skills(["vanishing-skill".to_string()].into_iter().collect());
-        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap())).unwrap();
-        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap()))
+            .unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("[active] vanishing-skill"));
-        app.overlay.as_mut().unwrap().set_filter("no-match-for-this-query");
-        let action =
-            handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        app.overlay
+            .as_mut()
+            .unwrap()
+            .set_filter("no-match-for-this-query");
+        let action = handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         assert!(matches!(action, Some(Flow::Continue)));
         assert!(app.overlay.is_some());
         assert!(app.transcript.items.is_empty());
@@ -4950,14 +5419,21 @@ mod tests {
     fn reference_cursor_is_visible_and_picker_typing_still_filters() {
         use ratatui::{Terminal, backend::TestBackend};
         let items = vec![
-            OverlayItem { label: "jkgq-first".into(), description: String::new() },
-            OverlayItem { label: "second".into(), description: String::new() },
+            OverlayItem {
+                label: "jkgq-first".into(),
+                description: String::new(),
+            },
+            OverlayItem {
+                label: "second".into(),
+                description: String::new(),
+            },
         ];
         let mut app = app();
         app.overlay = Some(Overlay::reference("test", items.clone()));
         app.overlay.as_mut().unwrap().selected = 1;
         let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
-        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap())).unwrap();
+        term.draw(|f| render_overlay(f, f.area(), app.overlay.as_ref().unwrap()))
+            .unwrap();
         let buf = term.backend().buffer();
         let at = buf
             .content()
@@ -4976,7 +5452,11 @@ mod tests {
             );
         }
         assert_eq!(app.overlay.as_ref().unwrap().filter, "jkgq");
-        handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app, false);
+        handle_overlay_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            false,
+        );
         assert!(app.overlay.is_none());
         assert_eq!(app.composer.input, "jkgq-first ");
     }
@@ -5019,7 +5499,10 @@ mod tests {
             3,
             32_000,
             6,
-            crate::tools::ToolContext { cwd: cwd.to_path_buf(), ..Default::default() },
+            crate::tools::ToolContext {
+                cwd: cwd.to_path_buf(),
+                ..Default::default()
+            },
         )
     }
 
@@ -5027,13 +5510,22 @@ mod tests {
     fn model_list_marks_the_entry_serving_the_session() {
         use std::collections::HashMap;
         let mut models = HashMap::new();
-        models.insert("big/27b".to_string(), crate::config::ModelSettings::default());
-        models.insert("cheap/7b".to_string(), crate::config::ModelSettings::default());
+        models.insert(
+            "big/27b".to_string(),
+            crate::config::ModelSettings::default(),
+        );
+        models.insert(
+            "cheap/7b".to_string(),
+            crate::config::ModelSettings::default(),
+        );
 
         // `App.model` is the bare name, so "big/27b" is marked, not "cheap/7b".
         // An unmarked line is the mark's space plus the separator's space.
         let lines = model_list("27b", &models);
-        assert_eq!(lines, vec!["* big/27b".to_string(), "  cheap/7b".to_string()]);
+        assert_eq!(
+            lines,
+            vec!["* big/27b".to_string(), "  cheap/7b".to_string()]
+        );
     }
 
     #[test]
@@ -5060,11 +5552,20 @@ mod tests {
     fn model_list_sorts_the_keys() {
         use std::collections::HashMap;
         let mut models = HashMap::new();
-        models.insert("zeta/7b".to_string(), crate::config::ModelSettings::default());
-        models.insert("alpha/27b".to_string(), crate::config::ModelSettings::default());
+        models.insert(
+            "zeta/7b".to_string(),
+            crate::config::ModelSettings::default(),
+        );
+        models.insert(
+            "alpha/27b".to_string(),
+            crate::config::ModelSettings::default(),
+        );
 
         let lines = model_list("27b", &models);
-        assert_eq!(lines, vec!["* alpha/27b".to_string(), "  zeta/7b".to_string()]);
+        assert_eq!(
+            lines,
+            vec!["* alpha/27b".to_string(), "  zeta/7b".to_string()]
+        );
     }
 
     #[test]
@@ -5085,10 +5586,7 @@ mod tests {
     fn validate_command_sets_and_clears_the_check() {
         let mut a = app();
 
-        validate_command(
-            &mut a,
-            ["cargo", "test", "tui::tests", "--lib"].into_iter(),
-        );
+        validate_command(&mut a, ["cargo", "test", "tui::tests", "--lib"].into_iter());
         assert_eq!(
             a.validate_cmd.as_deref(),
             Some("cargo test tui::tests --lib")
@@ -5534,8 +6032,12 @@ mod tests {
     fn streaming_deltas_coalesce_per_channel() {
         let mut a = app();
         a.apply_event(Event::UserMessage { text: "hi".into() });
-        a.apply_event(Event::Thinking { text: "let me ".into() });
-        a.apply_event(Event::Thinking { text: "think".into() });
+        a.apply_event(Event::Thinking {
+            text: "let me ".into(),
+        });
+        a.apply_event(Event::Thinking {
+            text: "think".into(),
+        });
         a.apply_event(Event::MessageDelta { text: "Hel".into() });
         a.apply_event(Event::MessageDelta { text: "lo".into() });
 
@@ -5550,26 +6052,49 @@ mod tests {
     #[test]
     fn a_turn_closes_on_its_own_completion_event() {
         let mut a = app();
-        a.apply_event(Event::UserMessage { text: "fix it".into() });
-        a.apply_event(Event::MessageDelta { text: "done".into() });
+        a.apply_event(Event::UserMessage {
+            text: "fix it".into(),
+        });
+        a.apply_event(Event::MessageDelta {
+            text: "done".into(),
+        });
         assert_eq!(a.transcript.current_turn(), Some(0));
-        a.apply_event(Event::TurnComplete { outcome: "done".into() });
+        a.apply_event(Event::TurnComplete {
+            outcome: "done".into(),
+        });
         assert_eq!(a.transcript.current_turn(), None);
-        assert!(matches!(a.transcript.items[0].kind, Kind::Turn { status: turn::Status::Done, .. }));
-        a.apply_event(Event::UserMessage { text: "again".into() });
-        a.apply_event(Event::TurnComplete { outcome: "aborted".into() });
-        assert!(matches!(a.transcript.items[2].kind, Kind::Turn { status: turn::Status::Failed, .. }));
+        assert!(matches!(
+            a.transcript.items[0].kind,
+            Kind::Turn {
+                status: turn::Status::Done,
+                ..
+            }
+        ));
+        a.apply_event(Event::UserMessage {
+            text: "again".into(),
+        });
+        a.apply_event(Event::TurnComplete {
+            outcome: "aborted".into(),
+        });
+        assert!(matches!(
+            a.transcript.items[2].kind,
+            Kind::Turn {
+                status: turn::Status::Failed,
+                ..
+            }
+        ));
         assert!(a.transcript.items[2].text.ends_with("[aborted]"));
     }
 
     #[test]
     fn synthesis_prompt_is_not_rendered_as_human_input() {
         let mut a = app();
-        let prompt =
-            "Your 2 background workers just reported back (above). Combine their results.";
+        let prompt = "Your 2 background workers just reported back (above). Combine their results.";
         a.synthetic_user_message = Some(prompt.to_string());
 
-        a.apply_event(Event::UserMessage { text: prompt.to_string() });
+        a.apply_event(Event::UserMessage {
+            text: prompt.to_string(),
+        });
 
         assert_eq!(a.transcript.items.len(), 1);
         assert!(matches!(a.transcript.items[0].kind, Kind::Turn { .. }));
@@ -5584,19 +6109,49 @@ mod tests {
     #[test]
     fn tool_call_breaks_the_assistant_block() {
         let mut a = app();
-        a.apply_event(Event::MessageDelta { text: "before".into() });
-        a.apply_event(Event::ToolCall { id: "1".into(), name: "ls".into(), arguments: "{}".into() });
-        a.apply_event(Event::MessageDelta { text: "after".into() });
+        a.apply_event(Event::MessageDelta {
+            text: "before".into(),
+        });
+        a.apply_event(Event::ToolCall {
+            id: "1".into(),
+            name: "ls".into(),
+            arguments: "{}".into(),
+        });
+        a.apply_event(Event::MessageDelta {
+            text: "after".into(),
+        });
 
         // before-assistant, tool, after-assistant → 3 separate items.
         assert_eq!(a.transcript.items.len(), 3);
         assert_eq!(a.transcript.items[0].text, "before");
-        assert!(matches!(a.transcript.items[1].kind, Kind::ToolActivity { .. }));
-        a.apply_event(Event::ToolResult { elapsed_ms: None, id: "1".into(), name: "ls".into(), ok: true, output: "main.py".into() });
+        assert!(matches!(
+            a.transcript.items[1].kind,
+            Kind::ToolActivity { .. }
+        ));
+        a.apply_event(Event::ToolResult {
+            elapsed_ms: None,
+            id: "1".into(),
+            name: "ls".into(),
+            ok: true,
+            output: "main.py".into(),
+        });
         assert_eq!(a.transcript.items.len(), 3);
         assert!(a.transcript.items[1].text.contains("main.py"));
-        a.apply_event(Event::ToolResult { elapsed_ms: None, id: "unmatched".into(), name: "ls".into(), ok: false, output: "missing call".into() });
-        assert!(a.transcript.items.last().unwrap().text.contains("missing call"));
+        a.apply_event(Event::ToolResult {
+            elapsed_ms: None,
+            id: "unmatched".into(),
+            name: "ls".into(),
+            ok: false,
+            output: "missing call".into(),
+        });
+        assert!(
+            a.transcript
+                .items
+                .last()
+                .unwrap()
+                .text
+                .contains("missing call")
+        );
         assert_eq!(a.transcript.items[2].text, "after");
     }
 
@@ -5625,7 +6180,9 @@ mod tests {
     fn session_started_is_visible_in_the_transcript() {
         let mut a = app();
 
-        a.apply_event(Event::SessionStarted { id: "abc123".into() });
+        a.apply_event(Event::SessionStarted {
+            id: "abc123".into(),
+        });
 
         assert_eq!(a.transcript.items.len(), 1);
         assert!(matches!(a.transcript.items[0].kind, Kind::Notice));
@@ -5640,7 +6197,9 @@ mod tests {
         // fields means a counter added later has to be reset to keep this green.
         let mut a = app();
         a.push(Kind::User, "hello");
-        a.apply_event(Event::Thinking { text: "x".repeat(400) });
+        a.apply_event(Event::Thinking {
+            text: "x".repeat(400),
+        });
         a.apply_event(Event::Usage {
             prompt_tokens: 3055,
             completion_tokens: 75,
@@ -5650,7 +6209,10 @@ mod tests {
         });
         a.transcript.scroll_up = 7;
         let before = footer_string(&a);
-        assert!(before.contains("3055"), "precondition: the footer reports the old session");
+        assert!(
+            before.contains("3055"),
+            "precondition: the footer reports the old session"
+        );
 
         a.reset_for_new_session(PathBuf::from("/tmp/new-session.jsonl"));
 
@@ -5660,9 +6222,15 @@ mod tests {
             "a new session's footer must read like a fresh one"
         );
         assert!(a.transcript.items.is_empty(), "the transcript is empty");
-        assert_eq!(a.transcript.scroll_up, 0, "nothing to be scrolled back into");
+        assert_eq!(
+            a.transcript.scroll_up, 0,
+            "nothing to be scrolled back into"
+        );
         assert_eq!(a.session_path, PathBuf::from("/tmp/new-session.jsonl"));
-        assert!(!a.compacting, "a new session cannot inherit compaction state");
+        assert!(
+            !a.compacting,
+            "a new session cannot inherit compaction state"
+        );
         assert_eq!(a.compact_start, None);
     }
 
@@ -5684,7 +6252,10 @@ mod tests {
             "the title must not imply the whole app is frozen"
         );
         let status = footer_status(&a);
-        assert!(status.contains("7s"), "elapsed compaction time is visible: {status}");
+        assert!(
+            status.contains("7s"),
+            "elapsed compaction time is visible: {status}"
+        );
         assert!(
             status.contains("compacting history"),
             "footer status names the work: {status}"
@@ -5714,7 +6285,10 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
 
-        assert!(rendered.contains("compacting history"), "the blocking work is named");
+        assert!(
+            rendered.contains("compacting history"),
+            "the blocking work is named"
+        );
         assert!(
             rendered.contains("summarizing older turns"),
             "the overlay says what is happening"
@@ -5731,7 +6305,10 @@ mod tests {
             !rendered.contains("Enter pick"),
             "manual compaction is not a picker"
         );
-        assert!(!rendered.contains("Esc close"), "there is no modal to close");
+        assert!(
+            !rendered.contains("Esc close"),
+            "there is no modal to close"
+        );
     }
 
     #[test]
@@ -5739,8 +6316,13 @@ mod tests {
         // The failure this exists for: a step that thinks for a minute and
         // returns nothing looked identical to one that was merely slow.
         let mut a = app();
-        a.apply_event(Event::Thinking { text: "x".repeat(8000) });
-        assert_eq!(a.step_reasoning_chars, 8000, "live count climbs as reasoning streams");
+        a.apply_event(Event::Thinking {
+            text: "x".repeat(8000),
+        });
+        assert_eq!(
+            a.step_reasoning_chars, 8000,
+            "live count climbs as reasoning streams"
+        );
 
         a.apply_event(Event::Usage {
             prompt_tokens: 100,
@@ -5749,9 +6331,19 @@ mod tests {
             reasoning_tokens: 2000,
             finish_reason: Some("length".into()),
         });
-        assert_eq!(a.last_reasoning_tokens, 2000, "the provider's number replaces the estimate");
-        assert_eq!(a.step_reasoning_chars, 0, "the live count resets for the next step");
-        assert_eq!(a.last_finish_reason.as_deref(), Some("length"), "cut-off is recorded");
+        assert_eq!(
+            a.last_reasoning_tokens, 2000,
+            "the provider's number replaces the estimate"
+        );
+        assert_eq!(
+            a.step_reasoning_chars, 0,
+            "the live count resets for the next step"
+        );
+        assert_eq!(
+            a.last_finish_reason.as_deref(),
+            Some("length"),
+            "cut-off is recorded"
+        );
     }
 
     #[test]
@@ -5760,7 +6352,11 @@ mod tests {
         assert_eq!(rows.len(), 8, "one row per footer glyph");
         for r in &rows {
             assert!(!r.label.is_empty(), "a row with no glyph");
-            assert!(!r.description.trim().is_empty(), "{} has no meaning", r.label);
+            assert!(
+                !r.description.trim().is_empty(),
+                "{} has no meaning",
+                r.label
+            );
         }
     }
 
@@ -5774,7 +6370,11 @@ mod tests {
         a.last_prompt_tokens = 100;
         a.last_reasoning_tokens = 2000;
         a.last_finish_reason = Some("length".into());
-        a.prices = crate::config::ModelSettings { input: Some(1.0), output: Some(2.0), ..Default::default() };
+        a.prices = crate::config::ModelSettings {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        };
         a.recorded_spend.calls = 1;
         a.recorded_spend.known_cost_usd = 3.0;
         a.total_in_tokens = 1_000_000;
@@ -5795,7 +6395,11 @@ mod tests {
                     g.split('<').next().unwrap_or(g)
                 }
             };
-            assert!(s.contains(glyph), "legend explains `{}` but the footer shows no such glyph in `{s}`", r.label);
+            assert!(
+                s.contains(glyph),
+                "legend explains `{}` but the footer shows no such glyph in `{s}`",
+                r.label
+            );
         }
     }
 
@@ -5842,8 +6446,14 @@ mod tests {
         // climbing timer while the turn sat waiting for a keypress.
         assert!(screen.contains("APPROVE?"), "the composer asks: {screen}");
         assert!(screen.contains("y = once"), "and says which keys: {screen}");
-        assert!(!screen.contains("working…"), "and stops claiming to be busy");
-        assert!(screen.contains("waiting for you"), "no spinner, no elapsed time");
+        assert!(
+            !screen.contains("working…"),
+            "and stops claiming to be busy"
+        );
+        assert!(
+            screen.contains("waiting for you"),
+            "no spinner, no elapsed time"
+        );
 
         assert!(matches!(
             handle_approval_key(
@@ -5879,7 +6489,10 @@ mod tests {
             matches!(flow, Some(Flow::Continue)),
             "denial does not quit the TUI"
         );
-        assert!(a.running, "denial answers the gate but does not abort the turn");
+        assert!(
+            a.running,
+            "denial answers the gate but does not abort the turn"
+        );
         assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Deny);
     }
 
@@ -5895,8 +6508,11 @@ mod tests {
         let mut a = app();
         a.modals.set_approval(req);
 
-        let flow =
-            handle_approval_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut a, false);
+        let flow = handle_approval_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut a,
+            false,
+        );
 
         assert!(matches!(flow, Some(Flow::Continue)));
         assert_eq!(h.await.unwrap(), crate::tools::approval::Approval::Deny);
@@ -5907,7 +6523,9 @@ mod tests {
         let (asker, mut rx) = crate::tools::approval::ChannelAsker::new();
         let h = tokio::spawn(async move {
             use crate::tools::approval::Asker;
-            asker.ask_text("Pin the worker model", "pin or retarget?").await
+            asker
+                .ask_text("Pin the worker model", "pin or retarget?")
+                .await
         });
         let req = rx.recv().await.unwrap();
         assert_eq!(req.subject, "Pin the worker model");
@@ -5937,7 +6555,9 @@ mod tests {
         let (asker, mut rx) = crate::tools::approval::ChannelAsker::new();
         let h = tokio::spawn(async move {
             use crate::tools::approval::Asker;
-            asker.ask_text("Pin the worker model", "pin or retarget?").await
+            asker
+                .ask_text("Pin the worker model", "pin or retarget?")
+                .await
         });
         let req = rx.recv().await.unwrap();
 
@@ -5951,13 +6571,26 @@ mod tests {
         term.draw(|f| ui(f, &a)).unwrap();
         let buf = term.backend().buffer().clone();
         let screen: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(screen.contains("CHECKPOINT"), "the composer says what it wants: {screen}");
-        assert!(screen.contains("Esc skips"), "and that ignoring it is allowed: {screen}");
-        assert!(screen.contains("waiting for you"), "no spinner while it waits: {screen}");
+        assert!(
+            screen.contains("CHECKPOINT"),
+            "the composer says what it wants: {screen}"
+        );
+        assert!(
+            screen.contains("Esc skips"),
+            "and that ignoring it is allowed: {screen}"
+        );
+        assert!(
+            screen.contains("waiting for you"),
+            "no spinner while it waits: {screen}"
+        );
 
         // Esc answers None, and the work carries on.
         assert!(answer_pending_ask(&mut a, None));
@@ -5982,7 +6615,11 @@ mod tests {
         term.draw(|f| ui(f, &a)).unwrap();
         let buf = term.backend().buffer().clone();
         let screen: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -6065,9 +6702,15 @@ mod tests {
 
         let (_, all) =
             compute_completions("/model ", Path::new("."), &probe_store(), &cfg).unwrap();
-        assert!(all.contains(&"openrouter/qwen/qwen3.8-27b".to_string()), "{all:?}");
+        assert!(
+            all.contains(&"openrouter/qwen/qwen3.8-27b".to_string()),
+            "{all:?}"
+        );
         assert!(all.contains(&"vllm/local-model".to_string()), "{all:?}");
-        assert!(all.contains(&"default".to_string()), "reverting is offered too: {all:?}");
+        assert!(
+            all.contains(&"default".to_string()),
+            "reverting is offered too: {all:?}"
+        );
 
         // And it filters on the prefix typed so far.
         let (_, some) =
@@ -6080,8 +6723,10 @@ mod tests {
         for request_first in [false, true] {
             let mut a = app();
             let call = Event::ToolCall {
-                id: "q1".into(), name: "checkpoint".into(),
-                arguments: r#"{"kind":"ask","subject":"Timer","detail":"Wall-clock or turns?"}"#.into(),
+                id: "q1".into(),
+                name: "checkpoint".into(),
+                arguments: r#"{"kind":"ask","subject":"Timer","detail":"Wall-clock or turns?"}"#
+                    .into(),
             };
             if request_first {
                 a.show_checkpoint("Timer", "Wall-clock or turns?");
@@ -6090,14 +6735,46 @@ mod tests {
                 a.apply_event(call);
                 a.show_checkpoint("Timer", "Wall-clock or turns?");
             }
-            a.apply_event(Event::Checkpoint { kind: "ask".into(), subject: "Timer".into(), detail: "Wall-clock or turns?".into() });
-            a.apply_event(Event::ToolResult { elapsed_ms: None, id: "q1".into(), name: "checkpoint".into(), ok: true, output: "The user answered: wall-clock. Build that.".into() });
+            a.apply_event(Event::Checkpoint {
+                kind: "ask".into(),
+                subject: "Timer".into(),
+                detail: "Wall-clock or turns?".into(),
+            });
+            a.apply_event(Event::ToolResult {
+                elapsed_ms: None,
+                id: "q1".into(),
+                name: "checkpoint".into(),
+                ok: true,
+                output: "The user answered: wall-clock. Build that.".into(),
+            });
             assert_eq!(a.transcript.items.len(), 1);
-            assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: true }));
-            assert_eq!(a.transcript.items[0].text.matches("Wall-clock or turns?").count(), 1);
+            assert!(matches!(
+                a.transcript.items[0].kind,
+                Kind::Checkpoint { expanded: true }
+            ));
+            assert_eq!(
+                a.transcript.items[0]
+                    .text
+                    .matches("Wall-clock or turns?")
+                    .count(),
+                1
+            );
             assert!(!a.transcript.items[0].text.contains("Build that"));
-            a.apply_event(Event::ToolResult { elapsed_ms: None, id: "q2".into(), name: "checkpoint".into(), ok: false, output: "no checkpoints left".into() });
-            assert!(a.transcript.items.last().unwrap().text.contains("[error] no checkpoints left"));
+            a.apply_event(Event::ToolResult {
+                elapsed_ms: None,
+                id: "q2".into(),
+                name: "checkpoint".into(),
+                ok: false,
+                output: "no checkpoints left".into(),
+            });
+            assert!(
+                a.transcript
+                    .items
+                    .last()
+                    .unwrap()
+                    .text
+                    .contains("[error] no checkpoints left")
+            );
         }
     }
 
@@ -6112,26 +6789,66 @@ mod tests {
         a.modals.set_ask(req);
         assert!(answer_pending_ask(&mut a, Some("How is it tested?".into())));
         assert_eq!(task.await.unwrap().as_deref(), Some("How is it tested?"));
-        a.apply_event(Event::Checkpoint { kind: "note".into(), subject: "Timer".into(), detail: "Use a fake clock.".into() });
+        a.apply_event(Event::Checkpoint {
+            kind: "note".into(),
+            subject: "Timer".into(),
+            detail: "Use a fake clock.".into(),
+        });
         a.show_checkpoint("Timer", "Use a fake clock. What should it do?");
         assert_eq!(a.transcript.items.len(), 1);
-        assert!(a.transcript.items[0].text.contains("You: How is it tested?"));
-        assert_eq!(a.transcript.items[0].checkpoint.iter().map(|m| m.speaker).collect::<Vec<_>>(),
-            vec![checkpoint::Speaker::Assistant, checkpoint::Speaker::User, checkpoint::Speaker::Assistant]);
-        assert_eq!(a.transcript.items[0].text.matches("Use a fake clock.").count(), 1);
+        assert!(
+            a.transcript.items[0]
+                .text
+                .contains("You: How is it tested?")
+        );
+        assert_eq!(
+            a.transcript.items[0]
+                .checkpoint
+                .iter()
+                .map(|m| m.speaker)
+                .collect::<Vec<_>>(),
+            vec![
+                checkpoint::Speaker::Assistant,
+                checkpoint::Speaker::User,
+                checkpoint::Speaker::Assistant
+            ]
+        );
+        assert_eq!(
+            a.transcript.items[0]
+                .text
+                .matches("Use a fake clock.")
+                .count(),
+            1
+        );
         a.ensure_rows(60);
         a.enter_normal();
         a.transcript.cursor_row = 0;
-        handle_normal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut a, false).unwrap();
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut a,
+            false,
+        )
+        .unwrap();
         a.ensure_rows(60);
         assert_eq!(a.transcript.mode, Mode::Normal);
-        assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: false }));
+        assert!(matches!(
+            a.transcript.items[0].kind,
+            Kind::Checkpoint { expanded: false }
+        ));
         // Collapse is presentation only: yank still uses this original text.
         assert!(a.transcript.items[0].text.contains("How is it tested?"));
-        a.set_search(Some(Search { pattern: "fake clock".into(), typing: false }));
-        assert!(matches!(a.transcript.items[0].kind, Kind::Checkpoint { expanded: true }));
+        a.set_search(Some(Search {
+            pattern: "fake clock".into(),
+            typing: false,
+        }));
+        assert!(matches!(
+            a.transcript.items[0].kind,
+            Kind::Checkpoint { expanded: true }
+        ));
         assert!(!a.transcript.search_hits().is_empty());
-        a.apply_event(Event::TurnComplete { outcome: "done".into() });
+        a.apply_event(Event::TurnComplete {
+            outcome: "done".into(),
+        });
         a.show_checkpoint("Next choice", "A separate question");
         assert_eq!(a.transcript.items.len(), 2);
     }
@@ -6160,8 +6877,15 @@ mod tests {
             subject: "ActiveModel::from_override".into(),
             detail: "stubbed at llm/mod.rs:440 — must reset sampling".into(),
         });
-        assert!(matches!(a.transcript.items[0].kind, Kind::Pair), "a checkpoint is not machinery chatter");
-        assert!(a.transcript.items[0].text.contains("yours — ActiveModel::from_override"));
+        assert!(
+            matches!(a.transcript.items[0].kind, Kind::Pair),
+            "a checkpoint is not machinery chatter"
+        );
+        assert!(
+            a.transcript.items[0]
+                .text
+                .contains("yours — ActiveModel::from_override")
+        );
 
         // An `ask` renders when its answer lands, not when it is raised: the
         // question is already on screen in the composer's prompt.
@@ -6171,13 +6895,18 @@ mod tests {
             subject: "Pin the worker model".into(),
             detail: "pin or retarget?".into(),
         });
-        assert!(b.transcript.items.is_empty(), "the question is not printed twice");
+        assert!(
+            b.transcript.items.is_empty(),
+            "the question is not printed twice"
+        );
     }
 
     #[test]
     fn a_dropped_setting_is_shown_not_swallowed() {
         let mut a = app();
-        a.apply_event(Event::Warning { message: "budget ignored".into() });
+        a.apply_event(Event::Warning {
+            message: "budget ignored".into(),
+        });
         assert!(matches!(a.transcript.items[0].kind, Kind::Notice));
         assert!(a.transcript.items[0].text.contains("budget ignored"));
     }
@@ -6239,7 +6968,10 @@ mod tests {
         a.composer.clear_input();
         a.composer.insert_str("one\ntwo");
         a.composer.move_home();
-        assert_eq!(a.composer.cursor, 4, "start of the line the cursor is on, not of the buffer");
+        assert_eq!(
+            a.composer.cursor, 4,
+            "start of the line the cursor is on, not of the buffer"
+        );
         a.composer.move_end();
         assert_eq!(a.composer.cursor, 7);
     }
@@ -6315,21 +7047,36 @@ mod tests {
         };
         let text = |rows: &[Line]| -> Vec<String> {
             rows.iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
                 .collect()
         };
 
         a.push(Kind::User, "write the linter");
         a.push(Kind::ToolResult, "output ".repeat(80));
         a.ensure_rows(60);
-        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after appends");
+        assert_eq!(
+            text(&a.transcript.cached_rows),
+            text(&full(&a)),
+            "after appends"
+        );
 
         // Streaming: repeated appends to the last item, the hot path.
         for _ in 0..30 {
-            a.apply_event(Event::MessageDelta { text: "token ".into() });
+            a.apply_event(Event::MessageDelta {
+                text: "token ".into(),
+            });
             a.ensure_rows(60);
         }
-        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after streaming");
+        assert_eq!(
+            text(&a.transcript.cached_rows),
+            text(&full(&a)),
+            "after streaming"
+        );
         // The prefix is the thing at risk: a truncation bug loses it silently.
         assert!(
             text(&a.transcript.cached_rows)[0].contains("write the linter"),
@@ -6341,12 +7088,20 @@ mod tests {
         // *every* item renders, then a width change.
         a.push(Kind::Tool, "⚙ grep");
         a.ensure_rows(60);
-        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after a later push");
+        assert_eq!(
+            text(&a.transcript.cached_rows),
+            text(&full(&a)),
+            "after a later push"
+        );
 
         a.transcript.collapse_tools = true;
         a.touch_all();
         a.ensure_rows(60);
-        assert_eq!(text(&a.transcript.cached_rows), text(&full(&a)), "after a render toggle");
+        assert_eq!(
+            text(&a.transcript.cached_rows),
+            text(&full(&a)),
+            "after a render toggle"
+        );
 
         a.ensure_rows(30);
         assert_eq!(
@@ -6370,15 +7125,24 @@ mod tests {
         a.ensure_rows(60);
         let prefix = a.transcript.cached_rows.len();
 
-        a.apply_event(Event::MessageDelta { text: "hello".into() });
+        a.apply_event(Event::MessageDelta {
+            text: "hello".into(),
+        });
         assert_eq!(
             a.transcript.dirty_from,
             Some(a.transcript.items.len() - 1),
             "only the last item is stale"
         );
         a.ensure_rows(60);
-        assert!(a.transcript.cached_rows.len() > prefix, "the prefix was kept, not rebuilt");
-        assert_eq!(a.transcript.item_starts.len(), a.transcript.items.len(), "one start per item");
+        assert!(
+            a.transcript.cached_rows.len() > prefix,
+            "the prefix was kept, not rebuilt"
+        );
+        assert_eq!(
+            a.transcript.item_starts.len(),
+            a.transcript.items.len(),
+            "one start per item"
+        );
     }
 
     #[test]
@@ -6407,7 +7171,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(!a.escape_pair('j'), "too slow to be the escape");
         a.composer.insert_char('j');
-        assert_eq!(a.composer.input, "jj", "prose survives: this composer holds words");
+        assert_eq!(
+            a.composer.input, "jj",
+            "prose survives: this composer holds words"
+        );
     }
 
     #[test]
@@ -6430,7 +7197,10 @@ mod tests {
         a.insert_escape = None;
         assert!(!a.escape_pair('j'));
         a.composer.insert_char('j');
-        assert!(!a.escape_pair('j'), "disabled means it is only ever a letter");
+        assert!(
+            !a.escape_pair('j'),
+            "disabled means it is only ever a letter"
+        );
 
         // Rebinding to a different pair works the same way.
         let mut b = app();
@@ -6486,7 +7256,10 @@ mod tests {
                     && (0..buf.area.width)
                         .any(|x| buf[(x, y)].modifier.contains(Modifier::REVERSED))
             });
-            assert!(marked, "{what}: the selected row must be visibly highlighted");
+            assert!(
+                marked,
+                "{what}: the selected row must be visibly highlighted"
+            );
         }
 
         // The overlay paints over the transcript, so they need separate draws —
@@ -6494,19 +7267,28 @@ mod tests {
         let mut a = app();
         a.push(Kind::Assistant, "a reply");
         a.ensure_rows(78);
-        assert!(!a.transcript.cached_rows.is_empty(), "the transcript must actually render");
+        assert!(
+            !a.transcript.cached_rows.is_empty(),
+            "the transcript must actually render"
+        );
         assert_no_white(&a, "transcript");
 
         a.overlay = Some(Overlay::new(
             "commands",
-            vec![OverlayItem { label: "/help".into(), description: "keys".into() }],
+            vec![OverlayItem {
+                label: "/help".into(),
+                description: "keys".into(),
+            }],
         ));
         assert_no_white(&a, "picker");
         assert_row_is_marked(&a, "/help", "picker");
 
         a.overlay = Some(Overlay::reference(
             "footer",
-            vec![OverlayItem { label: "\u{21bb}".into(), description: "thinking".into() }],
+            vec![OverlayItem {
+                label: "\u{21bb}".into(),
+                description: "thinking".into(),
+            }],
         ));
         assert_no_white(&a, "legend");
     }
@@ -6524,9 +7306,17 @@ mod tests {
         assert_eq!(a.item_at_row(0), Some(0));
         let assistant_start = a.transcript.item_starts[1];
         assert_eq!(a.item_at_row(assistant_start), Some(1));
-        assert_eq!(a.item_at_row(assistant_start + 1), Some(1), "a wrapped row is still item 1");
+        assert_eq!(
+            a.item_at_row(assistant_start + 1),
+            Some(1),
+            "a wrapped row is still item 1"
+        );
         assert_eq!(a.item_at_row(a.transcript.item_starts[2]), Some(2));
-        assert_eq!(a.item_at_row(9_999), Some(2), "past the end clamps to the last item");
+        assert_eq!(
+            a.item_at_row(9_999),
+            Some(2),
+            "past the end clamps to the last item"
+        );
     }
 
     #[test]
@@ -6538,7 +7328,10 @@ mod tests {
         a.ensure_rows(80);
         a.enter_normal();
 
-        a.set_search(Some(Search { pattern: "LISTING".into(), typing: false }));
+        a.set_search(Some(Search {
+            pattern: "LISTING".into(),
+            typing: false,
+        }));
         let hits = a.transcript.search_hits().to_vec();
         assert_eq!(hits.len(), 2, "case-insensitive: {hits:?}");
 
@@ -6550,14 +7343,21 @@ mod tests {
             assert!(a.jump_match(true));
             visited.push(a.transcript.cursor_row);
         }
-        assert_eq!(visited, vec![hits[1], hits[0], hits[1]], "forward wraps: {visited:?}");
+        assert_eq!(
+            visited,
+            vec![hits[1], hits[0], hits[1]],
+            "forward wraps: {visited:?}"
+        );
 
         // Backwards cycles the other way.
         assert!(a.jump_match(false));
         assert_eq!(a.transcript.cursor_row, hits[0]);
 
         // A pattern that matches nothing must say so, not move the cursor.
-        a.set_search(Some(Search { pattern: "zzz".into(), typing: false }));
+        a.set_search(Some(Search {
+            pattern: "zzz".into(),
+            typing: false,
+        }));
         let before = a.transcript.cursor_row;
         assert!(!a.jump_match(true));
         assert_eq!(a.transcript.cursor_row, before);
@@ -6569,15 +7369,25 @@ mod tests {
         a.push(Kind::Assistant, "nothing yet");
         a.ensure_rows(80);
         a.enter_normal();
-        a.set_search(Some(Search { pattern: "needle".into(), typing: false }));
+        a.set_search(Some(Search {
+            pattern: "needle".into(),
+            typing: false,
+        }));
         assert!(a.transcript.search_hits().is_empty());
 
         a.push(Kind::Assistant, "needle arrived later");
-        assert!(a.transcript.search_hits_dirty, "new rows invalidate the cached hits");
+        assert!(
+            a.transcript.search_hits_dirty,
+            "new rows invalidate the cached hits"
+        );
         a.ensure_rows(80);
 
         let hits = a.transcript.search_hits().to_vec();
-        assert_eq!(hits.len(), 1, "the appended row should be the only match: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the appended row should be the only match: {hits:?}"
+        );
         assert!(
             row_text(&a.transcript.cached_rows[hits[0]]).contains("needle arrived later"),
             "the cached search result must include rows appended after the search started"
@@ -6592,13 +7402,25 @@ mod tests {
 
         a.enter_normal();
         assert_eq!(a.transcript.mode, Mode::Normal);
-        assert!(!a.transcript.follow, "reading should not jump to the bottom on new output");
+        assert!(
+            !a.transcript.follow,
+            "reading should not jump to the bottom on new output"
+        );
 
-        a.set_search(Some(Search { pattern: "x".into(), typing: true }));
+        a.set_search(Some(Search {
+            pattern: "x".into(),
+            typing: true,
+        }));
         a.enter_insert();
         assert_eq!(a.transcript.mode, Mode::Insert);
-        assert!(a.transcript.follow, "typing means you want to see what arrives");
-        assert!(a.transcript.search.is_none(), "a stale search must not keep highlighting");
+        assert!(
+            a.transcript.follow,
+            "typing means you want to see what arrives"
+        );
+        assert!(
+            a.transcript.search.is_none(),
+            "a stale search must not keep highlighting"
+        );
     }
 
     #[test]
@@ -6612,7 +7434,10 @@ mod tests {
         a.ensure_rows(78);
         a.enter_normal();
         a.transcript.cursor_row = 0;
-        a.set_search(Some(Search { pattern: "listing".into(), typing: false }));
+        a.set_search(Some(Search {
+            pattern: "listing".into(),
+            typing: false,
+        }));
 
         let mut term = Terminal::new(TestBackend::new(78, 10)).unwrap();
         term.draw(|f| ui(f, &a)).unwrap();
@@ -6654,12 +7479,22 @@ mod tests {
         let mut a = app();
         a.composer.set_input("/".into());
         a.composer.refresh_hint();
-        assert_eq!(a.composer.hint.as_ref().unwrap().matches().len(), COMMANDS.len());
+        assert_eq!(
+            a.composer.hint.as_ref().unwrap().matches().len(),
+            COMMANDS.len()
+        );
 
         a.composer.set_input("/me".into());
         a.composer.refresh_hint();
-        let got: Vec<String> =
-            a.composer.hint.as_ref().unwrap().matches().iter().map(|(_, i)| i.label.clone()).collect();
+        let got: Vec<String> = a
+            .composer
+            .hint
+            .as_ref()
+            .unwrap()
+            .matches()
+            .iter()
+            .map(|(_, i)| i.label.clone())
+            .collect();
         assert_eq!(got, vec!["/memory", "/metrics"]);
 
         // Once the command is complete and arguments start, this is the wrong
@@ -6716,7 +7551,10 @@ mod tests {
         a.agents_running = 2;
         let f = footer_string(&a);
         let agents = f.find("2 running").expect("shown at all");
-        assert!(agents < 60, "near the front, not off the edge: {agents} in {f:?}");
+        assert!(
+            agents < 60,
+            "near the front, not off the edge: {agents} in {f:?}"
+        );
     }
 
     #[test]
@@ -6738,7 +7576,9 @@ mod tests {
         // agent, session and worker manager. Crude, and it fails when the guard
         // goes, which is the requirement.
         let src = include_str!("tui.rs");
-        let enter_start = src.find("async fn handle_enter_key").expect("Enter handling stays named");
+        let enter_start = src
+            .find("async fn handle_enter_key")
+            .expect("Enter handling stays named");
         let rest = &src[enter_start..];
         let block_start = rest
             .find("    if input.is_empty() {")
@@ -6786,12 +7626,18 @@ mod tests {
         let mut a = app();
         a.composer.set_input("/agents".into());
         a.composer.refresh_hint();
-        assert!(a.composer.hint.is_some(), "the list is up while the command is typed");
+        assert!(
+            a.composer.hint.is_some(),
+            "the list is up while the command is typed"
+        );
 
         // What submitting does: the composer empties.
         a.composer.set_input(String::new());
         a.composer.refresh_hint();
-        assert!(a.composer.hint.is_none(), "an empty composer must not still show a command list");
+        assert!(
+            a.composer.hint.is_none(),
+            "an empty composer must not still show a command list"
+        );
     }
 
     #[test]
@@ -6810,13 +7656,19 @@ mod tests {
             KeyCode::Char('n'),
             KeyModifiers::CONTROL
         )));
-        assert!(key_inserts_newline(&KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
+        assert!(key_inserts_newline(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT
+        )));
         assert!(key_inserts_newline(&KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::SHIFT
         )));
 
-        assert!(!key_inserts_newline(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!key_inserts_newline(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
         assert!(!key_inserts_newline(&KeyEvent::new(
             KeyCode::Char('n'),
             KeyModifiers::NONE
@@ -6831,10 +7683,14 @@ mod tests {
         let mut a = app();
         a.composer.set_input("/h".into());
         a.composer.refresh_hint();
-        assert_eq!(a.composer.hint.as_ref().unwrap().chosen().as_deref(), Some("/help"));
+        assert_eq!(
+            a.composer.hint.as_ref().unwrap().chosen().as_deref(),
+            Some("/help")
+        );
 
         a.composer.set_input(String::new());
-        a.composer.paste("/spawn --model openrouter/qwen/qwen3.5-9b run pwd");
+        a.composer
+            .paste("/spawn --model openrouter/qwen/qwen3.5-9b run pwd");
 
         assert!(
             a.composer.hint.is_none(),
@@ -6888,7 +7744,10 @@ mod tests {
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
 
-        let hint_row = rows.iter().position(|r| r.contains("/memory")).expect("hint is drawn");
+        let hint_row = rows
+            .iter()
+            .position(|r| r.contains("/memory"))
+            .expect("hint is drawn");
         // No `unwrap_or` fallback here. Drawing the hint *below* the composer
         // covers the text being typed, so "/me " goes missing — and a fallback
         // of "assume it is the last row" turns that into a passing comparison.
@@ -6898,8 +7757,14 @@ mod tests {
             .iter()
             .position(|r| r.contains("/me "))
             .expect("the composer still shows what is being typed");
-        assert!(hint_row < composer_row, "the hint sits above what you are typing");
-        assert!(rows.iter().any(|r| r.contains("Tab accepts")), "and says how to take it");
+        assert!(
+            hint_row < composer_row,
+            "the hint sits above what you are typing"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("Tab accepts")),
+            "and says how to take it"
+        );
     }
 
     #[test]
@@ -6907,9 +7772,18 @@ mod tests {
         let mut ov = Overlay::new(
             "commands",
             vec![
-                OverlayItem { label: "/memory".into(), description: "what is remembered".into() },
-                OverlayItem { label: "/mouse".into(), description: "wheel vs. selection".into() },
-                OverlayItem { label: "/quit".into(), description: "exit".into() },
+                OverlayItem {
+                    label: "/memory".into(),
+                    description: "what is remembered".into(),
+                },
+                OverlayItem {
+                    label: "/mouse".into(),
+                    description: "wheel vs. selection".into(),
+                },
+                OverlayItem {
+                    label: "/quit".into(),
+                    description: "exit".into(),
+                },
             ],
         );
         assert_eq!(ov.matches().len(), 3);
@@ -6926,7 +7800,11 @@ mod tests {
 
         ov.set_filter("zzz");
         assert!(ov.matches().is_empty());
-        assert_eq!(ov.chosen(), None, "an empty list must not yield a selection");
+        assert_eq!(
+            ov.chosen(),
+            None,
+            "an empty list must not yield a selection"
+        );
     }
 
     #[test]
@@ -6934,9 +7812,18 @@ mod tests {
         let mut ov = Overlay::new(
             "commands",
             vec![
-                OverlayItem { label: "/memory".into(), description: "what is remembered".into() },
-                OverlayItem { label: "/mouse".into(), description: "wheel vs. selection".into() },
-                OverlayItem { label: "/quit".into(), description: "exit".into() },
+                OverlayItem {
+                    label: "/memory".into(),
+                    description: "what is remembered".into(),
+                },
+                OverlayItem {
+                    label: "/mouse".into(),
+                    description: "wheel vs. selection".into(),
+                },
+                OverlayItem {
+                    label: "/quit".into(),
+                    description: "exit".into(),
+                },
             ],
         );
 
@@ -6956,8 +7843,14 @@ mod tests {
         let mut ov = Overlay::new(
             "commands",
             vec![
-                OverlayItem { label: "/a".into(), description: "one".into() },
-                OverlayItem { label: "/b".into(), description: "two".into() },
+                OverlayItem {
+                    label: "/a".into(),
+                    description: "one".into(),
+                },
+                OverlayItem {
+                    label: "/b".into(),
+                    description: "two".into(),
+                },
             ],
         );
         ov.move_by(1);
@@ -6993,15 +7886,27 @@ mod tests {
         app.push(Kind::Assistant, "x".repeat(400));
         app.overlay = Some(Overlay::new(
             "commands",
-            vec![OverlayItem { label: "/memory".into(), description: "what is remembered".into() }],
+            vec![OverlayItem {
+                label: "/memory".into(),
+                description: "what is remembered".into(),
+            }],
         ));
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| ui(f, &app)).unwrap();
-        let rendered: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        let rendered: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
 
         assert!(rendered.contains("/memory"), "the picker is on screen");
-        assert!(rendered.contains("what is remembered"), "with its description");
+        assert!(
+            rendered.contains("what is remembered"),
+            "with its description"
+        );
         assert!(rendered.contains("Esc close"), "and how to get out of it");
     }
 
@@ -7011,38 +7916,70 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = app();
-        app.overlay = Some(Overlay::reference("footer legend · Esc close", footer_legend()));
+        app.overlay = Some(Overlay::reference(
+            "footer legend · Esc close",
+            footer_legend(),
+        ));
 
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| ui(f, &app)).unwrap();
-        let rendered: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        let rendered: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
 
         assert!(rendered.contains("footer legend"), "the legend's title");
         assert!(rendered.contains("Esc close"), "and how to get out");
-        assert!(!rendered.contains("Enter pick"), "a reference has nothing to pick");
+        assert!(
+            !rendered.contains("Enter pick"),
+            "a reference has nothing to pick"
+        );
         assert!(rendered.contains("reasoning tokens"), "the ↻ row's meaning");
         assert!(rendered.contains("max-tokens"), "the ⚠cut row's meaning");
     }
 
     #[test]
     fn completes_slash_commands() {
-        let (start, c) = compute_completions("/me", Path::new("."), &probe_store(), &Config::default()).unwrap();
+        let (start, c) =
+            compute_completions("/me", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert_eq!(start, 0);
         assert_eq!(c, vec!["/memory ".to_string(), "/metrics ".to_string()]);
 
-        let (_, all) = compute_completions("/", Path::new("."), &probe_store(), &Config::default()).unwrap();
+        let (_, all) =
+            compute_completions("/", Path::new("."), &probe_store(), &Config::default()).unwrap();
         assert!(all.len() >= 5);
 
         // Not in command position → no command completion.
-        assert!(compute_completions("hi /me", Path::new("."), &probe_store(), &Config::default()).is_none());
+        assert!(
+            compute_completions("hi /me", Path::new("."), &probe_store(), &Config::default())
+                .is_none()
+        );
     }
 
     #[test]
     fn completes_subcommands_and_args() {
         // /agents subcommands
-        let (_, c) = compute_completions("/agents ", Path::new("."), &probe_store(), &Config::default()).unwrap();
-        assert!(c.contains(&"list ".to_string()) && c.contains(&"kill ".to_string()), "{c:?}");
-        let (_, c) = compute_completions("/agents k", Path::new("."), &probe_store(), &Config::default()).unwrap();
+        let (_, c) = compute_completions(
+            "/agents ",
+            Path::new("."),
+            &probe_store(),
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(
+            c.contains(&"list ".to_string()) && c.contains(&"kill ".to_string()),
+            "{c:?}"
+        );
+        let (_, c) = compute_completions(
+            "/agents k",
+            Path::new("."),
+            &probe_store(),
+            &Config::default(),
+        )
+        .unwrap();
         assert_eq!(c, vec!["kill ".to_string()]);
 
         // /memory subcommands, then add's scope + kind
@@ -7080,9 +8017,17 @@ mod tests {
         );
 
         // /help has one subcommand: footer.
-        let (_, c) = compute_completions("/help ", Path::new("."), &probe_store(), &Config::default()).unwrap();
+        let (_, c) =
+            compute_completions("/help ", Path::new("."), &probe_store(), &Config::default())
+                .unwrap();
         assert_eq!(c, vec!["footer ".to_string()]);
-        let (_, c) = compute_completions("/help f", Path::new("."), &probe_store(), &Config::default()).unwrap();
+        let (_, c) = compute_completions(
+            "/help f",
+            Path::new("."),
+            &probe_store(),
+            &Config::default(),
+        )
+        .unwrap();
         assert_eq!(c, vec!["footer ".to_string()]);
     }
 
@@ -7176,20 +8121,24 @@ mod tests {
         std::fs::write(dir.path().join("main.rs"), "").unwrap();
         std::fs::write(dir.path().join("mod.rs"), "").unwrap();
 
-        let (start, c) = compute_completions("@m", dir.path(), &probe_store(), &Config::default()).unwrap();
+        let (start, c) =
+            compute_completions("@m", dir.path(), &probe_store(), &Config::default()).unwrap();
         assert_eq!(start, 0);
         assert!(c.contains(&"@main.rs".to_string()), "{c:?}");
         assert!(c.contains(&"@mod.rs".to_string()), "{c:?}");
 
         // Directories get a trailing slash.
-        let (_, d) = compute_completions("@s", dir.path(), &probe_store(), &Config::default()).unwrap();
+        let (_, d) =
+            compute_completions("@s", dir.path(), &probe_store(), &Config::default()).unwrap();
         assert!(d.contains(&"@src/".to_string()), "{d:?}");
     }
 
     #[test]
     fn build_rows_wraps_to_width_and_labels_channels() {
         let mut a = app();
-        a.apply_event(Event::UserMessage { text: "hello world this is a long line".into() });
+        a.apply_event(Event::UserMessage {
+            text: "hello world this is a long line".into(),
+        });
         let rows = build_rows(&a.transcript.items, a.transcript.collapse_tools, true, 16);
         // Every row must fit the width (accounting for prefix + content spans).
         for row in &rows {
@@ -7198,9 +8147,13 @@ mod tests {
         }
         // The root row quotes what fits; the rest is labeled beneath it.
         let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(first.starts_with("▼ hel"), "root row quotes the user: {first}");
         assert!(
-            rows.iter().any(|r| transcript::row_text(r).contains("you ▸ hello")),
+            first.starts_with("▼ hel"),
+            "root row quotes the user: {first}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| transcript::row_text(r).contains("you ▸ hello")),
             "a label that did not fit is shown whole: {rows:?}"
         );
     }

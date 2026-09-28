@@ -6,8 +6,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
@@ -18,10 +18,10 @@ use crate::agent::{Agent, Steering};
 use crate::event::Event;
 use crate::event::EventBus;
 use crate::llm::ModelOverride;
-use crate::session::Session;
-use crate::validation::CommandValidator;
-use crate::supervisor::{Action, Supervisor, SupervisorConfig};
 use crate::report::truncate;
+use crate::session::Session;
+use crate::supervisor::{Action, Supervisor, SupervisorConfig};
+use crate::validation::CommandValidator;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum WorkerStatus {
@@ -404,7 +404,10 @@ impl WorkerManager {
     }
 
     pub fn running_count(&self) -> usize {
-        self.workers.iter().filter(|w| w.summary().status.is_running()).count()
+        self.workers
+            .iter()
+            .filter(|w| w.summary().status.is_running())
+            .count()
     }
 
     /// Spawn a worker for `task` with the given `system` prompt. At the
@@ -515,14 +518,20 @@ impl WorkerManager {
             self.next_group += 1;
             self.groups.insert(
                 self.next_group,
-                GroupInfo { request, total: tasks.len() },
+                GroupInfo {
+                    request,
+                    total: tasks.len(),
+                },
             );
             Some(self.next_group)
         } else {
             None
         };
 
-        let mut report = FanOutReport { group, ..Default::default() };
+        let mut report = FanOutReport {
+            group,
+            ..Default::default()
+        };
         for task in tasks {
             match self.spawn_in(task, system.clone(), group, model.clone(), validate.clone()) {
                 Ok(SpawnOutcome::Started(id)) => report.started.push(id),
@@ -540,7 +549,9 @@ impl WorkerManager {
 
     /// The request a fan-out was serving, and how many workers are in it.
     pub fn group_info(&self, group: u64) -> Option<(&str, usize)> {
-        self.groups.get(&group).map(|g| (g.request.as_str(), g.total))
+        self.groups
+            .get(&group)
+            .map(|g| (g.request.as_str(), g.total))
     }
 
     /// Start queued tasks while slots are free. Returns the ids just started.
@@ -598,9 +609,14 @@ impl WorkerManager {
             .unwrap_or(&session_id)
             .to_owned();
         if let Some(path) = parent_session {
-            crate::session::link_worker(&path, &crate::session::WorkerLink {
-                id: id.clone(), session_id: session_id.clone(),
-            }).map_err(|e| format!("recording worker session: {e}"))?;
+            crate::session::link_worker(
+                &path,
+                &crate::session::WorkerLink {
+                    id: id.clone(),
+                    session_id: session_id.clone(),
+                },
+            )
+            .map_err(|e| format!("recording worker session: {e}"))?;
         }
         let bus = EventBus::new();
         let steering = Steering::new();
@@ -611,8 +627,12 @@ impl WorkerManager {
         // prefix, so `qwen/qwen3.5-9b` never matched the config's
         // `openrouter/qwen/qwen3.5-9b` and a fan-out's cost silently stayed
         // blank with prices correctly configured.
-        let model_prices = Some(model.as_ref().map(|m| m.settings.clone())
-            .unwrap_or_else(|| self.template.current().prices));
+        let model_prices = Some(
+            model
+                .as_ref()
+                .map(|m| m.settings.clone())
+                .unwrap_or_else(|| self.template.current().prices),
+        );
         // Created before the fork so the worker's tools can be pointed at it.
         // A fork otherwise inherits the *parent's* token, and the worker's own
         // kill switch reaches nothing that is actually running.
@@ -942,7 +962,10 @@ impl WorkerManager {
     }
 
     pub fn get(&self, id: &str) -> Option<WorkerSummary> {
-        self.workers.iter().find(|w| w.id == id).map(Worker::summary)
+        self.workers
+            .iter()
+            .find(|w| w.id == id)
+            .map(Worker::summary)
     }
 
     /// Request cancellation of a worker. Returns false if no such id.
@@ -975,12 +998,7 @@ fn fail_setup(runtime: &Mutex<Runtime>, message: &str) {
 
 /// Carry out a supervisor decision: nudge = steer the worker's next step;
 /// escalate = pull it off the floor (cancel) and record why.
-fn apply(
-    g: &mut Runtime,
-    action: Option<Action>,
-    steering: &Steering,
-    cancel: &CancellationToken,
-) {
+fn apply(g: &mut Runtime, action: Option<Action>, steering: &Steering, cancel: &CancellationToken) {
     match action {
         Some(Action::Nudge(directive)) => {
             g.nudges += 1;
@@ -1039,10 +1057,12 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
         // Arguments included for the same reason as in the status line above:
         // without them the tail is a column of "⚙ bash" and cannot say which
         // command ran, which is the whole thing a reader is following it for.
-        Event::ToolCall { name, arguments, .. } => {
-            log_line(g, format!("⚙ {name} {}", truncate(arguments.trim(), 60)))
-        }
-        Event::ToolResult { name, ok, output, .. } => {
+        Event::ToolCall {
+            name, arguments, ..
+        } => log_line(g, format!("⚙ {name} {}", truncate(arguments.trim(), 60))),
+        Event::ToolResult {
+            name, ok, output, ..
+        } => {
             let mark = if *ok { "" } else { "✗ " };
             log_line(g, format!("  {mark}{name}: {}", result_line(output)));
         }
@@ -1061,7 +1081,9 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
     }
     match e {
         event @ Event::ModelMetrics { .. } => g.accounting.observe(&event),
-        Event::ToolCall { name, arguments, .. } => {
+        Event::ToolCall {
+            name, arguments, ..
+        } => {
             g.tool_calls += 1;
             g.last = format!("⚙ {name} {}", truncate(arguments.trim(), 50));
             // Deterministically record file mutations for the parent/supervisor.
@@ -1069,7 +1091,7 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
                 && let Some(path) = serde_json::from_str::<serde_json::Value>(&arguments)
                     .ok()
                     .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-                .map(|path| display_changed_path(&path, cwd))
+                    .map(|path| display_changed_path(&path, cwd))
                 && !g.changed.contains(&path)
             {
                 g.changed.push(path);
@@ -1080,7 +1102,11 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
                 g.last = l.to_string();
             }
         }
-        Event::Usage { prompt_tokens, completion_tokens, .. } => {
+        Event::Usage {
+            prompt_tokens,
+            completion_tokens,
+            ..
+        } => {
             g.tokens += completion_tokens;
             g.prompt_tokens += prompt_tokens as u64;
         }
@@ -1088,7 +1114,11 @@ fn update_last(g: &mut Runtime, e: Event, cwd: &Path) {
         Event::Validation { ok, report, .. } => {
             g.validation = report.map(|report| *report);
             g.check_passed = Some(ok);
-            g.last = if ok { "✓ validated".into() } else { "✗ validation failed".into() }
+            g.last = if ok {
+                "✓ validated".into()
+            } else {
+                "✗ validation failed".into()
+            }
         }
         Event::Error { message } => g.last = first_line(&message),
         _ => {}
@@ -1176,7 +1206,10 @@ mod log_tests {
     #[test]
     fn only_what_is_new_comes_back() {
         let log = lines(5);
-        assert_eq!(slice_from(&log, 5, 3).0, vec!["3".to_string(), "4".to_string()]);
+        assert_eq!(
+            slice_from(&log, 5, 3).0,
+            vec!["3".to_string(), "4".to_string()]
+        );
     }
 
     #[test]
@@ -1227,8 +1260,16 @@ mod log_tests {
         for i in 0..(LOG_LINES + 50) {
             log_line(&mut rt, i.to_string());
         }
-        assert_eq!(rt.log.len(), LOG_LINES, "bounded, so a long worker can't grow forever");
-        assert_eq!(rt.log_total, LOG_LINES + 50, "but the count remembers what happened");
+        assert_eq!(
+            rt.log.len(),
+            LOG_LINES,
+            "bounded, so a long worker can't grow forever"
+        );
+        assert_eq!(
+            rt.log_total,
+            LOG_LINES + 50,
+            "but the count remembers what happened"
+        );
         assert_eq!(rt.log[0], "50", "the oldest lines are the ones dropped");
     }
 }
@@ -1257,7 +1298,10 @@ mod tail_tests {
         );
         let line = g.log.last().unwrap();
         assert!(line.contains("bash"), "{line}");
-        assert!(line.contains("cargo test --lib"), "the command is the point: {line}");
+        assert!(
+            line.contains("cargo test --lib"),
+            "the command is the point: {line}"
+        );
     }
 
     /// `exit code: 0` is the one line of a bash result that carries no
@@ -1277,8 +1321,14 @@ mod tail_tests {
             Path::new("."),
         );
         let line = g.log.last().unwrap();
-        assert!(line.contains("190 passed"), "the useful line is shown: {line}");
-        assert!(!line.contains("exit code: 0"), "not the one that says nothing: {line}");
+        assert!(
+            line.contains("190 passed"),
+            "the useful line is shown: {line}"
+        );
+        assert!(
+            !line.contains("exit code: 0"),
+            "not the one that says nothing: {line}"
+        );
     }
 
     /// A non-zero exit is different: then the code *is* the news.
@@ -1314,11 +1364,18 @@ mod escalation_tests {
     /// check is a fact about whether the work is done.
     #[test]
     fn an_escalation_does_not_overwrite_a_worker_whose_check_passed() {
-        let mut g = Runtime { status: WorkerStatus::Done, ..Default::default() };
+        let mut g = Runtime {
+            status: WorkerStatus::Done,
+            ..Default::default()
+        };
         g.check_passed = Some(true);
         g.escalation = Some("still off track after 2 nudges".into());
         apply_escalation(&mut g);
-        assert_eq!(g.status, WorkerStatus::Done, "the check is a fact; the escalation was a guess");
+        assert_eq!(
+            g.status,
+            WorkerStatus::Done,
+            "the check is a fact; the escalation was a guess"
+        );
     }
 
     /// Done with no check behind it is not the same claim, and must not
@@ -1327,7 +1384,10 @@ mod escalation_tests {
     /// it hung is disputing.
     #[test]
     fn done_without_a_check_does_not_outrank_an_escalation() {
-        let mut g = Runtime { status: WorkerStatus::Done, ..Default::default() };
+        let mut g = Runtime {
+            status: WorkerStatus::Done,
+            ..Default::default()
+        };
         g.escalation = Some("no response from the model for 100s".into());
         apply_escalation(&mut g);
         assert_eq!(g.status, WorkerStatus::Stopped);
@@ -1336,7 +1396,10 @@ mod escalation_tests {
     /// And still reports one when the worker did not finish.
     #[test]
     fn an_escalation_still_wins_over_a_bare_abort() {
-        let mut g = Runtime { status: WorkerStatus::Stopped, ..Default::default() };
+        let mut g = Runtime {
+            status: WorkerStatus::Stopped,
+            ..Default::default()
+        };
         g.escalation = Some("still off track after 2 nudges".into());
         apply_escalation(&mut g);
         assert_eq!(g.status, WorkerStatus::Stopped);
@@ -1366,7 +1429,9 @@ mod supervisor_visibility_tests {
 
         apply(
             &mut g,
-            Some(Action::Nudge("No progress for 20s. Briefly state where you are".into())),
+            Some(Action::Nudge(
+                "No progress for 20s. Briefly state where you are".into(),
+            )),
             &steering,
             &cancel,
         );
@@ -1387,7 +1452,9 @@ mod supervisor_visibility_tests {
 
         apply(
             &mut g,
-            Some(Action::Escalate("`bash` has been running for 1200s with no result".into())),
+            Some(Action::Escalate(
+                "`bash` has been running for 1200s with no result".into(),
+            )),
             &steering,
             &cancel,
         );

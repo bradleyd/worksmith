@@ -19,7 +19,10 @@ use crate::memory::{KINDS, MemoryStore, Scope};
 const DEFAULT_LIMIT: usize = 5;
 
 fn limit_of(args: &Value) -> usize {
-    args.get("limit").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_LIMIT as u64).clamp(1, 20) as usize
+    args.get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_LIMIT as u64)
+        .clamp(1, 20) as usize
 }
 
 pub struct MemoryTool;
@@ -70,7 +73,10 @@ impl Tool for MemoryTool {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(format!("memory unavailable: {e}")),
         };
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("search");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("search");
 
         match action {
             "search" => {
@@ -112,8 +118,11 @@ impl Tool for MemoryTool {
                     .and_then(|v| v.as_str())
                     .and_then(Scope::parse)
                     .unwrap_or(Scope::Project);
-                let importance =
-                    args.get("importance").and_then(|v| v.as_i64()).unwrap_or(60).clamp(0, 100);
+                let importance = args
+                    .get("importance")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(60)
+                    .clamp(0, 100);
 
                 // Workers propose; only the main session writes durable memory
                 // directly (§8). A worker's finding still has to survive review.
@@ -172,7 +181,10 @@ impl Tool for KnowledgeTool {
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolOutput {
         let opened = if ctx.is_worker {
             crate::session::Session::path_for_id(&ctx.session_id).and_then(|path| {
-                KnowledgeStore::open_at(&crate::session::store::artifact_path(&path, "knowledge.db", "knowledge.db"), &ctx.cwd)
+                KnowledgeStore::open_at(
+                    &crate::session::store::artifact_path(&path, "knowledge.db", "knowledge.db"),
+                    &ctx.cwd,
+                )
             })
         } else {
             KnowledgeStore::open(&ctx.cwd)
@@ -181,7 +193,11 @@ impl Tool for KnowledgeTool {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(format!("knowledge unavailable: {e}")),
         };
-        match args.get("action").and_then(|v| v.as_str()).unwrap_or("search") {
+        match args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("search")
+        {
             "index" => match store.index() {
                 Ok(stats) => {
                     let pruned = store.prune().unwrap_or(0);
@@ -203,7 +219,10 @@ impl Tool for KnowledgeTool {
                     Ok(hits) => {
                         let mut out = String::new();
                         for h in hits {
-                            out.push_str(&format!("--- {} (chunk {})\n{}\n\n", h.source, h.ord, h.text));
+                            out.push_str(&format!(
+                                "--- {} (chunk {})\n{}\n\n",
+                                h.source, h.ord, h.text
+                            ));
                         }
                         ToolOutput::ok(out)
                     }

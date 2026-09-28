@@ -67,7 +67,11 @@ pub(crate) fn rescue_text_tool_calls(
         // Strip the block from wherever it came from, and keep the prose around
         // it — the sighting that prompted this had a sentence after the block.
         // Left in place, the text would be both spoken and executed.
-        let kept = if kept.trim().is_empty() { None } else { Some(kept) };
+        let kept = if kept.trim().is_empty() {
+            None
+        } else {
+            Some(kept)
+        };
         match field {
             Field::Content => completion.content = kept,
             Field::Reasoning => completion.reasoning = kept,
@@ -111,8 +115,12 @@ fn extract(text: &str, tools: &[ToolDef]) -> (Vec<ToolCall>, String) {
     let mut cursor = 0usize;
 
     loop {
-        let xml = text[cursor..].find("<function=").map(|p| (cursor + p, Shape::Xml));
-        let fence = text[cursor..].find("```").map(|p| (cursor + p, Shape::Fence));
+        let xml = text[cursor..]
+            .find("<function=")
+            .map(|p| (cursor + p, Shape::Xml));
+        let fence = text[cursor..]
+            .find("```")
+            .map(|p| (cursor + p, Shape::Fence));
         let (start, shape) = match (xml, fence) {
             (None, None) => break,
             (Some(a), None) => a,
@@ -205,7 +213,10 @@ fn parse_xml(s: &str, tools: &[ToolDef]) -> Option<(usize, ToolCall)> {
     while let Some(p) = body[cur..].find("<parameter=") {
         let key_start = cur + p + "<parameter=".len();
         let g = body[key_start..].find('>')?;
-        let key = body[key_start..key_start + g].trim().trim_matches('"').to_string();
+        let key = body[key_start..key_start + g]
+            .trim()
+            .trim_matches('"')
+            .to_string();
         let val_start = key_start + g + 1;
         // A missing close tag means the block was truncated. Leave the whole
         // thing as text: a tool call with half its arguments costs a turn just
@@ -249,7 +260,10 @@ fn parse_fenced(s: &str, tools: &[ToolDef]) -> Option<(usize, ToolCall)> {
 fn parse_call_object(s: &str, tools: &[ToolDef]) -> Option<ToolCall> {
     let v: serde_json::Value = serde_json::from_str(s).ok()?;
     let obj = v.as_object()?;
-    if !obj.keys().all(|k| matches!(k.as_str(), "name" | "arguments" | "parameters")) {
+    if !obj
+        .keys()
+        .all(|k| matches!(k.as_str(), "name" | "arguments" | "parameters"))
+    {
         return None;
     }
     let name = obj.get("name")?.as_str()?;
@@ -302,8 +316,13 @@ fn coerce(raw: &str, key: &str, def: &ToolDef) -> serde_json::Value {
 /// the close tag, and no more. Trimming further would eat the trailing newline
 /// of a file being written, which is a real edit to somebody's content.
 fn trim_one_newline(s: &str) -> &str {
-    let s = s.strip_prefix("\r\n").or_else(|| s.strip_prefix('\n')).unwrap_or(s);
-    s.strip_suffix("\r\n").or_else(|| s.strip_suffix('\n')).unwrap_or(s)
+    let s = s
+        .strip_prefix("\r\n")
+        .or_else(|| s.strip_prefix('\n'))
+        .unwrap_or(s);
+    s.strip_suffix("\r\n")
+        .or_else(|| s.strip_suffix('\n'))
+        .unwrap_or(s)
 }
 
 #[cfg(test)]
@@ -338,11 +357,17 @@ mod tests {
     }
 
     fn from_content(text: &str) -> Completion {
-        Completion { content: Some(text.into()), ..Completion::default() }
+        Completion {
+            content: Some(text.into()),
+            ..Completion::default()
+        }
     }
 
     fn from_reasoning(text: &str) -> Completion {
-        Completion { reasoning: Some(text.into()), ..Completion::default() }
+        Completion {
+            reasoning: Some(text.into()),
+            ..Completion::default()
+        }
     }
 
     #[test]
@@ -364,11 +389,20 @@ mod tests {
             c.tool_calls[0].arguments,
             r#"{"command":"pip3 install pytest -q 2>&1 | tail -5"}"#
         );
-        assert!(note.contains("reasoning"), "the note says where it came from: {note}");
+        assert!(
+            note.contains("reasoning"),
+            "the note says where it came from: {note}"
+        );
 
         let left = c.reasoning.unwrap();
-        assert!(left.contains("verify it."), "the sentence after the block is kept");
-        assert!(!left.contains("<function="), "the block itself is gone: {left}");
+        assert!(
+            left.contains("verify it."),
+            "the sentence after the block is kept"
+        );
+        assert!(
+            !left.contains("<function="),
+            "the block itself is gone: {left}"
+        );
     }
 
     #[test]
@@ -383,7 +417,10 @@ mod tests {
         assert!(rescue_text_tool_calls(&mut c, &tools()).is_some());
         assert_eq!(c.tool_calls[0].name, "read");
         // `limit` is an integer in the schema, so it must not arrive as "40".
-        assert_eq!(c.tool_calls[0].arguments, r#"{"limit":40,"path":"src/tui.rs"}"#);
+        assert_eq!(
+            c.tool_calls[0].arguments,
+            r#"{"limit":40,"path":"src/tui.rs"}"#
+        );
         assert_eq!(c.content.as_deref(), Some("Let me check.\n"));
     }
 
@@ -426,7 +463,10 @@ mod tests {
         let mut c = from_content("<function=deploy>\n<parameter=env>prod</parameter>\n</function>");
         assert!(rescue_text_tool_calls(&mut c, &tools()).is_none());
         assert!(c.tool_calls.is_empty());
-        assert!(c.content.unwrap().contains("<function=deploy>"), "kept verbatim as text");
+        assert!(
+            c.content.unwrap().contains("<function=deploy>"),
+            "kept verbatim as text"
+        );
     }
 
     #[test]
@@ -488,7 +528,10 @@ mod tests {
             "<function=bash>\n<parameter=command>\nline one\nline two\n</parameter>\n</function>",
         );
         assert!(rescue_text_tool_calls(&mut c, &tools()).is_some());
-        assert_eq!(c.tool_calls[0].arguments, r#"{"command":"line one\nline two"}"#);
+        assert_eq!(
+            c.tool_calls[0].arguments,
+            r#"{"command":"line one\nline two"}"#
+        );
     }
 
     #[test]

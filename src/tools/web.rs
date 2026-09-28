@@ -49,7 +49,11 @@ impl Tool for WebTool {
     }
 
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolOutput {
-        match args.get("action").and_then(|v| v.as_str()).unwrap_or("search") {
+        match args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("search")
+        {
             "search" => {
                 let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
                     return ToolOutput::error("missing required argument: query");
@@ -107,10 +111,7 @@ async fn search(cfg: &Config, query: &str, limit: usize) -> Result<Vec<SearchRes
                 .to_string(),
         );
     };
-    let key = web
-        .api_key_env
-        .as_ref()
-        .and_then(|e| std::env::var(e).ok());
+    let key = web.api_key_env.as_ref().and_then(|e| std::env::var(e).ok());
 
     let client = reqwest::Client::builder()
         .timeout(TIMEOUT)
@@ -203,8 +204,16 @@ pub fn parse_results(provider: WebProvider, json: &Value, limit: usize) -> Vec<S
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             SearchResult {
-                title: it.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string(),
-                url: it.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                title: it
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(untitled)")
+                    .to_string(),
+                url: it
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 snippet: strip_tags(snippet),
             }
         })
@@ -222,7 +231,11 @@ async fn fetch(url: &str) -> Result<String, String> {
         .user_agent(USER_AGENT)
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client.get(url).send().await.map_err(|e| format!("fetch failed: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch failed: {e}"))?;
     let status = resp.status();
     let content_type = resp
         .headers()
@@ -230,7 +243,10 @@ async fn fetch(url: &str) -> Result<String, String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body = resp.text().await.map_err(|e| format!("reading body failed: {e}"))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("reading body failed: {e}"))?;
     if !status.is_success() {
         return Err(format!("HTTP {status} from {url}"));
     }
@@ -264,7 +280,8 @@ pub fn html_to_text(html: &str) -> String {
             for tag in ["script", "style", "head", "svg", "noscript"] {
                 let open = format!("<{tag}");
                 if lower[i..].strip_prefix(&open).is_some_and(|rest| {
-                    rest.starts_with('>') || rest.starts_with('/')
+                    rest.starts_with('>')
+                        || rest.starts_with('/')
                         || rest.as_bytes().first().is_some_and(u8::is_ascii_whitespace)
                 }) {
                     let close = format!("</{tag}>");
@@ -284,9 +301,12 @@ pub fn html_to_text(html: &str) -> String {
                 Some(end) => {
                     // Block-level tags become line breaks so structure survives.
                     let tag = &lower[i..i + end];
-                    if ["<p", "<br", "<div", "<li", "<tr", "<h1", "<h2", "<h3", "<h4", "</p", "</div", "</li", "</h"]
-                        .iter()
-                        .any(|t| tag.starts_with(t))
+                    if [
+                        "<p", "<br", "<div", "<li", "<tr", "<h1", "<h2", "<h3", "<h4", "</p",
+                        "</div", "</li", "</h",
+                    ]
+                    .iter()
+                    .any(|t| tag.starts_with(t))
                     {
                         out.push('\n');
                     } else {
@@ -361,7 +381,10 @@ mod tests {
         assert!(text.contains("First & best."), "entities unescaped: {text}");
         assert!(text.contains("Second."));
         assert!(!text.contains("alert"), "script bodies are dropped: {text}");
-        assert!(!text.contains("color:red"), "style bodies are dropped: {text}");
+        assert!(
+            !text.contains("color:red"),
+            "style bodies are dropped: {text}"
+        );
         assert!(!text.contains('<'), "no markup survives: {text}");
     }
 
@@ -372,7 +395,12 @@ mod tests {
                     Actual article<p>İstanbul and 日本語</p>\
                     <style>hidden_css</style>Closing words";
         let text = html_to_text(html);
-        for expected in ["Navigation", "Actual article", "İstanbul and 日本語", "Closing words"] {
+        for expected in [
+            "Navigation",
+            "Actual article",
+            "İstanbul and 日本語",
+            "Closing words",
+        ] {
             assert!(text.contains(expected), "{text}");
         }
         for hidden in ["private_one", "private_two", "hidden_css", "ignored"] {
@@ -382,11 +410,23 @@ mod tests {
 
     #[test]
     fn empty_pages_are_errors_but_short_readable_pages_are_valid() {
-        for (mime, body) in [("text/plain", " \n"), ("text/html", "<head>x</head><script>x</script>"), ("text/html", "<p>&nbsp;</p>")] {
-            assert!(readable_page(mime, body).unwrap_err().contains("No readable text"));
+        for (mime, body) in [
+            ("text/plain", " \n"),
+            ("text/html", "<head>x</head><script>x</script>"),
+            ("text/html", "<p>&nbsp;</p>"),
+        ] {
+            assert!(
+                readable_page(mime, body)
+                    .unwrap_err()
+                    .contains("No readable text")
+            );
         }
         assert_eq!(readable_page("text/plain", "OK").unwrap(), "OK");
-        assert!(readable_page("text/html", "<header>Menu</header><p>Article</p>").unwrap().contains("Article"));
+        assert!(
+            readable_page("text/html", "<header>Menu</header><p>Article</p>")
+                .unwrap()
+                .contains("Article")
+        );
     }
 
     #[test]

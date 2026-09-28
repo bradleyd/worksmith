@@ -20,9 +20,30 @@ fn named_store(dir: &std::path::Path, project_name: &str) -> MemoryStore {
 fn search_finds_memories_by_words_not_just_subjects() {
     let dir = tempfile::tempdir().unwrap();
     let m = store(dir.path());
-    m.remember(Scope::Global, "preference", "infrastructure", "Prefer simple local Rust components over distributed infrastructure.", 70).unwrap();
-    m.remember(Scope::Project, "decision", "durable memory", "Use separate SQLite databases for global and project memory.", 80).unwrap();
-    m.remember(Scope::Project, "lesson", "pdf extraction", "poppler beats pandoc for scanned PDFs.", 40).unwrap();
+    m.remember(
+        Scope::Global,
+        "preference",
+        "infrastructure",
+        "Prefer simple local Rust components over distributed infrastructure.",
+        70,
+    )
+    .unwrap();
+    m.remember(
+        Scope::Project,
+        "decision",
+        "durable memory",
+        "Use separate SQLite databases for global and project memory.",
+        80,
+    )
+    .unwrap();
+    m.remember(
+        Scope::Project,
+        "lesson",
+        "pdf extraction",
+        "poppler beats pandoc for scanned PDFs.",
+        40,
+    )
+    .unwrap();
 
     let hits = m.search("sqlite databases", 5).unwrap();
     assert!(!hits.is_empty(), "should match on content words");
@@ -59,11 +80,28 @@ fn explicit_search_does_not_drop_turn_prompt_noise_words() {
 fn an_exact_subject_hit_outranks_a_body_mention() {
     let dir = tempfile::tempdir().unwrap();
     let m = store(dir.path());
-    m.remember(Scope::Project, "fact", "worker supervision", "The supervisor nudges then escalates.", 50).unwrap();
-    m.remember(Scope::Project, "fact", "unrelated note", "Something about worker supervision in passing.", 50).unwrap();
+    m.remember(
+        Scope::Project,
+        "fact",
+        "worker supervision",
+        "The supervisor nudges then escalates.",
+        50,
+    )
+    .unwrap();
+    m.remember(
+        Scope::Project,
+        "fact",
+        "unrelated note",
+        "Something about worker supervision in passing.",
+        50,
+    )
+    .unwrap();
 
     let hits = m.search("worker supervision", 5).unwrap();
-    assert_eq!(hits[0].row.subject, "worker supervision", "exact subject wins");
+    assert_eq!(
+        hits[0].row.subject, "worker supervision",
+        "exact subject wins"
+    );
 }
 
 #[test]
@@ -115,8 +153,14 @@ fn turn_context_uses_relevant_memory_with_context_scaled_caps() {
         .unwrap()
         .expect("matching memories");
     assert!(ctx.text.starts_with("Relevant memory for this turn:"));
-    assert!(ctx.text.contains(&format!("project/preference/{}", &rustfmt.id[..8])));
-    assert!(ctx.text.contains(&format!("global/preference/{}", &commit.id[..8])));
+    assert!(
+        ctx.text
+            .contains(&format!("project/preference/{}", &rustfmt.id[..8]))
+    );
+    assert!(
+        ctx.text
+            .contains(&format!("global/preference/{}", &commit.id[..8]))
+    );
     assert!(ctx.ids.contains(&rustfmt.id));
     assert!(ctx.ids.contains(&commit.id));
     assert!(
@@ -348,10 +392,14 @@ fn stable_system_prompt_does_not_embed_memory() {
 fn duplicate_writes_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let m = store(dir.path());
-    let (first, wrote) = m.remember_deduped(Scope::Project, "decision", "db", "Use SQLite.", 60).unwrap();
+    let (first, wrote) = m
+        .remember_deduped(Scope::Project, "decision", "db", "Use SQLite.", 60)
+        .unwrap();
     assert!(wrote);
     // Same thing, different whitespace/case → not a new row.
-    let (again, wrote) = m.remember_deduped(Scope::Project, "decision", "db", "use   sqlite.", 60).unwrap();
+    let (again, wrote) = m
+        .remember_deduped(Scope::Project, "decision", "db", "use   sqlite.", 60)
+        .unwrap();
     assert!(!wrote, "a restatement must not grow the store");
     assert_eq!(first.id, again.id);
     assert_eq!(m.list(Some(Scope::Project)).unwrap().len(), 1);
@@ -361,13 +409,24 @@ fn duplicate_writes_are_rejected() {
 fn worker_proposals_wait_for_approval() {
     let dir = tempfile::tempdir().unwrap();
     let m = store(dir.path());
-    let (row, wrote) = m.propose(Scope::Project, "lesson", "vllm", "Set max-tokens >= 4096.", 60).unwrap();
+    let (row, wrote) = m
+        .propose(
+            Scope::Project,
+            "lesson",
+            "vllm",
+            "Set max-tokens >= 4096.",
+            60,
+        )
+        .unwrap();
     assert!(wrote);
     assert_eq!(row.status, "proposed");
 
     // A proposal is not yet part of the agent's working memory.
     assert!(m.list(None).unwrap().is_empty(), "proposals are not active");
-    assert!(m.search("vllm", 5).unwrap().is_empty(), "proposals are not searchable");
+    assert!(
+        m.search("vllm", 5).unwrap().is_empty(),
+        "proposals are not searchable"
+    );
     assert_eq!(m.pending().unwrap().len(), 1);
 
     assert!(m.approve(&row.id).unwrap());

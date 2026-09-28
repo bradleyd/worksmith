@@ -34,7 +34,12 @@ impl LlmClient for MockClient {
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
         self.seen.lock().unwrap().push(req.messages.clone());
-        Ok(self.responses.lock().unwrap().pop_front().unwrap_or_default())
+        Ok(self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default())
     }
 }
 
@@ -108,7 +113,10 @@ impl LlmClient for RepeatUntilNudged {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        if user_texts(&req.messages).iter().any(|t| t.contains(self.needle)) {
+        if user_texts(&req.messages)
+            .iter()
+            .any(|t| t.contains(self.needle))
+        {
             return Ok(Completion {
                 content: Some("took a different approach".into()),
                 ..Default::default()
@@ -132,7 +140,9 @@ async fn repeated_calls_are_nudged_into_the_worker() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = Arc::new(Agent::new(
-        Arc::new(RepeatUntilNudged { needle: "identical arguments" }),
+        Arc::new(RepeatUntilNudged {
+            needle: "identical arguments",
+        }),
         Arc::new(ToolRegistry::with_builtins()),
         EventBus::new(),
         "mock".into(),
@@ -164,7 +174,10 @@ async fn repeated_calls_are_nudged_into_the_worker() {
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
 
     let summary = mgr.get(&id).unwrap();
-    assert!(summary.nudges >= 1, "supervisor should have nudged the repeating worker");
+    assert!(
+        summary.nudges >= 1,
+        "supervisor should have nudged the repeating worker"
+    );
     assert!(summary.escalation.is_none(), "a nudge is not an escalation");
     assert_eq!(summary.result, "took a different approach");
 }
@@ -183,7 +196,8 @@ async fn worker_is_escalated_after_its_nudges_run_out() {
                 completion_tokens: 100,
                 total_tokens: 100,
                 reasoning_tokens: 0,
-                cached_tokens: None, cache_write_tokens: None,
+                cached_tokens: None,
+                cache_write_tokens: None,
             },
             ..ls_call()
         })
@@ -200,16 +214,20 @@ async fn worker_is_escalated_after_its_nudges_run_out() {
             max_nudges: 1,
             token_budget: Some(250), // blown by the third step
             ..Default::default()
-        },
-    );
+        });
 
     let id = started(&mut mgr, "spin forever");
     let status = wait_terminal(&mgr, &id).await;
 
     let summary = mgr.get(&id).unwrap();
     assert_eq!(status, WorkerStatus::Stopped);
-    let reason = summary.escalation.expect("supervisor should have escalated");
-    assert!(reason.contains("token budget"), "unexpected escalation reason: {reason}");
+    let reason = summary
+        .escalation
+        .expect("supervisor should have escalated");
+    assert!(
+        reason.contains("token budget"),
+        "unexpected escalation reason: {reason}"
+    );
     assert!(
         summary.last.starts_with("supervisor:"),
         "escalation should win over the aborted outcome: {}",
@@ -229,7 +247,10 @@ impl LlmClient for SlowClient {
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok(Completion { content: Some("finally".into()), ..Default::default() })
+        Ok(Completion {
+            content: Some("finally".into()),
+            ..Default::default()
+        })
     }
 }
 
@@ -270,8 +291,7 @@ async fn a_slow_request_is_not_mistaken_for_a_stuck_worker() {
             idle_timeout: Duration::from_millis(100),
             max_nudges: 10,
             ..Default::default()
-        },
-    );
+        });
 
     let id = started(&mut mgr, "think hard");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
@@ -287,7 +307,10 @@ async fn the_request_cap_is_not_derived_from_the_idle_timeout() {
     // Deriving it (6 x idle) killed three local workers whose only crime was
     // queueing behind each other: a 20s idle timeout made any call over 120s a
     // "hang", which is ordinary for three workers sharing one 9B.
-    let cfg = SupervisorConfig { idle_timeout: Duration::from_secs(20), ..Default::default() };
+    let cfg = SupervisorConfig {
+        idle_timeout: Duration::from_secs(20),
+        ..Default::default()
+    };
     assert_eq!(
         cfg.request_timeout,
         Duration::from_secs(600),
@@ -332,13 +355,15 @@ async fn a_hung_request_is_stopped_rather_than_nudged() {
             // mock is well past it.
             request_timeout: Duration::from_millis(100),
             ..Default::default()
-        },
-    );
+        });
 
     let id = started(&mut mgr, "think hard");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Stopped);
     let w = mgr.get(&id).unwrap();
-    assert_eq!(w.nudges, 0, "escalated directly; a nudge would have been useless");
+    assert_eq!(
+        w.nudges, 0,
+        "escalated directly; a nudge would have been useless"
+    );
     let why = w.escalation.clone().unwrap_or_default();
     assert!(
         why.contains("no response from the model"),
@@ -351,7 +376,10 @@ async fn supervisor_off_leaves_the_worker_alone() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let mut responses: VecDeque<Completion> = (0..6).map(|_| ls_call()).collect();
-    responses.push_back(Completion { content: Some("done".into()), ..Default::default() });
+    responses.push_back(Completion {
+        content: Some("done".into()),
+        ..Default::default()
+    });
     let client = Arc::new(MockClient {
         responses: Mutex::new(responses),
         seen: Mutex::new(Vec::new()),
@@ -364,8 +392,7 @@ async fn supervisor_off_leaves_the_worker_alone() {
             repeat_threshold: 2,
             idle_timeout: Duration::from_millis(1),
             ..Default::default()
-        },
-    );
+        });
 
     let id = started(&mut mgr, "repeat a lot");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
@@ -403,13 +430,11 @@ async fn manual_nudge_reaches_a_running_worker() {
     // Wait for the steering message to land in a request.
     let mut landed = false;
     for _ in 0..200 {
-        if client
-            .seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|m| user_texts(m).iter().any(|t| t.contains("check the README instead")))
-        {
+        if client.seen.lock().unwrap().iter().any(|m| {
+            user_texts(m)
+                .iter()
+                .any(|t| t.contains("check the README instead"))
+        }) {
             landed = true;
             break;
         }
@@ -419,7 +444,6 @@ async fn manual_nudge_reaches_a_running_worker() {
     assert!(landed, "manual nudge should reach the worker's input");
     assert_eq!(mgr.get(&id).unwrap().nudges, 1);
 }
-
 
 /// A nudge aimed at a worker that has already finished is refused, not
 /// swallowed.
@@ -453,7 +477,11 @@ async fn nudging_a_finished_worker_is_refused() {
     // Let it run out of scripted replies and settle into a terminal state.
     let mut done = false;
     for _ in 0..400 {
-        if mgr.list().iter().any(|w| w.id == id && !w.status.is_running()) {
+        if mgr
+            .list()
+            .iter()
+            .any(|w| w.id == id && !w.status.is_running())
+        {
             done = true;
             break;
         }
@@ -471,7 +499,10 @@ async fn nudging_a_finished_worker_is_refused() {
     let w = mgr.list().into_iter().find(|w| w.id == id).unwrap();
     assert_eq!(w.nudges, 0, "a refused nudge is not a nudge");
     // The timing a reader needs to tell "just now" from "half an hour ago".
-    assert!(w.finished.is_some(), "a terminal worker records when it ended");
+    assert!(
+        w.finished.is_some(),
+        "a terminal worker records when it ended"
+    );
 }
 
 /// A worker inside a slow *tool* call is not nudged, end to end.
@@ -520,8 +551,7 @@ async fn a_worker_inside_a_slow_tool_call_is_not_nudged() {
             max_nudges: 2,
             request_timeout: Duration::from_secs(60),
             ..Default::default()
-        },
-    );
+        });
 
     let id = started(&mut mgr, "sleep then answer");
     let status = wait_terminal(&mgr, &id).await;
@@ -532,6 +562,14 @@ async fn a_worker_inside_a_slow_tool_call_is_not_nudged() {
         "a running tool must not cost a nudge; got {} and escalation {:?}",
         w.nudges, w.escalation
     );
-    assert!(w.escalation.is_none(), "nor an escalation: {:?}", w.escalation);
-    assert_eq!(status, WorkerStatus::Done, "and the worker finishes normally");
+    assert!(
+        w.escalation.is_none(),
+        "nor an escalation: {:?}",
+        w.escalation
+    );
+    assert_eq!(
+        status,
+        WorkerStatus::Done,
+        "and the worker finishes normally"
+    );
 }

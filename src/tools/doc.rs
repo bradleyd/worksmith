@@ -81,9 +81,19 @@ async fn read(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
         return ToolOutput::error(format!("no such file: {}", full.display()));
     }
     let pages = args.get("pages").and_then(|v| v.as_str());
-    let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("markdown");
-    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let fmt = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("markdown");
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
 
     // Extract the full text, then page it with offset/limit so large documents
     // (which the tool-output cap would truncate) can be read in chunks.
@@ -97,21 +107,31 @@ async fn read(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
             pt.push("-".to_string());
             let jobs = [
                 ("pdftotext", pt),
-                ("mutool", vec!["draw".into(), "-F".into(), "text".into(), full.display().to_string()]),
+                (
+                    "mutool",
+                    vec![
+                        "draw".into(),
+                        "-F".into(),
+                        "text".into(),
+                        full.display().to_string(),
+                    ],
+                ),
             ];
             run_first(&jobs, &ctx.cwd, timeout).await
         }
         "docx" | "doc" | "odt" | "rtf" | "epub" => {
             let to = if fmt == "text" { "plain" } else { "gfm" };
             let jobs = [
-                ("pandoc", vec![full.display().to_string(), "-t".into(), to.into()]),
+                (
+                    "pandoc",
+                    vec![full.display().to_string(), "-t".into(), to.into()],
+                ),
                 ("docx2txt", vec![full.display().to_string(), "-".into()]),
             ];
             run_first(&jobs, &ctx.cwd, timeout).await
         }
-        "md" | "markdown" | "txt" | "text" | "" => {
-            std::fs::read_to_string(&full).map_err(|e| format!("cannot read {}: {e}", full.display()))
-        }
+        "md" | "markdown" | "txt" | "text" | "" => std::fs::read_to_string(&full)
+            .map_err(|e| format!("cannot read {}: {e}", full.display())),
         other => {
             return ToolOutput::error(format!(
                 "doc read doesn't handle .{other}; use the `read` tool for plain text or `bash` directly"
@@ -173,7 +193,12 @@ async fn info(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutput 
     }
     // Generic metadata for non-PDF.
     match std::fs::metadata(&full) {
-        Ok(m) => ToolOutput::ok(format!("{}\nsize: {} bytes\ntype: .{}", full.display(), m.len(), ext(&full))),
+        Ok(m) => ToolOutput::ok(format!(
+            "{}\nsize: {} bytes\ntype: .{}",
+            full.display(),
+            m.len(),
+            ext(&full)
+        )),
         Err(e) => ToolOutput::error(format!("cannot stat {}: {e}", full.display())),
     }
 }
@@ -209,7 +234,14 @@ async fn convert(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     let result: Result<String, String> = if from == "pdf" {
         if to == "txt" || to == "text" {
             run_first(
-                &[("pdftotext", vec!["-layout".into(), full_in.display().to_string(), full_out.display().to_string()])],
+                &[(
+                    "pdftotext",
+                    vec![
+                        "-layout".into(),
+                        full_in.display().to_string(),
+                        full_out.display().to_string(),
+                    ],
+                )],
                 &ctx.cwd,
                 timeout,
             )
@@ -222,7 +254,14 @@ async fn convert(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
         match soffice_to_pdf(&full_in, &full_out, &ctx.cwd, timeout).await {
             Ok(s) => Ok(s),
             Err(e1) => run_first(
-                &[("pandoc", vec![full_in.display().to_string(), "-o".into(), full_out.display().to_string()])],
+                &[(
+                    "pandoc",
+                    vec![
+                        full_in.display().to_string(),
+                        "-o".into(),
+                        full_out.display().to_string(),
+                    ],
+                )],
                 &ctx.cwd,
                 timeout,
             )
@@ -232,7 +271,14 @@ async fn convert(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     } else {
         // pandoc handles the text-format matrix (md/docx/html/rtf/odt/epub/…).
         run_first(
-            &[("pandoc", vec![full_in.display().to_string(), "-o".into(), full_out.display().to_string()])],
+            &[(
+                "pandoc",
+                vec![
+                    full_in.display().to_string(),
+                    "-o".into(),
+                    full_out.display().to_string(),
+                ],
+            )],
             &ctx.cwd,
             timeout,
         )
@@ -240,10 +286,15 @@ async fn convert(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     };
 
     match result {
-        Ok(_) if full_out.exists() => {
-            ToolOutput::ok(format!("converted {} → {}", full_in.display(), full_out.display()))
-        }
-        Ok(_) => ToolOutput::error(format!("engine reported success but {} was not created", full_out.display())),
+        Ok(_) if full_out.exists() => ToolOutput::ok(format!(
+            "converted {} → {}",
+            full_in.display(),
+            full_out.display()
+        )),
+        Ok(_) => ToolOutput::error(format!(
+            "engine reported success but {} was not created",
+            full_out.display()
+        )),
         Err(e) => ToolOutput::error(e),
     }
 }
@@ -278,8 +329,22 @@ async fn extract(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
     let img_prefix = out_dir.join("img");
     let page_prefix = out_dir.join("page");
     let jobs = [
-        ("pdfimages", vec!["-all".into(), full_in.display().to_string(), img_prefix.display().to_string()]),
-        ("pdftoppm", vec!["-png".into(), full_in.display().to_string(), page_prefix.display().to_string()]),
+        (
+            "pdfimages",
+            vec![
+                "-all".into(),
+                full_in.display().to_string(),
+                img_prefix.display().to_string(),
+            ],
+        ),
+        (
+            "pdftoppm",
+            vec![
+                "-png".into(),
+                full_in.display().to_string(),
+                page_prefix.display().to_string(),
+            ],
+        ),
     ];
     match run_first(&jobs, &ctx.cwd, timeout).await {
         Ok(_) => {
@@ -287,7 +352,12 @@ async fn extract(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
             if files.is_empty() {
                 ToolOutput::ok(format!("no images found in {}", full_in.display()))
             } else {
-                ToolOutput::ok(format!("extracted {} file(s) to {}:\n{}", files.len(), out_dir.display(), files.join("\n")))
+                ToolOutput::ok(format!(
+                    "extracted {} file(s) to {}:\n{}",
+                    files.len(),
+                    out_dir.display(),
+                    files.join("\n")
+                ))
             }
         }
         Err(e) => ToolOutput::error(e),
@@ -298,7 +368,11 @@ async fn extract(args: &Value, ctx: &ToolContext, timeout: Duration) -> ToolOutp
 
 /// Try each (binary, args) in order; return the first success's stdout. If all
 /// fail, return the joined errors (with install hints for missing engines).
-async fn run_first(jobs: &[(&str, Vec<String>)], cwd: &Path, timeout: Duration) -> Result<String, String> {
+async fn run_first(
+    jobs: &[(&str, Vec<String>)],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
     let mut errs = Vec::new();
     for (bin, args) in jobs {
         if !have(bin) {
@@ -316,9 +390,17 @@ async fn run_first(jobs: &[(&str, Vec<String>)], cwd: &Path, timeout: Duration) 
 
 /// LibreOffice writes `<stem>.pdf` into an out dir; convert then rename to the
 /// requested output path.
-async fn soffice_to_pdf(full_in: &Path, full_out: &Path, cwd: &Path, timeout: Duration) -> Result<String, String> {
+async fn soffice_to_pdf(
+    full_in: &Path,
+    full_out: &Path,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
     if !have("soffice") {
-        return Err(format!("`soffice` not found — install: {}", hint("soffice")));
+        return Err(format!(
+            "`soffice` not found — install: {}",
+            hint("soffice")
+        ));
     }
     let out_dir = full_out.parent().unwrap_or(Path::new("."));
     let args = vec![
@@ -335,23 +417,37 @@ async fn soffice_to_pdf(full_in: &Path, full_out: &Path, cwd: &Path, timeout: Du
     }
     let produced = out_dir.join(format!(
         "{}.pdf",
-        full_in.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+        full_in
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
     ));
     if produced != full_out && produced.exists() {
-        std::fs::rename(&produced, full_out)
-            .map_err(|e| format!("converted but could not rename to {}: {e}", full_out.display()))?;
+        std::fs::rename(&produced, full_out).map_err(|e| {
+            format!(
+                "converted but could not rename to {}: {e}",
+                full_out.display()
+            )
+        })?;
     }
     Ok(String::new())
 }
 
-async fn run_capture(bin: &str, args: &[String], cwd: &Path, timeout: Duration) -> Result<(i32, String, String), String> {
+async fn run_capture(
+    bin: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<(i32, String, String), String> {
     let mut cmd = Command::new(bin);
     cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = cmd.spawn().map_err(|e| format!("failed to run {bin}: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to run {bin}: {e}"))?;
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => Ok((
             o.status.code().unwrap_or(-1),
@@ -365,7 +461,9 @@ async fn run_capture(bin: &str, args: &[String], cwd: &Path, timeout: Duration) 
 
 /// Is `bin` an executable on PATH?
 fn have(bin: &str) -> bool {
-    let Ok(path) = std::env::var("PATH") else { return false };
+    let Ok(path) = std::env::var("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path).any(|dir| {
         let p = dir.join(bin);
         p.is_file()
@@ -394,7 +492,9 @@ fn out_or_err(r: Result<String, String>) -> ToolOutput {
 }
 
 fn ext(path: &Path) -> String {
-    path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
+    path.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// Parse "1-5" → (1,5), "3" → (3,3).

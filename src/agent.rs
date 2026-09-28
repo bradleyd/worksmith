@@ -357,7 +357,12 @@ impl Agent {
     /// Sampling the model asks for (`[models."provider/model"]`). Unset fields
     /// leave the server's own defaults alone, which is what every request did
     /// before this table existed.
-    pub fn with_sampling(self, temperature: Option<f64>, top_p: Option<f64>, top_k: Option<u32>) -> Self {
+    pub fn with_sampling(
+        self,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+        top_k: Option<u32>,
+    ) -> Self {
         {
             let mut active = self.active.lock().unwrap();
             // Same precedence as startup: an entry's temperature overrides only
@@ -373,19 +378,32 @@ impl Agent {
 
     /// Names currently pinned in the model's standing instructions.
     pub fn loaded_skill_names(&self) -> Vec<String> {
-        self.tool_ctx.loaded_skills.lock().unwrap().iter().map(|(name, _)| name.clone()).collect()
+        self.tool_ctx
+            .loaded_skills
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Inspect pinned text when loaded, otherwise preview the current file.
     /// Previewing never changes prompts or makes a model request.
     pub fn preview_skill(&self, name: &str) -> Result<String> {
-        if let Some((_, text)) =
-            self.tool_ctx.loaded_skills.lock().unwrap().iter().find(|(n, _)| n == name)
+        if let Some((_, text)) = self
+            .tool_ctx
+            .loaded_skills
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == name)
         {
             return Ok(text.clone());
         }
         let catalog = crate::skill::SkillCatalog::discover(&self.tool_ctx.cwd);
-        let skill = catalog.get(name).ok_or_else(|| anyhow::anyhow!("no skill named `{name}`"))?;
+        let skill = catalog
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("no skill named `{name}`"))?;
         crate::tools::preview_skill_instructions(skill)
     }
 
@@ -405,10 +423,14 @@ impl Agent {
     /// Uses the same pinned state and reference map as the model's skill tool.
     pub fn load_skill(&self, name: &str) -> Result<String> {
         let catalog = crate::skill::SkillCatalog::discover(&self.tool_ctx.cwd);
-        let skill =
-            catalog.get(name.trim()).ok_or_else(|| anyhow::anyhow!("no skill named `{name}`"))?;
+        let skill = catalog
+            .get(name.trim())
+            .ok_or_else(|| anyhow::anyhow!("no skill named `{name}`"))?;
         crate::tools::load_skill_instructions(skill, &self.tool_ctx)?;
-        Ok(format!("skill `{}` loaded; applies from the next model request", skill.name))
+        Ok(format!(
+            "skill `{}` loaded; applies from the next model request",
+            skill.name
+        ))
     }
 
     pub fn set_session_path(&self, path: std::path::PathBuf) {
@@ -495,7 +517,10 @@ impl Agent {
     pub fn note_model_change(&self, session: &mut Session, from: &str, to: &str) {
         self.emit(
             session,
-            Event::ModelChanged { from: from.to_string(), to: to.to_string() },
+            Event::ModelChanged {
+                from: from.to_string(),
+                to: to.to_string(),
+            },
         );
     }
 
@@ -572,8 +597,9 @@ impl Agent {
         tool_ctx.session_id = session_id;
         // Workers inherit a snapshot; another agent's load/unload must not
         // rewrite their standing instructions mid-request.
-        tool_ctx.loaded_skills =
-            Arc::new(Mutex::new(self.tool_ctx.loaded_skills.lock().unwrap().clone()));
+        tool_ctx.loaded_skills = Arc::new(Mutex::new(
+            self.tool_ctx.loaded_skills.lock().unwrap().clone(),
+        ));
         tool_ctx.is_worker = true;
         // A worker never checkpoints. Nobody is watching a background task —
         // `/agents tail` is opt-in — so a blocking question would stall it
@@ -692,201 +718,205 @@ impl Agent {
         // on the next turn.
         let active = self.current();
 
-        let outcome = loop {
-            let idle = self
-                .run_until_idle(
-                    session,
-                    system_prompt,
-                    memory_context.as_ref(),
-                    &mut final_text,
-                    &cancel,
-                    &active,
-                    &edits,
-                )
-                .await?;
+        let outcome =
+            loop {
+                let idle = self
+                    .run_until_idle(
+                        session,
+                        system_prompt,
+                        memory_context.as_ref(),
+                        &mut final_text,
+                        &cancel,
+                        &active,
+                        &edits,
+                    )
+                    .await?;
 
-            match idle {
-                IdleReason::Aborted => break TurnOutcome::Aborted,
-                IdleReason::MaxSteps => {
-                    // The cap on its own is not evidence of trouble — a long
-                    // job can legitimately want another turn. The cap reached
-                    // with *nothing written* is: it read and searched for fifty
-                    // steps and never started. Measured: 46 reads, 21 greps,
-                    // one file opened seventeen times, zero edits.
-                    if edits.load(Ordering::Relaxed) == 0
-                        && !offered_a_way_in
-                        && let Some(a) = self
-                            .harness_checkpoint(
-                                session,
-                                &cancel,
-                                &format!("{} steps, nothing written", self.max_steps),
-                                &format!(
-                                    "It has used all {} steps without editing anything — it is \
+                match idle {
+                    IdleReason::Aborted => break TurnOutcome::Aborted,
+                    IdleReason::MaxSteps => {
+                        // The cap on its own is not evidence of trouble — a long
+                        // job can legitimately want another turn. The cap reached
+                        // with *nothing written* is: it read and searched for fifty
+                        // steps and never started. Measured: 46 reads, 21 greps,
+                        // one file opened seventeen times, zero edits.
+                        if edits.load(Ordering::Relaxed) == 0
+                            && !offered_a_way_in
+                            && let Some(a) = self
+                                .harness_checkpoint(
+                                    session,
+                                    &cancel,
+                                    &format!("{} steps, nothing written", self.max_steps),
+                                    &format!(
+                                        "It has used all {} steps without editing anything — it is \
                                      still trying to understand the code. Point it at the right \
                                      place, or say what to do first. (Enter to answer, Esc to \
                                      end the turn.)",
-                                    self.max_steps
-                                ),
-                            )
-                            .await
-                    {
-                        offered_a_way_in = true;
-                        session.append_message(Message::user(format!(
-                            "You used every step without changing anything. The user says:\n\n\
-                             {a}\n\nStart there."
-                        )))?;
-                        continue;
-                    }
-                    break TurnOutcome::MaxSteps(self.max_steps);
-                }
-                IdleReason::Stuck(r) => {
-                    // Going in circles is the other thing the harness knows
-                    // without judging anything. Ask before ending the turn: a
-                    // sentence from the user is worth more here than the whole
-                    // re-plan machinery, and the alternative is stopping.
-                    if offered_a_way_in {
-                        break TurnOutcome::Stuck(r);
-                    }
-                    match self
-                        .harness_checkpoint(
-                            session,
-                            &cancel,
-                            "Going in circles",
-                            &format!(
-                                "{r}\n\nIt is repeating itself and the turn is about to end. \
-                                 What should it do differently? (Enter to answer, Esc to stop \
-                                 the turn.)"
-                            ),
-                        )
-                        .await
-                    {
-                        Some(a) => {
+                                        self.max_steps
+                                    ),
+                                )
+                                .await
+                        {
                             offered_a_way_in = true;
                             session.append_message(Message::user(format!(
-                                "You were repeating yourself ({r}). The user says:\n\n{a}\n\n\
-                                 Follow that."
+                                "You used every step without changing anything. The user says:\n\n\
+                             {a}\n\nStart there."
                             )))?;
+                            continue;
                         }
-                        None => break TurnOutcome::Stuck(r),
+                        break TurnOutcome::MaxSteps(self.max_steps);
                     }
-                }
-                IdleReason::Budget(spent) => {
-                    // Same shape as the step cap: the number on its own is not
-                    // evidence of trouble, so offer a way in before ending it.
-                    // Unattended this skips and the turn stops, which is the
-                    // point — a background turn that has spent its budget
-                    // should not keep spending.
-                    if !offered_a_way_in
-                        && let Some(a) = self
+                    IdleReason::Stuck(r) => {
+                        // Going in circles is the other thing the harness knows
+                        // without judging anything. Ask before ending the turn: a
+                        // sentence from the user is worth more here than the whole
+                        // re-plan machinery, and the alternative is stopping.
+                        if offered_a_way_in {
+                            break TurnOutcome::Stuck(r);
+                        }
+                        match self
                             .harness_checkpoint(
                                 session,
                                 &cancel,
-                                &format!("{spent} tokens spent, still going"),
+                                "Going in circles",
                                 &format!(
-                                    "This turn has generated {spent} tokens without \
+                                    "{r}\n\nIt is repeating itself and the turn is about to end. \
+                                 What should it do differently? (Enter to answer, Esc to stop \
+                                 the turn.)"
+                                ),
+                            )
+                            .await
+                        {
+                            Some(a) => {
+                                offered_a_way_in = true;
+                                session.append_message(Message::user(format!(
+                                    "You were repeating yourself ({r}). The user says:\n\n{a}\n\n\
+                                 Follow that."
+                                )))?;
+                            }
+                            None => break TurnOutcome::Stuck(r),
+                        }
+                    }
+                    IdleReason::Budget(spent) => {
+                        // Same shape as the step cap: the number on its own is not
+                        // evidence of trouble, so offer a way in before ending it.
+                        // Unattended this skips and the turn stops, which is the
+                        // point — a background turn that has spent its budget
+                        // should not keep spending.
+                        if !offered_a_way_in
+                            && let Some(a) = self
+                                .harness_checkpoint(
+                                    session,
+                                    &cancel,
+                                    &format!("{spent} tokens spent, still going"),
+                                    &format!(
+                                        "This turn has generated {spent} tokens without \
                                      finishing. Say what it should do differently, or how \
                                      to narrow the job. (Enter to answer, Esc to end the \
                                      turn.)"
-                                ),
-                            )
-                            .await
-                    {
-                        offered_a_way_in = true;
-                        session.append_message(Message::user(format!(
-                            "You have spent {spent} tokens on this turn without finishing. \
+                                    ),
+                                )
+                                .await
+                        {
+                            offered_a_way_in = true;
+                            session.append_message(Message::user(format!(
+                                "You have spent {spent} tokens on this turn without finishing. \
                              The user says:\n\n{a}\n\nFollow that."
-                        )))?;
-                        continue;
-                    }
-                    break TurnOutcome::Stuck(format!(
-                        "spent {spent} tokens on this turn without finishing"
-                    ));
-                }
-                IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
-                IdleReason::ModelDone => {
-                    let Some(v) = validator else {
-                        break TurnOutcome::Done;
-                    };
-
-                    let check = crate::validation::CheckReport::record(
-                        v.describe(),
-                        v.validate().await,
-                        session.path(),
-                    )
-                    .await;
-                    let passed = check.passed;
-                    let reason = check.failure_reason();
-                    self.emit(session, Event::Validation {
-                        ok: passed,
-                        detail: check.display(),
-                        report: Some(Box::new(check)),
-                    });
-                    if passed {
-                        break TurnOutcome::Done;
-                    } else {
-                        if retries_left == 0 {
-                            break TurnOutcome::ValidationFailed(reason);
+                            )))?;
+                            continue;
                         }
-                        retries_left -= 1;
-                        let same_failure_count = validation_failures.record(&reason);
-                        // One failure is the loop working — that is the
-                        // whole differentiator. Two different failures can
-                        // still be progress. The same failure twice means
-                        // the re-plan did not move the check at all, and a
-                        // second identical directive is unlikely to be what
-                        // turns it around. Ask once, here, and only here.
-                        let steer = if same_failure_count == 2 {
-                            self.harness_checkpoint(
-                                session,
-                                &cancel,
-                                &format!("`{}` has failed twice the same way", v.describe()),
-                                &format!(
-                                    "The check keeps failing:\n\n{}\n\nRe-planning has not \
+                        break TurnOutcome::Stuck(format!(
+                            "spent {spent} tokens on this turn without finishing"
+                        ));
+                    }
+                    IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
+                    IdleReason::ModelDone => {
+                        let Some(v) = validator else {
+                            break TurnOutcome::Done;
+                        };
+
+                        let check = crate::validation::CheckReport::record(
+                            v.describe(),
+                            v.validate().await,
+                            session.path(),
+                        )
+                        .await;
+                        let passed = check.passed;
+                        let reason = check.failure_reason();
+                        self.emit(
+                            session,
+                            Event::Validation {
+                                ok: passed,
+                                detail: check.display(),
+                                report: Some(Box::new(check)),
+                            },
+                        );
+                        if passed {
+                            break TurnOutcome::Done;
+                        } else {
+                            if retries_left == 0 {
+                                break TurnOutcome::ValidationFailed(reason);
+                            }
+                            retries_left -= 1;
+                            let same_failure_count = validation_failures.record(&reason);
+                            // One failure is the loop working — that is the
+                            // whole differentiator. Two different failures can
+                            // still be progress. The same failure twice means
+                            // the re-plan did not move the check at all, and a
+                            // second identical directive is unlikely to be what
+                            // turns it around. Ask once, here, and only here.
+                            let steer = if same_failure_count == 2 {
+                                self.harness_checkpoint(
+                                    session,
+                                    &cancel,
+                                    &format!("`{}` has failed twice the same way", v.describe()),
+                                    &format!(
+                                        "The check keeps failing:\n\n{}\n\nRe-planning has not \
                                      moved it. What should it do differently? (Enter to \
                                      answer, Esc to let it keep trying.)",
-                                    truncate_reason(&reason)
-                                ),
-                            )
-                            .await
-                        } else {
-                            None
-                        };
-                        let directive = match steer {
-                            Some(a) => {
-                                format!(
-                                    "The validation check {} failed twice with the same \
+                                        truncate_reason(&reason)
+                                    ),
+                                )
+                                .await
+                            } else {
+                                None
+                            };
+                            let directive = match steer {
+                                Some(a) => {
+                                    format!(
+                                        "The validation check {} failed twice with the same \
                                      normalized failure:\n\n{}\n\nThe user was asked what \
                                      to do differently and said:\n\n{}\n\nFollow that. Do \
                                      not summarize success from a different command; make \
                                      this required check pass.",
-                                    v.describe(),
-                                    reason,
-                                    a
-                                )
-                            }
-                            None if same_failure_count > 1 => {
-                                format!(
-                                    "The validation check {} failed again with the same \
+                                        v.describe(),
+                                        reason,
+                                        a
+                                    )
+                                }
+                                None if same_failure_count > 1 => {
+                                    format!(
+                                        "The validation check {} failed again with the same \
                                      normalized failure ({} times):\n\n{}\n\nDo not \
                                      summarize success from a different command. Inspect why \
                                      this required check is still failing, fix the underlying \
                                      problem, then make this required check pass.",
-                                    v.describe(),
-                                    same_failure_count,
-                                    reason
-                                )
-                            }
-                            None => {
-                                format!(
-                                    "The validation check {} did not pass:\n\n{}\n\nRevise \
+                                        v.describe(),
+                                        same_failure_count,
+                                        reason
+                                    )
+                                }
+                                None => {
+                                    format!(
+                                        "The validation check {} did not pass:\n\n{}\n\nRevise \
                                      your approach and fix the underlying problem, then \
                                      finish.",
-                                    v.describe(),
-                                    reason
-                                )
-                            }
-                        };
-                        self.emit(session, Event::Nudge {
+                                        v.describe(),
+                                        reason
+                                    )
+                                }
+                            };
+                            self.emit(session, Event::Nudge {
                             reason: if same_failure_count > 1 {
                                 format!(
                                     "validation failed the same way; re-planning \
@@ -899,15 +929,18 @@ impl Agent {
                                 )
                             },
                         });
-                        session.append_message(Message::user(directive))?;
+                            session.append_message(Message::user(directive))?;
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        self.emit(session, Event::TurnComplete {
-            outcome: outcome.label(),
-        });
+        self.emit(
+            session,
+            Event::TurnComplete {
+                outcome: outcome.label(),
+            },
+        );
         Ok(TurnResult {
             text: final_text,
             outcome,
@@ -946,9 +979,12 @@ impl Agent {
             // Steering: anything the supervisor (or the user) posted since the
             // last step lands as a user message before the next model call.
             for message in self.steering.take() {
-                self.emit(session, Event::Nudge {
-                    reason: message.clone(),
-                });
+                self.emit(
+                    session,
+                    Event::Nudge {
+                        reason: message.clone(),
+                    },
+                );
                 session.append_message(Message::user(message))?;
             }
 
@@ -962,9 +998,12 @@ impl Agent {
                 let before = session.messages().len();
                 if let Err(e) = self.compact(session).await {
                     // Compaction is best-effort; a failure shouldn't kill the turn.
-                    self.emit(session, Event::Error {
-                        message: format!("compaction failed: {e}"),
-                    });
+                    self.emit(
+                        session,
+                        Event::Error {
+                            message: format!("compaction failed: {e}"),
+                        },
+                    );
                 } else if session.messages().len() != before {
                     // Stuck detection counts repeated calls as evidence the model
                     // is spinning. After a compaction that reasoning is unfair: we
@@ -1037,7 +1076,8 @@ impl Agent {
                 };
                 // The server just told us the real prompt size. Remember it, so
                 // compaction and the clamp stop guessing for the rest of the run.
-                self.last_prompt_tokens.store(prompt as u32, Ordering::Relaxed);
+                self.last_prompt_tokens
+                    .store(prompt as u32, Ordering::Relaxed);
                 // Leave the same slack the clamp uses, not a token-thin fit.
                 // A 64-token margin against a prompt that grows by ~65 per step
                 // re-tripped on the very next request, forever: every step paid
@@ -1055,9 +1095,12 @@ impl Agent {
                     }
                     compacted_here = true;
                     if let Err(ce) = self.compact(session).await {
-                        self.emit(session, Event::Error {
-                            message: format!("compaction failed: {ce}"),
-                        });
+                        self.emit(
+                            session,
+                            Event::Error {
+                                message: format!("compaction failed: {ce}"),
+                            },
+                        );
                         break Err(e);
                     }
                     request_parts = request_messages(
@@ -1098,26 +1141,32 @@ impl Agent {
                 attempt_tokens = Some(room as u32);
             };
 
-
             let completion = match completion {
                 Ok(c) => c,
                 Err(e) => {
-                    self.emit(session, Event::Error {
-                        message: e.to_string(),
-                    });
+                    self.emit(
+                        session,
+                        Event::Error {
+                            message: e.to_string(),
+                        },
+                    );
                     return Err(e);
                 }
             };
 
-            self.last_prompt_tokens.store(completion.usage.prompt_tokens, Ordering::Relaxed);
+            self.last_prompt_tokens
+                .store(completion.usage.prompt_tokens, Ordering::Relaxed);
             spent = spent.saturating_add(completion.usage.completion_tokens);
-            self.emit(session, Event::Usage {
-                prompt_tokens: completion.usage.prompt_tokens,
-                completion_tokens: completion.usage.completion_tokens,
-                total_tokens: completion.usage.total_tokens,
-                reasoning_tokens: completion.usage.reasoning_tokens,
-                finish_reason: completion.finish_reason.clone(),
-            });
+            self.emit(
+                session,
+                Event::Usage {
+                    prompt_tokens: completion.usage.prompt_tokens,
+                    completion_tokens: completion.usage.completion_tokens,
+                    total_tokens: completion.usage.total_tokens,
+                    reasoning_tokens: completion.usage.reasoning_tokens,
+                    finish_reason: completion.finish_reason.clone(),
+                },
+            );
             // Checked after the reply is banked, not before the call: stopping
             // with the tokens spent and the answer thrown away would be the
             // worst of both. The turn ends at the next step boundary instead.
@@ -1162,7 +1211,12 @@ impl Agent {
                 // finished turn. Scoring that as ModelDone ends the turn with an
                 // empty reply and no clue why — the failure that made a chapter
                 // review report "done" after 60 seconds of visible thinking.
-                let said_nothing = completion.content.as_deref().unwrap_or("").trim().is_empty();
+                let said_nothing = completion
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty();
                 if said_nothing {
                     empty_completions += 1;
                     if empty_completions > MAX_EMPTY_COMPLETIONS {
@@ -1181,9 +1235,12 @@ impl Agent {
                     } else {
                         "Your last response was empty. Make a tool call or give your answer."
                     };
-                    self.emit(session, Event::Nudge {
-                        reason: nudge.to_string(),
-                    });
+                    self.emit(
+                        session,
+                        Event::Nudge {
+                            reason: nudge.to_string(),
+                        },
+                    );
                     session.append_message(Message::user(nudge))?;
                     continue;
                 }
@@ -1207,11 +1264,14 @@ impl Agent {
             let mut blocked: Option<String> = None;
             let mut checkpoint_intervened = false;
             for call in &completion.tool_calls {
-                self.emit(session, Event::ToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                });
+                self.emit(
+                    session,
+                    Event::ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    },
+                );
                 if checkpoint_intervened || cancel.is_cancelled() {
                     let output = if cancel.is_cancelled() {
                         "Not executed: the turn was cancelled."
@@ -1219,10 +1279,16 @@ impl Agent {
                         "Not executed: a pairing checkpoint intervened. Reconsider this \
                          operation using the user's answer before requesting it again."
                     };
-                    self.emit(session, Event::ToolResult {
-                        id: call.id.clone(), name: call.name.clone(), ok: false, elapsed_ms: None,
-                        output: output.to_string(),
-                    });
+                    self.emit(
+                        session,
+                        Event::ToolResult {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            ok: false,
+                            elapsed_ms: None,
+                            output: output.to_string(),
+                        },
+                    );
                     session.append_message(Message::tool_result(&call.id, &call.name, output))?;
                     continue;
                 }
@@ -1235,16 +1301,22 @@ impl Agent {
                     && let Ok(v) = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 {
                     let field = |k: &str| {
-                        v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+                        v.get(k)
+                            .and_then(|x| x.as_str())
+                            .unwrap_or_default()
+                            .to_string()
                     };
                     // Blocking asks are emitted by the dialogue after tool validation.
                     checkpoint_intervened = field("kind") == "ask";
                     if !checkpoint_intervened {
-                        self.emit(session, Event::Checkpoint {
-                            kind: field("kind"),
-                            subject: field("subject"),
-                            detail: field("detail"),
-                        });
+                        self.emit(
+                            session,
+                            Event::Checkpoint {
+                                kind: field("kind"),
+                                subject: field("subject"),
+                                detail: field("detail"),
+                            },
+                        );
                     }
                 }
 
@@ -1264,7 +1336,12 @@ impl Agent {
                                     tools.iter().find(|def| def.name == call.name),
                                 )
                                 .await;
-                            (!o.is_error, o.fatal, o.content, Some(started.elapsed().as_millis() as u64))
+                            (
+                                !o.is_error,
+                                o.fatal,
+                                o.content,
+                                Some(started.elapsed().as_millis() as u64),
+                            )
                         }
                         Err(e) => {
                             let hint = if truncated {
@@ -1283,13 +1360,16 @@ impl Agent {
                     };
                 let content = cap_tool_output(raw);
 
-                self.emit(session, Event::ToolResult {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    ok,
-                    output: content.clone(),
-                    elapsed_ms,
-                });
+                self.emit(
+                    session,
+                    Event::ToolResult {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        ok,
+                        output: content.clone(),
+                        elapsed_ms,
+                    },
+                );
                 session.append_message(Message::tool_result(
                     &call.id,
                     &call.name,
@@ -1306,9 +1386,12 @@ impl Agent {
                 return Ok(IdleReason::Aborted);
             }
             if let Some(reason) = blocked {
-                self.emit(session, Event::Error {
-                    message: reason.clone(),
-                });
+                self.emit(
+                    session,
+                    Event::Error {
+                        message: reason.clone(),
+                    },
+                );
                 return Ok(IdleReason::Blocked(reason));
             }
 
@@ -1324,9 +1407,12 @@ impl Agent {
                          Step back and try a different approach.",
                         call.name
                     );
-                    self.emit(session, Event::Nudge {
-                        reason: reason.clone(),
-                    });
+                    self.emit(
+                        session,
+                        Event::Nudge {
+                            reason: reason.clone(),
+                        },
+                    );
                     session.append_message(Message::user(reason))?;
                 }
             }
@@ -1383,7 +1469,8 @@ impl Agent {
             format!("{question}\n\nWhat just happened:\n\n{evidence}")
         };
 
-        self.checkpoint_dialogue(session, cancel, subject, detail).await
+        self.checkpoint_dialogue(session, cancel, subject, detail)
+            .await
     }
 
     /// Both model and harness checkpoints wait through questions before proceeding.
@@ -1395,11 +1482,14 @@ impl Agent {
         mut detail: String,
     ) -> Option<String> {
         for _ in 0..MAX_CHECKPOINT_ROUNDS {
-            self.emit(session, Event::Checkpoint {
-                kind: "ask".to_string(),
-                subject: subject.to_string(),
-                detail: detail.clone(),
-            });
+            self.emit(
+                session,
+                Event::Checkpoint {
+                    kind: "ask".to_string(),
+                    subject: subject.to_string(),
+                    detail: detail.clone(),
+                },
+            );
             // Follow-up questions belong to this checkpoint, not new tool calls.
             // The dialogue has its own bound; notes cannot crowd it out.
             let answer = tokio::select! {
@@ -1408,11 +1498,14 @@ impl Agent {
                 answer = self.tool_ctx.asker.ask_text(subject, &detail) => answer,
             };
             let answer = answer.filter(|a| !a.trim().is_empty())?;
-            self.emit(session, Event::Checkpoint {
-                kind: "answered".to_string(),
-                subject: subject.to_string(),
-                detail: answer.clone(),
-            });
+            self.emit(
+                session,
+                Event::Checkpoint {
+                    kind: "answered".to_string(),
+                    subject: subject.to_string(),
+                    detail: answer.clone(),
+                },
+            );
 
             // A directive is what the caller wants: it gets appended to the
             // conversation as something to follow.
@@ -1447,20 +1540,26 @@ impl Agent {
                 // ask again; the user can still give an instruction.
                 Err(e) => format!("(could not answer that: {e})"),
             };
-            self.emit(session, Event::Checkpoint {
-                kind: "note".to_string(),
-                subject: subject.to_string(),
-                detail: reply.clone(),
-            });
+            self.emit(
+                session,
+                Event::Checkpoint {
+                    kind: "note".to_string(),
+                    subject: subject.to_string(),
+                    detail: reply.clone(),
+                },
+            );
             detail = format!(
                 "{reply}\n\nSo — what should it do differently? \
                  (Enter to answer; an empty answer or Esc skips this checkpoint.)"
             );
         }
-        self.emit(session, Event::Warning {
-            message: "Pairing discussion limit reached without a decision; stopping the turn."
-                .to_string(),
-        });
+        self.emit(
+            session,
+            Event::Warning {
+                message: "Pairing discussion limit reached without a decision; stopping the turn."
+                    .to_string(),
+            },
+        );
         cancel.cancel();
         None
     }
@@ -1532,7 +1631,9 @@ impl Agent {
         advertised: Option<&crate::llm::ToolDef>,
     ) -> crate::tools::ToolOutput {
         if name == "checkpoint" && advertised.is_none() {
-            return crate::tools::ToolOutput::error("Pairing was off for this request; checkpoint is unavailable.");
+            return crate::tools::ToolOutput::error(
+                "Pairing was off for this request; checkpoint is unavailable.",
+            );
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ctx = ctx.clone();
@@ -1673,13 +1774,16 @@ impl Agent {
             // loading, a 429: none of these mean the turn is over. Backing off
             // and asking again is what a person would do.
             let wait = Duration::from_secs(2u64.pow(attempt as u32));
-            self.emit(session, Event::Warning {
-                message: format!(
-                    "model call failed ({}); retrying in {}s",
-                    truncate_error(&err),
-                    wait.as_secs()
-                ),
-            });
+            self.emit(
+                session,
+                Event::Warning {
+                    message: format!(
+                        "model call failed ({}); retrying in {}s",
+                        truncate_error(&err),
+                        wait.as_secs()
+                    ),
+                },
+            );
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
                 _ = cancel.cancelled() => return Err(err),
@@ -1719,16 +1823,27 @@ impl Agent {
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
         let drain = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                if matches!(event, StreamEvent::TextDelta(_) | StreamEvent::ReasoningDelta(_)) {
+                if matches!(
+                    event,
+                    StreamEvent::TextDelta(_) | StreamEvent::ReasoningDelta(_)
+                ) {
                     record_first_output(&seen, started);
                 }
             }
         });
-        let completion = active.client.stream(req, tx, CancellationToken::new()).await;
+        let completion = active
+            .client
+            .stream(req, tx, CancellationToken::new())
+            .await;
         let _ = drain.await;
         let completion = completion?;
-        let mut event = model_metrics(&active, &completion.usage, None,
-            (started.elapsed().as_millis() as u64).max(1), first_output.load(Ordering::Relaxed));
+        let mut event = model_metrics(
+            &active,
+            &completion.usage,
+            None,
+            (started.elapsed().as_millis() as u64).max(1),
+            first_output.load(Ordering::Relaxed),
+        );
         if let Event::ModelMetrics { purpose, .. } = &mut event {
             *purpose = "helper".into();
         }
@@ -1774,12 +1889,19 @@ impl Agent {
             let overhead = self
                 .working_tokens(session)
                 .saturating_sub(estimate_tokens(session.messages()));
-            let keep = (active.context_limit / 3).saturating_sub(overhead).max(1_024);
+            let keep = (active.context_limit / 3)
+                .saturating_sub(overhead)
+                .max(1_024);
             let split = compaction_split(msgs, self.keep_recent_turns, keep);
             if split == 0 {
                 return Ok(()); // nothing old enough to summarize
             }
-            (msgs.len(), estimate_tokens(msgs), split, render_transcript(&msgs[..split]))
+            (
+                msgs.len(),
+                estimate_tokens(msgs),
+                split,
+                render_transcript(&msgs[..split]),
+            )
         };
 
         // Ask for a *document*, with required headings, not for a summary.
@@ -1812,12 +1934,15 @@ impl Agent {
         // costs more than the compaction saved. Keeping the history and meeting
         // the real context wall is the better failure: the wall is loud.
         if let Some(why) = unusable_summary(&summary) {
-            self.emit(session, Event::Warning {
-                message: format!(
-                    "skipped compaction: the summarizer {why}. Keeping the history instead \
+            self.emit(
+                session,
+                Event::Warning {
+                    message: format!(
+                        "skipped compaction: the summarizer {why}. Keeping the history instead \
                      — a bad summary costs more than it saves."
-                ),
-            });
+                    ),
+                },
+            );
             return Ok(());
         }
 
@@ -1828,22 +1953,28 @@ impl Agent {
         self.last_prompt_tokens.store(0, Ordering::Relaxed);
         let after = session.messages().len();
         let tokens_after = estimate_tokens(session.messages());
-        self.emit(session, Event::Compaction {
-            messages_before: before,
-            messages_after: after,
-            tokens_before,
-            tokens_after,
-        });
+        self.emit(
+            session,
+            Event::Compaction {
+                messages_before: before,
+                messages_after: after,
+                tokens_before,
+                tokens_after,
+            },
+        );
         // A compaction that frees nothing is a failure wearing a success
         // message. Say so, rather than letting the next request hit a 400 with
         // "compacted" the last thing on screen.
         if tokens_after * 10 > tokens_before * 9 {
-            self.emit(session, Event::Warning {
-                message: format!(
-                    "compaction freed almost nothing (~{tokens_before} → ~{tokens_after} \
+            self.emit(
+                session,
+                Event::Warning {
+                    message: format!(
+                        "compaction freed almost nothing (~{tokens_before} → ~{tokens_after} \
                      tokens); a single message may be larger than the window"
-                ),
-            });
+                    ),
+                },
+            );
         }
         Ok(())
     }
@@ -1870,9 +2001,14 @@ fn model_metrics(
         purpose: "agent".into(),
         cached_tokens: usage.cached_tokens,
         cache_write_tokens: usage.cache_write_tokens,
-        cost_usd: usage.reported.then(|| active.prices.cost(
-            usage.prompt_tokens as u64, usage.completion_tokens as u64,
-        )).flatten(),
+        cost_usd: usage
+            .reported
+            .then(|| {
+                active
+                    .prices
+                    .cost(usage.prompt_tokens as u64, usage.completion_tokens as u64)
+            })
+            .flatten(),
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -1990,7 +2126,10 @@ fn request_messages(
         }
         messages.push(message.clone());
     }
-    RequestParts { messages, breakdown }
+    RequestParts {
+        messages,
+        breakdown,
+    }
 }
 
 /// The first line of an error chain, short enough for one notice.
@@ -2022,11 +2161,22 @@ fn unusable_summary(s: &str) -> Option<String> {
     // catches a truncated or one-word answer.
     const MIN_CHARS: usize = 120;
     if t.chars().count() < MIN_CHARS {
-        return Some(format!("returned {} characters, too little to be notes", t.chars().count()));
+        return Some(format!(
+            "returned {} characters, too little to be notes",
+            t.chars().count()
+        ));
     }
     // The observed shape: "Let me look at the REPL's handle_command next."
     let head = t.chars().take(40).collect::<String>().to_ascii_lowercase();
-    for opener in ["let me", "i'll ", "i will", "now i", "sure", "okay", "here's what i"] {
+    for opener in [
+        "let me",
+        "i'll ",
+        "i will",
+        "now i",
+        "sure",
+        "okay",
+        "here's what i",
+    ] {
         if head.starts_with(opener) {
             return Some("answered conversationally instead of writing notes".to_string());
         }
@@ -2333,15 +2483,17 @@ fn recent_evidence(session: &Session) -> String {
                     // exactly the evidence, so it cannot be skipped just
                     // because reasoning is display-only.
                     None => {
-                        if let Some(r) =
-                            m.reasoning.as_deref().filter(|r| !r.trim().is_empty())
-                        {
+                        if let Some(r) = m.reasoning.as_deref().filter(|r| !r.trim().is_empty()) {
                             lines.push(format!("it was thinking: {}", excerpt(r, 600)));
                         }
                     }
                 }
                 for c in &m.tool_calls {
-                    lines.push(format!("it called `{}` with {}", c.name, excerpt(&c.arguments, 200)));
+                    lines.push(format!(
+                        "it called `{}` with {}",
+                        c.name,
+                        excerpt(&c.arguments, 200)
+                    ));
                 }
             }
             Role::Tool => lines.push(format!(
@@ -2393,7 +2545,9 @@ mod tests {
         // right here.
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
-        session.append_message(Message::user("run the tests")).unwrap();
+        session
+            .append_message(Message::user("run the tests"))
+            .unwrap();
         session
             .append_message(Message::assistant(None, vec![]).with_trace(
                 Some("<tool_call><function=bash>…</function></tool_call>".to_string()),
@@ -2404,8 +2558,14 @@ mod tests {
 
         let e = recent_evidence(&session);
         assert!(e.contains("it was thinking:"), "{e}");
-        assert!(e.contains("<function=bash>"), "the block itself is shown: {e}");
-        assert!(!e.contains("run the tests"), "the user's own words are not evidence: {e}");
+        assert!(
+            e.contains("<function=bash>"),
+            "the block itself is shown: {e}"
+        );
+        assert!(
+            !e.contains("run the tests"),
+            "the user's own words are not evidence: {e}"
+        );
     }
 
     #[test]
@@ -2413,17 +2573,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
         session
-            .append_message(Message::assistant(Some("checking".into()), vec![crate::llm::ToolCall {
-                id: "c1".into(),
-                name: "bash".into(),
-                arguments: r#"{"command":"pytest"}"#.into(),
-            }]))
+            .append_message(Message::assistant(
+                Some("checking".into()),
+                vec![crate::llm::ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"pytest"}"#.into(),
+                }],
+            ))
             .unwrap();
-        session.append_message(Message::tool_result("c1", "bash", "pytest: not found")).unwrap();
+        session
+            .append_message(Message::tool_result("c1", "bash", "pytest: not found"))
+            .unwrap();
 
         let e = recent_evidence(&session);
         assert!(e.contains("it said: checking"), "{e}");
-        assert!(e.contains("it called `bash`") && e.contains("pytest"), "{e}");
+        assert!(
+            e.contains("it called `bash`") && e.contains("pytest"),
+            "{e}"
+        );
         assert!(e.contains("`bash` returned: pytest: not found"), "{e}");
     }
 
@@ -2445,7 +2613,9 @@ mod tests {
         // A directive that happens to contain a question mark is still a
         // directive: reading it as a question would refuse to act on it,
         // which is the worse mistake of the two.
-        assert!(!is_question("is it the regex? if so, replace it with split()"));
+        assert!(!is_question(
+            "is it the regex? if so, replace it with split()"
+        ));
     }
 
     #[test]
@@ -2490,13 +2660,23 @@ mod tests {
                     arguments: "{}".into(),
                 }],
             ));
-            msgs.push(Message::tool_result(format!("c{i}"), "read", "x".repeat(4_000)));
+            msgs.push(Message::tool_result(
+                format!("c{i}"),
+                "read",
+                "x".repeat(4_000),
+            ));
         }
 
         let split = compaction_split(&msgs, 6, 2_000);
         let kept: usize = msgs[split..].iter().map(message_tokens).sum();
-        assert!(kept <= 2_000, "a cut that keeps 10k tokens is not a compaction");
-        assert!(split > 2, "the early nudge boundary was taken anyway: {split}");
+        assert!(
+            kept <= 2_000,
+            "a cut that keeps 10k tokens is not a compaction"
+        );
+        assert!(
+            split > 2,
+            "the early nudge boundary was taken anyway: {split}"
+        );
         assert!(split < msgs.len(), "and something is left to continue from");
         assert!(
             !matches!(msgs[split].role, Role::Tool),
@@ -2520,10 +2700,18 @@ mod tests {
                     arguments: "{}".into(),
                 }],
             ));
-            msgs.push(Message::tool_result(format!("c{i}"), "read", "x".repeat(4_000)));
+            msgs.push(Message::tool_result(
+                format!("c{i}"),
+                "read",
+                "x".repeat(4_000),
+            ));
         }
 
-        assert_eq!(compaction_split(&msgs, 6, 0), 0, "no boundary, no budget: nothing");
+        assert_eq!(
+            compaction_split(&msgs, 6, 0),
+            0,
+            "no boundary, no budget: nothing"
+        );
 
         let split = compaction_split(&msgs, 6, 2_000);
         assert!(split > 0, "a token budget finds a cut where turns cannot");
@@ -2570,7 +2758,10 @@ pub(crate) mod scripted {
 
     impl ScriptedClient {
         pub fn new(replies: Vec<Completion>) -> Self {
-            Self { replies: Mutex::new(replies), calls: Arc::new(Mutex::new(0)) }
+            Self {
+                replies: Mutex::new(replies),
+                calls: Arc::new(Mutex::new(0)),
+            }
         }
 
         /// Completion tokens each scripted reply claims to have cost. Non-zero
@@ -2589,7 +2780,11 @@ pub(crate) mod scripted {
                     name: name.to_string(),
                     arguments: args.to_string(),
                 }],
-                usage: Usage { reported: true, completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
+                usage: Usage {
+                    reported: true,
+                    completion_tokens: Self::REPLY_TOKENS,
+                    ..Usage::default()
+                },
                 finish_reason: Some("tool_calls".to_string()),
                 rescued: None,
             }
@@ -2601,7 +2796,11 @@ pub(crate) mod scripted {
                 content: Some(text.to_string()),
                 reasoning: None,
                 tool_calls: Vec::new(),
-                usage: Usage { reported: true, completion_tokens: Self::REPLY_TOKENS, ..Usage::default() },
+                usage: Usage {
+                    reported: true,
+                    completion_tokens: Self::REPLY_TOKENS,
+                    ..Usage::default()
+                },
                 finish_reason: Some("stop".to_string()),
                 rescued: None,
             }
@@ -2618,7 +2817,11 @@ pub(crate) mod scripted {
         ) -> anyhow::Result<Completion> {
             *self.calls.lock().unwrap() += 1;
             let mut r = self.replies.lock().unwrap();
-            Ok(if r.len() > 1 { r.remove(0) } else { r[0].clone() })
+            Ok(if r.len() > 1 {
+                r.remove(0)
+            } else {
+                r[0].clone()
+            })
         }
     }
 
@@ -2631,14 +2834,20 @@ pub(crate) mod scripted {
 
     impl RecordingAsker {
         pub fn new(answers: Vec<Option<String>>) -> Self {
-            Self { asked: Arc::new(Mutex::new(Vec::new())), answers: Mutex::new(answers) }
+            Self {
+                asked: Arc::new(Mutex::new(Vec::new())),
+                answers: Mutex::new(answers),
+            }
         }
     }
 
     #[async_trait]
     impl Asker for RecordingAsker {
         async fn ask_text(&self, subject: &str, question: &str) -> Option<String> {
-            self.asked.lock().unwrap().push((subject.to_string(), question.to_string()));
+            self.asked
+                .lock()
+                .unwrap()
+                .push((subject.to_string(), question.to_string()));
             let mut a = self.answers.lock().unwrap();
             if a.is_empty() { None } else { a.remove(0) }
         }
@@ -2870,7 +3079,10 @@ mod checkpoint_tests {
         // the warning channel, so it renders behind a `⚠` directly above that
         // call, and "read a tool call out of the model's text" was taken to mean
         // the call had failed. It had not — it ran normally.
-        assert!(log.contains("recovered"), "it says the call was recovered, not that it broke");
+        assert!(
+            log.contains("recovered"),
+            "it says the call was recovered, not that it broke"
+        );
     }
 
     /// The checkpoint carries the evidence, not a summary of it. The first one
@@ -2886,13 +3098,23 @@ mod checkpoint_tests {
         );
         let v = AlwaysFails("AssertionError: nope");
         let _ = agent
-            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
         let asked = asked.lock().unwrap();
         assert!(asked[0].1.contains("What just happened:"), "{}", asked[0].1);
-        assert!(asked[0].1.contains("it said: I rewrote the regex"), "{}", asked[0].1);
+        assert!(
+            asked[0].1.contains("it said: I rewrote the regex"),
+            "{}",
+            asked[0].1
+        );
     }
 
     /// A question is answered, not obeyed. Every caller wraps the answer in
@@ -2902,7 +3124,9 @@ mod checkpoint_tests {
     #[tokio::test]
     async fn a_question_is_answered_and_the_checkpoint_asks_again() {
         let (agent, asked, mut session, _d) = agent_with(
-            vec![ScriptedClient::done("the regex never matches an empty line")],
+            vec![ScriptedClient::done(
+                "the regex never matches an empty line",
+            )],
             vec![
                 Some("what seems to be the issue?".to_string()),
                 Some("use split() instead".to_string()),
@@ -2911,7 +3135,13 @@ mod checkpoint_tests {
         );
         let v = AlwaysFails("AssertionError: nope");
         let _ = agent
-            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -2922,7 +3152,11 @@ mod checkpoint_tests {
             "the second ask carries the answer to the first: {}",
             asked[1].1
         );
-        assert!(asked[1].1.contains("what should it do differently"), "{}", asked[1].1);
+        assert!(
+            asked[1].1.contains("what should it do differently"),
+            "{}",
+            asked[1].1
+        );
 
         // And the question never became an instruction.
         let said: Vec<&str> = session
@@ -2936,7 +3170,9 @@ mod checkpoint_tests {
             "the directive is what reaches the model: {said:?}"
         );
         assert!(
-            !said.iter().any(|t| t.contains("what seems to be the issue?")),
+            !said
+                .iter()
+                .any(|t| t.contains("what seems to be the issue?")),
             "the question is not: {said:?}"
         );
     }
@@ -2959,11 +3195,21 @@ mod checkpoint_tests {
         );
         let v = AlwaysFails("AssertionError: nope");
         let out = agent
-            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
-        assert_eq!(asked.lock().unwrap().len(), MAX_CHECKPOINT_ROUNDS, "it stops asking");
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            MAX_CHECKPOINT_ROUNDS,
+            "it stops asking"
+        );
         assert!(
             matches!(out.outcome, TurnOutcome::Aborted),
             "unanswered discussion stops before another attempt: {:?}",
@@ -2976,14 +3222,17 @@ mod checkpoint_tests {
     /// saw a checkpoint.
     #[tokio::test]
     async fn with_nobody_to_ask_the_turn_carries_on() {
-        let (agent, asked, mut session, _d) = agent_with(
-            vec![ScriptedClient::done("finished")],
-            vec![],
-            50,
-        );
+        let (agent, asked, mut session, _d) =
+            agent_with(vec![ScriptedClient::done("finished")], vec![], 50);
         let v = AlwaysFails("AssertionError: nope");
         let out = agent
-            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -3001,11 +3250,8 @@ mod checkpoint_tests {
     /// attended path was the unbounded one.
     #[tokio::test]
     async fn a_turn_that_spends_its_budget_stops_and_says_so() {
-        let (agent, _asked, mut session, _d) = agent_with(
-            vec![ScriptedClient::calling("ls", "{}")],
-            vec![],
-            100,
-        );
+        let (agent, _asked, mut session, _d) =
+            agent_with(vec![ScriptedClient::calling("ls", "{}")], vec![], 100);
         let agent = agent.with_token_budget(Some(10));
         let out = agent
             .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
@@ -3022,16 +3268,17 @@ mod checkpoint_tests {
     /// No budget set behaves exactly as before: the step cap is the only bound.
     #[tokio::test]
     async fn no_budget_is_unbounded_as_it_always_was() {
-        let (agent, _asked, mut session, _d) = agent_with(
-            vec![ScriptedClient::calling("ls", "{}")],
-            vec![],
-            2,
-        );
+        let (agent, _asked, mut session, _d) =
+            agent_with(vec![ScriptedClient::calling("ls", "{}")], vec![], 2);
         let out = agent
             .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
             .await
             .unwrap();
-        assert!(matches!(out.outcome, TurnOutcome::MaxSteps(2)), "{:?}", out.outcome);
+        assert!(
+            matches!(out.outcome, TurnOutcome::MaxSteps(2)),
+            "{:?}",
+            out.outcome
+        );
     }
 
     /// `/pair off` must cost nothing: no checkpoint, and the tool is not even
@@ -3046,7 +3293,13 @@ mod checkpoint_tests {
         agent.set_pairing(false);
         let v = AlwaysFails("nope");
         let _ = agent
-            .run_turn(&mut session, "do it", "sys", Some(&v), CancellationToken::new())
+            .run_turn(
+                &mut session,
+                "do it",
+                "sys",
+                Some(&v),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(asked.lock().unwrap().is_empty());
@@ -3057,18 +3310,19 @@ mod checkpoint_tests {
     /// limit into the body, so with `max-steps = 100` it contradicts itself.
     #[tokio::test]
     async fn running_out_of_steps_with_no_edits_asks_the_user() {
-        let (agent, asked, mut session, _d) = agent_with(
-            vec![ScriptedClient::calling("ls", "{}")],
-            vec![None],
-            3,
-        );
+        let (agent, asked, mut session, _d) =
+            agent_with(vec![ScriptedClient::calling("ls", "{}")], vec![None], 3);
         let _ = agent
             .run_turn(&mut session, "do it", "sys", None, CancellationToken::new())
             .await
             .unwrap();
         let asked = asked.lock().unwrap();
         assert_eq!(asked.len(), 1, "{asked:?}");
-        assert!(asked[0].1.contains('3'), "the body names the real limit: {}", asked[0].1);
+        assert!(
+            asked[0].1.contains('3'),
+            "the body names the real limit: {}",
+            asked[0].1
+        );
         assert!(
             asked[0].0.starts_with("3 steps"),
             "and so does the subject, which used to be hardcoded to \"Fifty\" \

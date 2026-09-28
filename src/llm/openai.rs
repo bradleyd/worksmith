@@ -33,7 +33,11 @@ pub struct OpenAiCompatClient {
 
 impl OpenAiCompatClient {
     /// `base_url` should include the API root (e.g. `http://host:8000/v1`).
-    pub fn new(http: reqwest::Client, base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Self {
         let base_url = base_url.into();
         let base_url = base_url.trim_end_matches('/').to_string();
         let thinking_dialect = crate::llm::ThinkingDialect::guess_from_url(&base_url);
@@ -105,7 +109,9 @@ impl LlmClient for OpenAiCompatClient {
         if let Some(Thinking::Budget(n)) = req.thinking
             && !self.thinking_dialect.supports_budget()
             && self.budget_param.is_none()
-            && !self.warned_no_budget.swap(true, std::sync::atomic::Ordering::Relaxed)
+            && !self
+                .warned_no_budget
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             let _ = sink
                 .send(StreamEvent::Warning(format!(
@@ -129,7 +135,10 @@ impl LlmClient for OpenAiCompatClient {
             builder = builder.bearer_auth(key);
         }
 
-        let resp = builder.send().await.context("sending chat completion request")?;
+        let resp = builder
+            .send()
+            .await
+            .context("sending chat completion request")?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -164,7 +173,11 @@ impl LlmClient for OpenAiCompatClient {
                      {}. If the server rejected a *value*, its message above lists what it \
                      accepts; if it wants a different spelling, set `thinking-param` under its \
                      [providers.*] section.",
-                    if sent.is_empty() { "no thinking fields".to_string() } else { sent.join(", ") },
+                    if sent.is_empty() {
+                        "no thinking fields".to_string()
+                    } else {
+                        sent.join(", ")
+                    },
                     self.thinking_dialect.field(),
                     self.dialect_source.describe(),
                 );
@@ -219,7 +232,9 @@ impl LlmClient for OpenAiCompatClient {
                 let line: Vec<u8> = buf.drain(..=nl).collect();
                 let line = String::from_utf8_lossy(&line);
                 let line = line.trim();
-                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let data = data.trim();
                 if data == "[DONE]" {
                     break 'outer;
@@ -299,7 +314,8 @@ impl LlmClient for OpenAiCompatClient {
 fn in_band_is_transient(err: &serde_json::Value) -> bool {
     // `code` is a number for some providers and a string for others.
     let code = err.get("code").and_then(|c| {
-        c.as_u64().or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok()))
+        c.as_u64()
+            .or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok()))
     });
     if let Some(c) = code {
         return c == 429 || (500..600).contains(&c);
@@ -309,9 +325,16 @@ fn in_band_is_transient(err: &serde_json::Value) -> bool {
         .and_then(|m| m.as_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    ["idle timeout", "timed out", "timeout", "overloaded", "temporarily unavailable", "try again"]
-        .iter()
-        .any(|needle| msg.contains(needle))
+    [
+        "idle timeout",
+        "timed out",
+        "timeout",
+        "overloaded",
+        "temporarily unavailable",
+        "try again",
+    ]
+    .iter()
+    .any(|needle| msg.contains(needle))
 }
 
 fn build_request_body(
@@ -508,7 +531,10 @@ impl From<UsageResp> for Usage {
             prompt_tokens: u.prompt_tokens.unwrap_or(0),
             completion_tokens: u.completion_tokens.unwrap_or(0),
             total_tokens: u.total_tokens,
-            reasoning_tokens: u.completion_tokens_details.map(|d| d.reasoning_tokens).unwrap_or(0),
+            reasoning_tokens: u
+                .completion_tokens_details
+                .map(|d| d.reasoning_tokens)
+                .unwrap_or(0),
             cached_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
             cache_write_tokens: None,
         }
@@ -561,7 +587,13 @@ struct Accumulator {
 /// removed, so normal prose is untouched.
 fn strip_toolcall_noise(s: &str) -> String {
     let mut out = s.to_string();
-    for tok in ["</tool_call>", "<tool_call>", "</tool_call", "<tool_call", "ool_call>"] {
+    for tok in [
+        "</tool_call>",
+        "<tool_call>",
+        "</tool_call",
+        "<tool_call",
+        "ool_call>",
+    ] {
         if out.contains(tok) {
             out = out.replace(tok, "");
         }
@@ -581,10 +613,11 @@ impl Accumulator {
                 self.finish_reason = Some(reason);
             }
             if let Some(reasoning) = choice.delta.reasoning.or(choice.delta.reasoning_content)
-                && !reasoning.is_empty() {
-                    self.reasoning.push_str(&reasoning);
-                    let _ = sink.send(StreamEvent::ReasoningDelta(reasoning)).await;
-                }
+                && !reasoning.is_empty()
+            {
+                self.reasoning.push_str(&reasoning);
+                let _ = sink.send(StreamEvent::ReasoningDelta(reasoning)).await;
+            }
             if let Some(text) = choice.delta.content {
                 // Some providers (e.g. OpenRouter for Qwen) leak fragments of the
                 // `<tool_call>` wrapper into content; strip that noise.
@@ -617,16 +650,21 @@ impl Accumulator {
                 }
                 if let Some(f) = dtc.function {
                     if let Some(name) = f.name
-                        && !name.is_empty() {
-                            slot.name = name;
-                        }
+                        && !name.is_empty()
+                    {
+                        slot.name = name;
+                    }
                     if let Some(args) = f.arguments
-                        && !args.is_empty() {
-                            slot.args.push_str(&args);
-                            let _ = sink
-                                .send(StreamEvent::ToolCallArgsDelta { index: idx, delta: args })
-                                .await;
-                        }
+                        && !args.is_empty()
+                    {
+                        slot.args.push_str(&args);
+                        let _ = sink
+                            .send(StreamEvent::ToolCallArgsDelta {
+                                index: idx,
+                                delta: args,
+                            })
+                            .await;
+                    }
                 }
                 if !slot.announced && !slot.name.is_empty() {
                     slot.announced = true;
@@ -649,14 +687,30 @@ impl Accumulator {
             .filter(|t| !t.name.is_empty())
             .enumerate()
             .map(|(i, t)| ToolCall {
-                id: if t.id.is_empty() { format!("call_{i}") } else { t.id },
+                id: if t.id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    t.id
+                },
                 name: t.name,
-                arguments: if t.args.is_empty() { "{}".to_string() } else { t.args },
+                arguments: if t.args.is_empty() {
+                    "{}".to_string()
+                } else {
+                    t.args
+                },
             })
             .collect();
 
-        let content = if self.content.is_empty() { None } else { Some(self.content) };
-        let reasoning = if self.reasoning.is_empty() { None } else { Some(self.reasoning) };
+        let content = if self.content.is_empty() {
+            None
+        } else {
+            Some(self.content)
+        };
+        let reasoning = if self.reasoning.is_empty() {
+            None
+        } else {
+            Some(self.reasoning)
+        };
 
         // Not every server breaks reasoning out of `completion_tokens` (vLLM
         // generally doesn't). An estimate beats a zero here: this number is the
@@ -688,18 +742,24 @@ mod thinking_tests {
 
     #[tokio::test]
     async fn provider_cache_telemetry_preserves_absent_zero_and_nonzero() {
-        for (details, expected) in [(serde_json::Value::Null, None),
+        for (details, expected) in [
+            (serde_json::Value::Null, None),
             (serde_json::json!({"cached_tokens": 0}), Some(0)),
-            (serde_json::json!({"cached_tokens": 900}), Some(900))] {
+            (serde_json::json!({"cached_tokens": 900}), Some(900)),
+        ] {
             let chunk = serde_json::from_value(serde_json::json!({
                 "choices": [], "usage": { "prompt_tokens": 1000, "completion_tokens": 10,
                     "prompt_tokens_details": details }
-            })).unwrap();
+            }))
+            .unwrap();
             let (tx, _rx) = mpsc::channel(8);
             let mut acc = Accumulator::default();
             acc.apply(chunk, &tx).await;
             assert_eq!(acc.usage.cached_tokens, expected);
-            assert_eq!(acc.usage.prompt_tokens, 1000, "cached input is already included");
+            assert_eq!(
+                acc.usage.prompt_tokens, 1000,
+                "cached input is already included"
+            );
             assert_eq!(acc.usage.cache_write_tokens, None);
         }
     }
@@ -711,11 +771,15 @@ mod thinking_tests {
             (serde_json::json!({}), false),
             (serde_json::json!({"prompt_tokens": 12}), false),
             (serde_json::json!({"completion_tokens": 12}), false),
-            (serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0}), true),
+            (
+                serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0}),
+                true,
+            ),
         ] {
             let chunk = serde_json::from_value(serde_json::json!({
                 "choices": [], "usage": wire
-            })).unwrap();
+            }))
+            .unwrap();
             let (tx, _rx) = mpsc::channel(8);
             let mut acc = Accumulator::default();
             acc.apply(chunk, &tx).await;
@@ -729,7 +793,8 @@ mod thinking_tests {
             "prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
             "prompt_tokens_details": {"cached_tokens":700},
             "completion_tokens_details": {"reasoning_tokens":20}
-        })).unwrap();
+        }))
+        .unwrap();
         let usage = Usage::from(wire);
         assert_eq!(usage.prompt_tokens, 1000);
         assert_eq!(usage.completion_tokens, 100);
@@ -759,9 +824,15 @@ mod thinking_tests {
             Some("provider/model".into()),
         );
         let after = build_request_body(&request, ThinkingDialect::ChatTemplate, None, None);
-        assert_eq!(serde_json::to_vec(&before).unwrap(), serde_json::to_vec(&after).unwrap());
+        assert_eq!(
+            serde_json::to_vec(&before).unwrap(),
+            serde_json::to_vec(&after).unwrap()
+        );
         assert_eq!(after["messages"][0]["tool_calls"][0]["id"], "original-id");
-        assert_eq!(after["messages"][0]["tool_calls"][0]["function"]["arguments"], r#"{"path":"."}"#);
+        assert_eq!(
+            after["messages"][0]["tool_calls"][0]["function"]["arguments"],
+            r#"{"path":"."}"#
+        );
         assert_eq!(after["messages"][1]["tool_call_id"], "original-id");
     }
 
@@ -827,7 +898,10 @@ mod thinking_tests {
         let c = acc.into_completion();
         assert_eq!(c.tool_calls.len(), 2);
         assert_eq!(c.tool_calls[0].name, "read");
-        assert_eq!(c.tool_calls[0].arguments, r#"{"path":"x"}"#, "fragments joined in order");
+        assert_eq!(
+            c.tool_calls[0].arguments, r#"{"path":"x"}"#,
+            "fragments joined in order"
+        );
         assert_eq!(c.tool_calls[1].name, "grep");
     }
 
@@ -836,12 +910,18 @@ mod thinking_tests {
         let t = |j: serde_json::Value| in_band_is_transient(&j);
 
         // What killed two workers: no code at all, just a message.
-        assert!(t(serde_json::json!({"message": "Upstream idle timeout exceeded"})));
-        assert!(t(serde_json::json!({"message": "Server overloaded, try again"})));
+        assert!(t(
+            serde_json::json!({"message": "Upstream idle timeout exceeded"})
+        ));
+        assert!(t(
+            serde_json::json!({"message": "Server overloaded, try again"})
+        ));
 
         // Codes win over wording, as numbers or as strings.
         assert!(t(serde_json::json!({"code": 429, "message": "slow down"})));
-        assert!(t(serde_json::json!({"code": 503, "message": "bad gateway"})));
+        assert!(t(
+            serde_json::json!({"code": 503, "message": "bad gateway"})
+        ));
         assert!(t(serde_json::json!({"code": "502", "message": "upstream"})));
     }
 
@@ -855,11 +935,17 @@ mod thinking_tests {
             "code": "1210",
             "message": "The temperature parameter is illegal."
         })));
-        assert!(!t(serde_json::json!({"code": 400, "message": "bad request"})));
+        assert!(!t(
+            serde_json::json!({"code": 400, "message": "bad request"})
+        ));
         assert!(!t(serde_json::json!({"code": 401, "message": "no key"})));
         // A code that says permanent outranks a message that sounds transient.
-        assert!(!t(serde_json::json!({"code": 400, "message": "please try again"})));
-        assert!(!t(serde_json::json!({"message": "context length exceeded"})));
+        assert!(!t(
+            serde_json::json!({"code": 400, "message": "please try again"})
+        ));
+        assert!(!t(
+            serde_json::json!({"message": "context length exceeded"})
+        ));
         assert!(!t(serde_json::json!({})));
     }
 
@@ -878,7 +964,10 @@ mod thinking_tests {
         // The whole body, because that is what the provider actually parses.
         let wire = serde_json::to_string(&b).unwrap();
         assert!(wire.contains(r#""temperature":0.7"#), "{wire}");
-        assert!(!wire.contains("0.6999"), "float noise reached the wire: {wire}");
+        assert!(
+            !wire.contains("0.6999"),
+            "float noise reached the wire: {wire}"
+        );
     }
 
     #[test]
@@ -891,12 +980,28 @@ mod thinking_tests {
 
     #[test]
     fn each_provider_gets_its_own_spelling() {
-        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::Reasoning, None, None);
+        let b = build_request_body(
+            &req(Some(Thinking::Off)),
+            ThinkingDialect::Reasoning,
+            None,
+            None,
+        );
         assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}));
-        assert!(b.get("chat_template_kwargs").is_none(), "OpenRouter rejects this field");
+        assert!(
+            b.get("chat_template_kwargs").is_none(),
+            "OpenRouter rejects this field"
+        );
 
-        let b = build_request_body(&req(Some(Thinking::Off)), ThinkingDialect::ChatTemplate, None, None);
-        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": false}));
+        let b = build_request_body(
+            &req(Some(Thinking::Off)),
+            ThinkingDialect::ChatTemplate,
+            None,
+            None,
+        );
+        assert_eq!(
+            b["chat_template_kwargs"],
+            serde_json::json!({"enable_thinking": false})
+        );
         assert!(b.get("reasoning").is_none());
     }
 
@@ -904,7 +1009,12 @@ mod thinking_tests {
     fn a_budget_caps_reasoning_where_the_dialect_supports_it() {
         // The point of a budget: reasoning gets its own ceiling, so it cannot
         // eat all of max_tokens and leave nothing for the answer.
-        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::Reasoning, None, None);
+        let b = build_request_body(
+            &req(Some(Thinking::Budget(2000))),
+            ThinkingDialect::Reasoning,
+            None,
+            None,
+        );
         assert_eq!(b["reasoning"], serde_json::json!({"max_tokens": 2000}));
     }
 
@@ -921,7 +1031,10 @@ mod thinking_tests {
             None,
         );
         assert_eq!(b["thinking_token_budget"], serde_json::json!(2000));
-        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
+        assert_eq!(
+            b["chat_template_kwargs"],
+            serde_json::json!({"enable_thinking": true})
+        );
 
         // Without the opt-in the field must not appear at all: an unknown key
         // is a 400 on a strict server.
@@ -954,7 +1067,10 @@ mod thinking_tests {
             None,
         );
         assert_eq!(b["reasoning_effort"], serde_json::json!("low"));
-        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
+        assert_eq!(
+            b["chat_template_kwargs"],
+            serde_json::json!({"enable_thinking": true})
+        );
     }
 
     #[test]
@@ -979,9 +1095,17 @@ mod thinking_tests {
     #[test]
     fn provider_routing_is_only_sent_when_asked_for() {
         let b = build_request_body(&req(None), ThinkingDialect::Reasoning, None, None);
-        assert!(b.get("provider").is_none(), "no routing preference by default");
+        assert!(
+            b.get("provider").is_none(),
+            "no routing preference by default"
+        );
 
-        let b = build_request_body(&req(None), ThinkingDialect::Reasoning, None, Some("throughput"));
+        let b = build_request_body(
+            &req(None),
+            ThinkingDialect::Reasoning,
+            None,
+            Some("throughput"),
+        );
         assert_eq!(b["provider"], serde_json::json!({"sort": "throughput"}));
     }
 
@@ -989,8 +1113,16 @@ mod thinking_tests {
     fn a_budget_degrades_to_plain_on_where_it_cannot_be_expressed() {
         // enable_thinking is a bool; there is nowhere to put a number. The
         // client warns rather than letting the setting look effective.
-        let b = build_request_body(&req(Some(Thinking::Budget(2000))), ThinkingDialect::ChatTemplate, None, None);
-        assert_eq!(b["chat_template_kwargs"], serde_json::json!({"enable_thinking": true}));
+        let b = build_request_body(
+            &req(Some(Thinking::Budget(2000))),
+            ThinkingDialect::ChatTemplate,
+            None,
+            None,
+        );
+        assert_eq!(
+            b["chat_template_kwargs"],
+            serde_json::json!({"enable_thinking": true})
+        );
         assert!(!ThinkingDialect::ChatTemplate.supports_budget());
         assert!(ThinkingDialect::Reasoning.supports_budget());
     }
@@ -998,8 +1130,14 @@ mod thinking_tests {
     #[test]
     fn dialect_is_guessed_from_the_endpoint() {
         use ThinkingDialect::*;
-        assert_eq!(ThinkingDialect::guess_from_url("https://openrouter.ai/api/v1"), Reasoning);
-        assert_eq!(ThinkingDialect::guess_from_url("http://127.0.0.1:8000/v1"), ChatTemplate);
+        assert_eq!(
+            ThinkingDialect::guess_from_url("https://openrouter.ai/api/v1"),
+            Reasoning
+        );
+        assert_eq!(
+            ThinkingDialect::guess_from_url("http://127.0.0.1:8000/v1"),
+            ChatTemplate
+        );
         assert_eq!(ThinkingDialect::parse("chat-template"), Some(ChatTemplate));
         assert_eq!(ThinkingDialect::parse("nonsense"), None);
     }

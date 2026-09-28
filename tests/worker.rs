@@ -28,12 +28,20 @@ impl LlmClient for MockClient {
         _sink: mpsc::Sender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> anyhow::Result<Completion> {
-        Ok(self.responses.lock().unwrap().pop_front().unwrap_or_default())
+        Ok(self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default())
     }
 }
 
 fn done(text: &str) -> Completion {
-    Completion { content: Some(text.into()), ..Default::default() }
+    Completion {
+        content: Some(text.into()),
+        ..Default::default()
+    }
 }
 
 fn tool_call(name: &str, args: &str) -> Completion {
@@ -49,7 +57,9 @@ fn tool_call(name: &str, args: &str) -> Completion {
 
 fn template_agent(responses: Vec<Completion>, cwd: &std::path::Path) -> Agent {
     Agent::new(
-        Arc::new(MockClient { responses: Mutex::new(responses.into()) }),
+        Arc::new(MockClient {
+            responses: Mutex::new(responses.into()),
+        }),
         Arc::new(ToolRegistry::with_builtins()),
         EventBus::new(),
         "mock".into(),
@@ -72,7 +82,9 @@ fn template_agent(responses: Vec<Completion>, cwd: &std::path::Path) -> Agent {
 
 async fn wait_terminal(mgr: &WorkerManager, id: &str) -> WorkerStatus {
     for _ in 0..200 {
-        if let Some(s) = mgr.get(id) && !s.status.is_running() {
+        if let Some(s) = mgr.get(id)
+            && !s.status.is_running()
+        {
             return s.status;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -148,8 +160,15 @@ async fn worker_records_changed_files() {
     let _ = wait_terminal(&mgr, &id).await;
 
     let summary = mgr.get(&id).unwrap();
-    assert_eq!(summary.changed, vec!["out.txt".to_string()], "should record the changed file");
-    assert!(dir.path().join("out.txt").exists(), "worker should have written the file");
+    assert_eq!(
+        summary.changed,
+        vec!["out.txt".to_string()],
+        "should record the changed file"
+    );
+    assert!(
+        dir.path().join("out.txt").exists(),
+        "worker should have written the file"
+    );
     assert!(!summary.session_id.is_empty());
 }
 
@@ -260,7 +279,10 @@ async fn an_unchecked_worker_still_stops_when_the_model_says_so() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
     let agent = template_agent(
-        vec![tool_call("write", r#"{"path":"out.txt","content":"bad"}"#), done("all finished")],
+        vec![
+            tool_call("write", r#"{"path":"out.txt","content":"bad"}"#),
+            done("all finished"),
+        ],
         dir.path(),
     );
     let mut mgr =
@@ -268,7 +290,10 @@ async fn an_unchecked_worker_still_stops_when_the_model_says_so() {
 
     let id = started(&mut mgr, "make out.txt say good");
     assert_eq!(wait_terminal(&mgr, &id).await, WorkerStatus::Done);
-    assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "bad");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "bad"
+    );
 }
 
 /// A worker's events go to its own bus and never reach the parent's transcript,
@@ -295,8 +320,14 @@ async fn a_workers_activity_can_be_followed_while_it_runs() {
     assert_eq!(missed, 0);
     assert!(next > 0, "the cursor advances past what was read");
     let joined = lines.join("\n");
-    assert!(joined.contains("⚙ write"), "tool calls are visible: {joined}");
-    assert!(joined.contains("finished both files"), "so is what it said: {joined}");
+    assert!(
+        joined.contains("⚙ write"),
+        "tool calls are visible: {joined}"
+    );
+    assert!(
+        joined.contains("finished both files"),
+        "so is what it said: {joined}"
+    );
 
     // Reading again from the cursor yields nothing — a follower must not
     // re-print what it already showed on every poll.
@@ -304,7 +335,10 @@ async fn a_workers_activity_can_be_followed_while_it_runs() {
     assert!(again.is_empty(), "nothing new: {again:?}");
     assert_eq!(next2, next);
 
-    assert!(mgr.log_since("nope", 0).is_none(), "an unknown id is not a panic");
+    assert!(
+        mgr.log_since("nope", 0).is_none(),
+        "an unknown id is not a panic"
+    );
 }
 
 #[tokio::test]
@@ -320,7 +354,10 @@ async fn queued_workers_keep_their_original_parent_session() {
     let mut mgr = WorkerManager::new(agent, dir.path().to_path_buf(), 1).with_shared_workspace();
     mgr.set_parent_session(parent.path().to_path_buf());
     let first = started(&mut mgr, "first");
-    assert!(matches!(mgr.spawn("second".into(), "system".into()).unwrap(), worksmith::worker::SpawnOutcome::Queued(_)));
+    assert!(matches!(
+        mgr.spawn("second".into(), "system".into()).unwrap(),
+        worksmith::worker::SpawnOutcome::Queued(_)
+    ));
     mgr.set_parent_session(next.path().to_path_buf());
     wait_terminal(&mgr, &first).await;
     let ids = mgr.pump();
@@ -328,7 +365,11 @@ async fn queued_workers_keep_their_original_parent_session() {
     wait_terminal(&mgr, &ids[0]).await;
     let links = worksmith::session::worker_links(parent.path()).unwrap();
     assert_eq!(links.len(), 2);
-    assert!(worksmith::session::worker_links(next.path()).unwrap().is_empty());
+    assert!(
+        worksmith::session::worker_links(next.path())
+            .unwrap()
+            .is_empty()
+    );
     let report = worksmith::metrics::load(parent.path()).unwrap();
     assert_eq!(report.workers.len(), 2);
     assert_eq!(report.combined.calls, 2);

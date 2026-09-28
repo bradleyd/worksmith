@@ -97,7 +97,11 @@ pub(crate) fn preview_skill_instructions(skill: &crate::skill::Skill) -> anyhow:
         skill.name,
         skill.dir.display(),
         body.trim(),
-        if map.is_empty() { String::new() } else { format!("\n\n{map}") }
+        if map.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{map}")
+        }
     );
     Ok(text)
 }
@@ -105,7 +109,11 @@ pub(crate) fn preview_skill_instructions(skill: &crate::skill::Skill) -> anyhow:
 fn fetch_section(skill: &crate::skill::Skill, query: &str) -> ToolOutput {
     use crate::skill::SectionMatch;
     match skill.find_section(query) {
-        SectionMatch::One { file, heading, content } => ToolOutput::ok(format!(
+        SectionMatch::One {
+            file,
+            heading,
+            content,
+        } => ToolOutput::ok(format!(
             // Naming the file lets the model see where it landed and read
             // around it if the slice was not what it wanted.
             "{} § {heading} (from {})\n\n{content}",

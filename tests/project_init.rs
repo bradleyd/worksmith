@@ -22,17 +22,32 @@ fn a_new_project_gets_a_commented_sample_config() {
     let sample = ws.join(worksmith::config::EXAMPLE_CONFIG);
     assert!(sample.is_file(), "a sample lands beside the databases");
     let body = std::fs::read_to_string(&sample).unwrap();
-    assert!(body.contains("[agents]"), "shows the worker settings: {body}");
-    assert!(body.contains("base-url"), "shows how to add a local provider");
-    assert!(body.contains("/trust"), "warns that a project config is asked about");
+    assert!(
+        body.contains("[agents]"),
+        "shows the worker settings: {body}"
+    );
+    assert!(
+        body.contains("base-url"),
+        "shows how to add a local provider"
+    );
+    assert!(
+        body.contains("/trust"),
+        "warns that a project config is asked about"
+    );
 
     // It is a sample, not a config: nothing is in effect until you copy it.
     assert!(!ws.join("config.toml").exists());
     let cfg = worksmith::config::Config::load(project.path()).unwrap();
-    assert!(cfg.pending_trust.is_none(), "a sample must not trigger the trust prompt");
+    assert!(
+        cfg.pending_trust.is_none(),
+        "a sample must not trigger the trust prompt"
+    );
 
     // And it never overwrites a project that has already made its choices.
     std::fs::write(&sample, "# edited by hand\n").unwrap();
     let _mem2 = worksmith::memory::MemoryStore::open(Some(project.path())).unwrap();
-    assert_eq!(std::fs::read_to_string(&sample).unwrap(), "# edited by hand\n");
+    assert_eq!(
+        std::fs::read_to_string(&sample).unwrap(),
+        "# edited by hand\n"
+    );
 }

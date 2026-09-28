@@ -786,7 +786,8 @@ fn store_result(state: &mut State, content: String, is_error: bool) -> ToolOutpu
     match stored {
         Ok(handle) => ToolOutput {
             content: format!(
-                "{excerpt}\n[{length} total bytes; session handle {handle}. Use mcp action=read handle={handle} offset={}, then follow next_offset until eof=true. Retrieval never repeats the operation; handles expire after seven days.]", excerpt.len()
+                "{excerpt}\n[{length} total bytes; session handle {handle}. Use mcp action=read handle={handle} offset={}, then follow next_offset until eof=true. Retrieval never repeats the operation; handles expire after seven days.]",
+                excerpt.len()
             ),
             is_error,
             fatal: false,
