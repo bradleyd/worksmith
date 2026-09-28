@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use crossterm::cursor::Show;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event as CEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEventKind,
@@ -628,6 +629,10 @@ pub async fn run_tui(
     asks: tokio::sync::mpsc::Receiver<crate::tools::approval::TextRequest>,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
+    // From here the terminal is in raw mode with mouse capture on. Install the
+    // handlers that restore it on the paths a clean exit never reaches (a
+    // `kill`, a panic) before any such thing can arrive.
+    install_abnormal_exit_handlers();
     let res = run_loop(
         &mut terminal,
         agent,
@@ -690,6 +695,118 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
     .ok();
     terminal.show_cursor().ok();
     Ok(())
+}
+
+/// The inverse of `setup_terminal`, written straight to the TTY with no
+/// `Terminal` object. `restore_terminal` needs the live `Terminal` handle, so
+/// it only runs on the happy path (a clean `/quit` or Ctrl+C). The abnormal
+/// paths — an external `kill` (SIGTERM) or a panic — never reach it, and a
+/// process that dies with raw mode and mouse capture still on leaves the user's
+/// terminal emitting raw mouse reports and eating every keystroke as control
+/// codes. This is the same teardown, callable from a signal handler or a panic
+/// hook where no `Terminal` is in scope. Every call is best-effort and the
+/// sequences are idempotent, so it is safe to run more than once.
+fn restore_terminal_now() {
+    let _ = disable_raw_mode();
+    let mut out = io::stdout();
+    let _ = execute!(
+        out,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        Show
+    );
+}
+
+/// Set while the event loop is mid-draw. The signal handler reads it (see
+/// `wait_for_draw_to_settle`) so its restore cannot interleave with a frame.
+static DRAWING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Wait for the event loop to finish any in-flight frame draw. A signal
+/// arrives on a separate thread and can land inside a `terminal.draw` write;
+/// restoring the terminal in that window would interleave the restore's escape
+/// sequences with the frame's and leave the terminal half-restored (e.g. mouse
+/// capture re-enabled by a later write). `execute!` does one write and one
+/// flush per call, so once the loop clears `DRAWING` the frame is fully written
+/// and the restore is safe to run. A draw is a single `execute!`, so this spins
+/// over a fraction of a millisecond, not a wait.
+fn wait_for_draw_to_settle() {
+    while DRAWING.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Install the handlers that restore the terminal on the paths a clean exit
+/// never reaches: a panic, and a SIGTERM/SIGINT that does not arrive as a key
+/// press. Raw mode turns a *typed* Ctrl+C into an input byte that the event
+/// loop already handles as a clean `/quit`; but `kill`, `pkill`, and closing
+/// the terminal window send the signal straight to the process, skipping the
+/// loop. Those paths restore the terminal directly and exit, rather than
+/// leaving it in raw mode with mouse capture on — the state that makes the
+/// user's terminal emit raw mouse reports and eat every keystroke as control
+/// codes.
+///
+/// The handler restores and exits on its own thread rather than driving the
+/// loop's async teardown: the loop's teardown needs its own task's `&mut`
+/// state (the turn handle, the workers, the MCP client, the session lock), none of which a foreign
+/// thread can reach. The cost is that a `kill` does not cancel the in-flight
+/// turn or await workers — but those are in this process, so they die with it,
+/// and the session JSONL is append-only, so nothing is lost on disk. What
+/// matters is the terminal, and that is restored.
+fn install_abnormal_exit_handlers() {
+    // The thread that set up the terminal is the one that must restore it. A
+    // panic in a *background* task (a worker, an MCP call, a memory extraction)
+    // is not fatal: the loop surfaces it as an error and keeps running, so such
+    // a panic must not restore the terminal or exit — it would take the whole
+    // session down for a task that the design treats as recoverable. Capture the
+    // owner's thread id so the hook can tell the two cases apart.
+    let owner = std::thread::current().id();
+    // Chain onto the default hook rather than replacing it, so a panic still
+    // prints its usual message and backtrace. Restore the terminal *first*: the
+    // default hook writes to stderr, and if the terminal is still on the
+    // alternate screen that text vanishes the moment we leave it. Restoring
+    // first puts the message on the user's normal screen, where it stays.
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let is_owner = std::thread::current().id() == owner;
+        if is_owner {
+            // Same thread as the one that may be mid-draw, so there is no
+            // cross-thread interleave to wait out (unlike the signal path).
+            restore_terminal_now();
+        }
+        original(info);
+        if is_owner {
+            std::process::exit(101);
+        }
+    }));
+
+    #[cfg(unix)]
+    {
+        // tokio's signal facility is already a dependency (the runtime is
+        // `full`); no new crate is needed to catch the signal.
+        std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("building a signal-handling runtime");
+            runtime.block_on(async {
+                let mut term =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("registering a SIGTERM handler");
+                let mut int =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                        .expect("registering a SIGINT handler");
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+                wait_for_draw_to_settle();
+                restore_terminal_now();
+                eprintln!("worksmith: terminated; the terminal has been restored.");
+                std::process::exit(130);
+            });
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -883,7 +1000,14 @@ async fn run_loop(
             let size = terminal.size()?;
             skill_browser::prepare(ov, Rect::new(0, 0, size.width, size.height), &app.status);
         }
-        terminal.draw(|f| ui(f, &app))?;
+        // Mark the draw in flight so a signal's restore (on another thread)
+        // waits for this frame to finish writing instead of interleaving with
+        // it. Cleared before the `?` so an errored draw still releases it, and
+        // before the select! below so the flag is not held across the idle wait.
+        DRAWING.store(true, std::sync::atomic::Ordering::SeqCst);
+        let draw = terminal.draw(|f| ui(f, &app));
+        DRAWING.store(false, std::sync::atomic::Ordering::SeqCst);
+        draw?;
 
         tokio::select! {
             // Terminal input.
@@ -2496,11 +2620,16 @@ fn mouse_command<'a>(
         }
     };
 
+    // This is a state-changing terminal write (mouse capture), so it takes the
+    // same in-flight mark as a frame draw: a signal's restore must not interleave
+    // with it, or it could leave capture enabled.
+    DRAWING.store(true, std::sync::atomic::Ordering::SeqCst);
     let res = if want {
         execute!(out, EnableMouseCapture)
     } else {
         execute!(out, DisableMouseCapture)
     };
+    DRAWING.store(false, std::sync::atomic::Ordering::SeqCst);
     match res {
         Ok(()) => {
             app.mouse = want;
