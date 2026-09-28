@@ -126,6 +126,14 @@ persisting live mode changes remains deferred.
 - **TUI extraction:** continue only when a feature forces it. Preserve ordering
   around worker completion, synthesis, approvals, checkpoints, mining, compaction,
   and turn completion.
+- **MCP coprocesses orphaned on abnormal exit:** the SIGTERM/SIGINT/panic
+  handlers (`install_abnormal_exit_handlers`, `src/tui.rs`) restore the terminal
+  and call `process::exit`, which skips `Drop` and `shutdown`. Each MCP server
+  runs in its own process group (`src/mcp/connection.rs`), so it keeps running.
+  Approved fix, not yet built: a process-global registry of MCP pgids, added at
+  connection start and removed on close, and the handler `kill(-pgid, SIGKILL)`s
+  each before exiting. `kill -9` and OOM stay uncatchable. See
+  `docs/decisions/0002-scope-of-the-abnormal-exit-fix.md`.
 
 ## Validation habit
 
