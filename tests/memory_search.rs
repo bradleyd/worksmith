@@ -347,6 +347,59 @@ fn turn_context_is_deterministically_capped() {
     assert!(first.text.len() <= 260);
 }
 
+/// The real failure: a session run from a folder of projects carried a novel's
+/// plot notes, and a long POS brief shared enough everyday words with them
+/// (`people`, `things`, `use`, `not`) to inject both on the first turn. The
+/// model then went and researched the book mid-build.
+#[test]
+fn a_long_prompt_does_not_drag_in_memories_by_chance_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = store(dir.path());
+    m.remember(
+        Scope::Project,
+        "decision",
+        "Dead Stack \"cascade\" mechanism",
+        "Dead Stack (fiction, \"real tech\"): the \"cascade\" attack is a firmware/supply-chain \
+         worm (A: out-of-band BMC/UEFI worm that bricks boards and spreads over the management \
+         network; B: compromised vendor firmware-signing key, so replacements ship already \
+         infected). The narrator does NOT explain this up front; it stays a mystery in the intro \
+         and gets revealed piecemeal across later chapters as Akira meets people / reads things.",
+        70,
+    )
+    .unwrap();
+    m.remember(
+        Scope::Project,
+        "fact",
+        "Akira is a woman",
+        "In Dead Stack, the narrator \"Akira\" (a DevOps engineer) is a woman. Use she/her if \
+         ever referenced in third person; the draft is first-person so this mostly matters for \
+         any third-person scenes.",
+        60,
+    )
+    .unwrap();
+
+    let ctx = m.turn_context(POS_BRIEF, 131_072).unwrap();
+    assert!(ctx.is_none(), "chance words injected: {ctx:?}");
+
+    // The same brief still finds a memory that is actually about it.
+    let stripe = m
+        .remember(
+            Scope::Project,
+            "decision",
+            "payment reader",
+            "Take Stripe payments through the M2 reader from the iPad kiosk.",
+            70,
+        )
+        .unwrap();
+    let ctx = m
+        .turn_context(POS_BRIEF, 131_072)
+        .unwrap()
+        .expect("the stripe decision is relevant");
+    assert_eq!(ctx.ids, vec![stripe.id]);
+}
+
+const POS_BRIEF: &str = "I need to create a POS system for a simple wellness bar. It will use stripe as payment processor. I assume the m2 device for tap and go is preferred. The POS should either run in kiosk mode on ipad in safari. There should be easy buttons to click like coffee and protein smoothies. I would also like to track inventory when it comes in, either by scanning with iphone or some bluetooth scanner for things like milks, protein powders, frozen fruit, coffee, water. The main thing is I should be able to create a inventory item with metadata like pricing and \"on hand\" availability. It should also calculate the taxes for state and I think there is another tax for the city we are in. I can run this on a raspberry pi or a small nuc or something like that. The IPAD will be on a stand and used to ring up and close out at night. eventually it will allow people to clock in from it too. I like Rust for this and the new webframework topcoat looks interesting. ProteinPOS or WellnessPOS should also back up to disk first then to something like S3 probably in case internest outage at the gym. Let's create a plan to design the POS. I am not sure how to capture the stripe payments or sales from the bluetooth device on the older IPAD. I assume the web can see it? Or do we need to sideload a basic IPADOS app on these with a server running close by. Please be succinct until we get to a plan. We should pair on the design.";
+
 #[test]
 fn unrelated_turn_context_is_empty() {
     let dir = tempfile::tempdir().unwrap();

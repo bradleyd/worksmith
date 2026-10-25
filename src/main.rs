@@ -434,7 +434,7 @@ async fn run(args: Args) -> Result<()> {
     )
     .with_thinking(thinking)
     .with_pairing(config.pair() && mode == OutputMode::Tui)
-    .with_token_budget(config.agent.token_budget);
+    .with_token_budget(config.token_budget());
 
     // Validation command: --until overrides the configured default.
     let validate_cmd = args
@@ -880,6 +880,12 @@ async fn repl(
 
     workers.set_parent_session(session.path().to_path_buf());
     println!("worksmith — model: {model}  (/help for commands, /quit to exit)");
+    if let Some(repos) = worksmith::config::folder_of_projects(cwd) {
+        eprintln!(
+            "{}",
+            worksmith::config::folder_of_projects_warning(cwd, repos)
+        );
+    }
     if let Some(c) = &validate_cmd {
         println!("validation: `{c}` must pass before a task is considered done");
     }

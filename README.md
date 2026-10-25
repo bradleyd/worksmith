@@ -395,7 +395,8 @@ One table, because prices, sampling, and window all want the same key.
 
 | key | default | what it does |
 | --- | --- | --- |
-| `max-steps` | `50` | Model↔tool iterations per turn. |
+| `max-steps` | `50` | Steps between progress checks. A window that made edits gets another, up to 4 per turn; one with none ends the turn. |
+| `token-budget` | `150000` | Completion tokens one turn may spend: the turn's real bound. `0` turns it off. |
 | `max-retries` | `3` | Re-plan attempts after a failed validation. |
 | `stuck-threshold` | `3` | Identical repeated tool calls before a nudge. |
 | `validate` | none | Default success check. `--until` overrides per run. |

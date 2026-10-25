@@ -187,6 +187,16 @@ impl Tool for KnowledgeTool {
                 )
             })
         } else {
+            // Indexing a folder of projects reads every repo under it, and a
+            // search then answers from whichever one matches: the model asked
+            // about one project and got another's text back.
+            if let Some(repos) = crate::config::folder_of_projects(&ctx.cwd) {
+                return ToolOutput::error(format!(
+                    "knowledge is off here: {} holds {repos} separate projects, not one. \
+                     Use grep/find/read on the project you are working in.",
+                    ctx.cwd.display()
+                ));
+            }
             KnowledgeStore::open(&ctx.cwd)
         };
         let store = match opened {
@@ -231,5 +241,35 @@ impl Tool for KnowledgeTool {
             }
             other => ToolOutput::error(format!("unknown action `{other}` (search|index)")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn knowledge_refuses_a_folder_of_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["pos", "book"] {
+            std::fs::create_dir_all(tmp.path().join(name).join(".git")).unwrap();
+        }
+        let ctx = ToolContext {
+            cwd: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let out = KnowledgeTool
+            .run(json!({"action": "search", "query": "cascade"}), &ctx)
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("2 separate projects"),
+            "{}",
+            out.content
+        );
+        assert!(
+            !tmp.path().join(".worksmith/knowledge.db").exists(),
+            "nothing should be indexed"
+        );
     }
 }

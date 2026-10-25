@@ -32,6 +32,13 @@ use crate::validation::Validator;
 /// window. Full compaction is separate; this is the always-on backstop.
 const MAX_TOOL_RESULT_BYTES: usize = 24_000;
 
+/// `max-steps` is a progress check, not a stop. A window that ends with new
+/// edits gets another one, up to this many in all; a window with none ends the
+/// turn. Measured before this: long runs that were writing code stopped every
+/// fifty steps for the user to type `continue`, which caught nothing — the
+/// stuck, nothing-written and token-budget checks are what catch a lost model.
+pub const STEP_WINDOWS: usize = 4;
+
 /// How a user turn ended.
 #[derive(Debug, Clone)]
 pub enum TurnOutcome {
@@ -43,8 +50,9 @@ pub enum TurnOutcome {
     Stuck(String),
     /// A destructive command was refused and the turn was hard-stopped.
     Blocked(String),
-    /// Hit the per-attempt step cap. Carries the cap, so the message can say
-    /// what the number was and what raising it means.
+    /// Ran out of steps: either a window passed with no new edits, or the
+    /// ceiling was reached. Carries the steps run, so the message can say how
+    /// far it got.
     MaxSteps(usize),
     /// Cancelled mid-turn.
     Aborted,
@@ -76,10 +84,10 @@ impl TurnOutcome {
             // own doing — telling them what they just did is noise.
             TurnOutcome::Done | TurnOutcome::Aborted => None,
             TurnOutcome::MaxSteps(n) => Some(format!(
-                "Stopped after {n} steps — the cap, not a failure. Everything it did is still \
-                 in context, so `continue` picks up where it left off with a fresh {n}. If a \
-                 task needs more than {n} steps at a time, raise `max-steps` under [agent], or \
-                 split the work: `/spawn` runs pieces in parallel, each with its own budget."
+                "Stopped after {n} steps: the last stretch made no new edits, or the turn \
+                 used every stretch it gets. Nothing is lost — `continue` picks up where it \
+                 left off. If it was not getting anywhere, say what to do differently \
+                 instead. `max-steps` under [agent] sets how often progress is checked."
             )),
             TurnOutcome::ValidationFailed(r) => Some(format!(
                 "The check never passed: {r}. Retries are spent, but the work is still here — \
@@ -712,6 +720,11 @@ impl Agent {
         // a turn that ends. If one answer does not get it moving, a second ask
         // will not either.
         let mut offered_a_way_in = false;
+        // Turn-wide, not per window: a budget that refilled with every window
+        // or validation retry would not bound the turn at all.
+        let mut spent = 0u32;
+        let mut steps_run = 0usize;
+        let mut edits_at_check = 0usize;
         // Snapshot the model once, at the top. A switch landing mid-turn must
         // not change the model out from under an in-flight step, or hand the
         // clamp a context limit the current prompt was not built for. It lands
@@ -729,18 +742,39 @@ impl Agent {
                         &cancel,
                         &active,
                         &edits,
+                        &mut spent,
                     )
                     .await?;
 
                 match idle {
                     IdleReason::Aborted => break TurnOutcome::Aborted,
                     IdleReason::MaxSteps => {
-                        // The cap on its own is not evidence of trouble — a long
-                        // job can legitimately want another turn. The cap reached
-                        // with *nothing written* is: it read and searched for fifty
-                        // steps and never started. Measured: 46 reads, 21 greps,
-                        // one file opened seventeen times, zero edits.
-                        if edits.load(Ordering::Relaxed) == 0
+                        steps_run += self.max_steps;
+                        // Edits since the last check mean a long job, not a lost
+                        // one: give it another window without asking anyone.
+                        // Silent to the model on purpose — a small model that
+                        // sees a countdown starts wrapping up early.
+                        let made = edits.load(Ordering::Relaxed);
+                        if made > edits_at_check && steps_run < self.max_steps * STEP_WINDOWS {
+                            self.emit(
+                                session,
+                                Event::Nudge {
+                                    reason: format!(
+                                        "{} more steps ({} edit(s) since the last check, \
+                                         {steps_run} steps so far)",
+                                        self.max_steps,
+                                        made - edits_at_check
+                                    ),
+                                },
+                            );
+                            edits_at_check = made;
+                            continue;
+                        }
+                        // The cap reached with *nothing written* is evidence of
+                        // trouble: it read and searched for fifty steps and never
+                        // started. Measured: 46 reads, 21 greps, one file opened
+                        // seventeen times, zero edits.
+                        if made == 0
                             && !offered_a_way_in
                             && let Some(a) = self
                                 .harness_checkpoint(
@@ -764,7 +798,7 @@ impl Agent {
                             )))?;
                             continue;
                         }
-                        break TurnOutcome::MaxSteps(self.max_steps);
+                        break TurnOutcome::MaxSteps(steps_run);
                     }
                     IdleReason::Stuck(r) => {
                         // Going in circles is the other thing the harness knows
@@ -959,6 +993,7 @@ impl Agent {
         cancel: &CancellationToken,
         active: &ActiveModel,
         edits: &std::sync::Arc<AtomicUsize>,
+        spent: &mut u32,
     ) -> Result<IdleReason> {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.cancel = cancel.clone();
@@ -970,7 +1005,6 @@ impl Agent {
         // The fit-retry is routine; announce it once and record the rest.
         let mut fit_warned = false;
 
-        let mut spent = 0u32;
         for _step in 0..self.max_steps {
             if cancel.is_cancelled() {
                 return Ok(IdleReason::Aborted);
@@ -1156,7 +1190,7 @@ impl Agent {
 
             self.last_prompt_tokens
                 .store(completion.usage.prompt_tokens, Ordering::Relaxed);
-            spent = spent.saturating_add(completion.usage.completion_tokens);
+            *spent = spent.saturating_add(completion.usage.completion_tokens);
             self.emit(
                 session,
                 Event::Usage {
@@ -1171,9 +1205,9 @@ impl Agent {
             // with the tokens spent and the answer thrown away would be the
             // worst of both. The turn ends at the next step boundary instead.
             if let Some(budget) = self.token_budget
-                && spent >= budget
+                && *spent >= budget
             {
-                return Ok(IdleReason::Budget(spent));
+                return Ok(IdleReason::Budget(*spent));
             }
 
             // A tool call whose arguments were cut off (hit the output-token
@@ -1462,11 +1496,16 @@ impl Agent {
         // `<tool_call>` block sitting in the model's reasoning. A checkpoint
         // that asks for help while withholding the evidence is asking the user
         // to do the harness's work.
+        //
+        // Evidence first, question last. The TUI shows the bottom of the
+        // transcript above the input box, and with the question on top a long
+        // tool dump pushed it off screen: the user saw only `bash` output and
+        // answered "what is the question you are asking?".
         let evidence = recent_evidence(session);
         let detail = if evidence.is_empty() {
             question.to_string()
         } else {
-            format!("{question}\n\nWhat just happened:\n\n{evidence}")
+            format!("What just happened:\n\n{evidence}\n\n{question}")
         };
 
         self.checkpoint_dialogue(session, cancel, subject, detail)
@@ -3109,9 +3148,22 @@ mod checkpoint_tests {
             .unwrap();
 
         let asked = asked.lock().unwrap();
-        assert!(asked[0].1.contains("What just happened:"), "{}", asked[0].1);
+        assert!(
+            asked[0].1.starts_with("What just happened:"),
+            "{}",
+            asked[0].1
+        );
         assert!(
             asked[0].1.contains("it said: I rewrote the regex"),
+            "{}",
+            asked[0].1
+        );
+        // The question closes it, so it sits just above the input box.
+        assert!(
+            asked[0]
+                .1
+                .trim_end()
+                .ends_with("Esc to let it keep trying.)"),
             "{}",
             asked[0].1
         );

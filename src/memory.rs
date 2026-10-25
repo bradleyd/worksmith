@@ -166,6 +166,8 @@ impl MemoryCaps {
 }
 
 const TURN_MEMORY_MIN_SCORE: f64 = 0.20;
+/// See `row_relevant_to_turn`.
+const TURN_MEMORY_MIN_TERM_SHARE: f64 = 0.15;
 
 /// Dynamic memory injected for one turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,8 +222,21 @@ fn turn_query_terms(query: &str, project_terms: &[String]) -> Vec<String> {
     query_terms_with_filter(query, |word| is_turn_query_noise(word, project_terms))
 }
 
-fn row_contains_any_exact_term(row: &MemoryRow, terms: &[String]) -> bool {
-    row_exact_term_count(row, terms) > 0
+/// Is this row about the turn, or did it share a word by chance? One shared
+/// word was the old bar, and a 200-word POS brief cleared it against a novel's
+/// plot notes on `people`, `things` and `use`. Chance overlap grows with the
+/// length of both texts, so the bar is a share of the shorter one: a short
+/// prompt or a short memory still needs only one word, two long texts need
+/// several.
+fn row_relevant_to_turn(row: &MemoryRow, terms: &[String], project_terms: &[String]) -> bool {
+    let query = terms.iter().collect::<HashSet<_>>();
+    let text = format!("{} {} {}", row.kind, row.subject, row.content);
+    let row_terms = query_terms_with_filter(&text, |word| is_turn_query_noise(word, project_terms))
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let matched = query.iter().filter(|t| row_terms.contains(**t)).count();
+    let base = query.len().min(row_terms.len());
+    matched > 0 && matched as f64 >= TURN_MEMORY_MIN_TERM_SHARE * base as f64
 }
 
 fn signal_overlap(row: &MemoryRow, terms: &[String]) -> f64 {
@@ -252,41 +267,88 @@ fn is_turn_query_noise(word: &str, project_terms: &[String]) -> bool {
 fn is_query_noise(word: &str) -> bool {
     matches!(
         word,
-        "a" | "an"
+        "a" | "about"
+            | "all"
+            | "also"
+            | "an"
             | "and"
+            | "any"
             | "are"
             | "as"
+            | "at"
             | "be"
             | "but"
+            | "by"
+            | "can"
             | "change"
             | "check"
+            | "could"
             | "do"
             | "does"
             | "file"
+            | "first"
             | "for"
+            | "from"
+            | "get"
+            | "go"
+            | "has"
+            | "have"
+            | "how"
             | "i"
+            | "if"
             | "in"
+            | "into"
             | "is"
             | "it"
+            | "its"
+            | "just"
+            | "like"
             | "make"
             | "me"
             | "memory"
-            | "rs"
             | "my"
+            | "need"
+            | "not"
+            | "now"
             | "of"
             | "on"
+            | "only"
             | "or"
+            | "out"
+            | "over"
+            | "rs"
             | "run"
+            | "should"
             | "small"
+            | "so"
+            | "some"
             | "src"
             | "test"
             | "testing"
+            | "than"
             | "that"
             | "the"
+            | "then"
+            | "there"
+            | "these"
+            | "they"
+            | "things"
             | "this"
             | "to"
+            | "up"
+            | "use"
+            | "used"
+            | "was"
             | "we"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "will"
             | "with"
+            | "would"
+            | "you"
+            | "your"
     )
 }
 
@@ -776,7 +838,7 @@ impl MemoryStore {
         )?;
         hits.retain(|hit| {
             hit.score >= TURN_MEMORY_MIN_SCORE
-                && row_contains_any_exact_term(&hit.row, &exact_terms)
+                && row_relevant_to_turn(&hit.row, &exact_terms, &self.project_terms)
         });
         hits.sort_by(|a, b| {
             b.score

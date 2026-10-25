@@ -1944,6 +1944,84 @@ async fn a_turn_that_wrote_something_is_not_interrupted_at_the_cap() {
     );
 }
 
+/// `max-steps` is a progress check. A long job that keeps writing gets another
+/// window without anyone typing `continue`; the measured complaint was a run
+/// that stopped every fifty steps while it was doing exactly what was asked.
+#[tokio::test]
+async fn a_window_with_new_edits_earns_another_without_asking() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // 50 steps at a 20-step window: an edit in every window, then done.
+    let mut script = Vec::new();
+    for i in 0..50 {
+        script.push(if i % 10 == 0 {
+            tool_call("write", &format!(r#"{{"path":"f{i}.txt","content":"x"}}"#))
+        } else {
+            tool_call("bash", &format!(r#"{{"command":"echo part {i}"}}"#))
+        });
+    }
+    script.push(done("all written"));
+    let asker = Arc::new(Scripted {
+        answer: Some("x".into()),
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker.clone());
+
+    let result = agent
+        .run_turn(
+            &mut session,
+            "write them",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.outcome.is_success(), "{:?}", result.outcome);
+    assert!(
+        asker.asked.lock().unwrap().is_empty(),
+        "progress needs no say"
+    );
+}
+
+/// Progress extends the turn, but not forever: `STEP_WINDOWS` is the ceiling,
+/// so a model that edits on every step still stops and reports how far it got.
+#[tokio::test]
+async fn edits_alone_cannot_extend_a_turn_past_the_ceiling() {
+    use worksmith::agent::STEP_WINDOWS;
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let script = (0..200)
+        .map(|i| tool_call("write", &format!(r#"{{"path":"f{i}.txt","content":"x"}}"#)))
+        .collect();
+    let asker = Arc::new(Scripted {
+        answer: None,
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker);
+
+    let result = agent
+        .run_turn(
+            &mut session,
+            "write them",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    match result.outcome {
+        TurnOutcome::MaxSteps(n) => assert_eq!(n, 20 * STEP_WINDOWS),
+        other => panic!("wanted the ceiling, got {other:?}"),
+    }
+}
+
 // ---- compaction refuses to trade context for a sentence --------------------
 
 /// Compaction was silently destroying context on every fire. The summarizer,

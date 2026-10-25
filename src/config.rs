@@ -172,7 +172,7 @@ pub struct AgentConfig {
     /// Completion tokens one turn may spend before it stops and says so. A
     /// worker has had `agents.token-budget` since M7; this is the same guard
     /// for the session, which had only `max-steps` and so was the *less*
-    /// protected path. Unset means no cap, as before.
+    /// protected path. Unset means `DEFAULT_TOKEN_BUDGET`; `0` means no cap.
     pub token_budget: Option<u32>,
     /// Default validation command (`--until` overrides per-run).
     pub validate: Option<String>,
@@ -509,6 +509,16 @@ impl Config {
 
     pub fn max_steps(&self) -> usize {
         self.agent.max_steps.unwrap_or(50)
+    }
+
+    /// The real bound on a session turn, now that `max-steps` extends itself
+    /// while edits keep landing. `0` turns it off.
+    pub fn token_budget(&self) -> Option<u32> {
+        match self.agent.token_budget {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => Some(DEFAULT_TOKEN_BUDGET),
+        }
     }
 
     pub fn max_retries(&self) -> usize {
@@ -884,6 +894,38 @@ pub fn ensure_project_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Is `dir` a folder that holds projects rather than a project? Not a repo
+/// itself, and at least two of its children are. Memory, knowledge and
+/// decisions are all keyed by the launch directory, so a session started in
+/// `~/Projects` shares them with every other session started there: a POS
+/// build found a novel's plot notes in its memory and indexed every repo on
+/// the disk to search them. Returns the number of child repos.
+pub fn folder_of_projects(dir: &Path) -> Option<usize> {
+    if dir.join(".git").exists() {
+        return None;
+    }
+    let repos = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join(".git").exists())
+        .count();
+    (repos >= 2).then_some(repos)
+}
+
+/// The startup warning for `folder_of_projects`, shared by the TUI and REPL.
+pub fn folder_of_projects_warning(dir: &Path, repos: usize) -> String {
+    format!(
+        "⚠ {} holds {repos} projects, not one: memory, knowledge and decisions here \
+         are shared by everything started in it. Start in the project's own folder.",
+        dir.display()
+    )
+}
+
+/// Completion tokens one session turn may spend. Measured over 758 recorded
+/// turns: the 99th percentile spent 57k, and the largest that finished on its
+/// own spent 100k. This cuts none of those and still ends a runaway.
+pub const DEFAULT_TOKEN_BUDGET: u32 = 150_000;
+
 /// Env var that relocates the whole global state directory.
 pub const GLOBAL_DIR_ENV: &str = "WORKSMITH_HOME";
 
@@ -949,6 +991,39 @@ pub fn load_project_instructions(start: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_turn_has_a_token_budget_unless_turned_off() {
+        let unset: Config = toml::from_str("").unwrap();
+        assert_eq!(unset.token_budget(), Some(DEFAULT_TOKEN_BUDGET));
+        let off: Config = toml::from_str("[agent]\ntoken-budget = 0\n").unwrap();
+        assert_eq!(off.token_budget(), None);
+        let set: Config = toml::from_str("[agent]\ntoken-budget = 9000\n").unwrap();
+        assert_eq!(set.token_budget(), Some(9000));
+    }
+
+    #[test]
+    fn a_folder_holding_repos_is_not_a_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["pos", "book", "notes"] {
+            std::fs::create_dir_all(tmp.path().join(name)).unwrap();
+        }
+        std::fs::create_dir(tmp.path().join("pos/.git")).unwrap();
+        assert_eq!(
+            folder_of_projects(tmp.path()),
+            None,
+            "one repo is a monorepo-ish dir"
+        );
+
+        std::fs::create_dir(tmp.path().join("book/.git")).unwrap();
+        assert_eq!(folder_of_projects(tmp.path()), Some(2));
+        // A project inside the folder is still a project.
+        assert_eq!(folder_of_projects(&tmp.path().join("pos")), None);
+
+        // And a repo with vendored repos inside it is a project, not a folder.
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        assert_eq!(folder_of_projects(tmp.path()), None);
+    }
 
     #[test]
     fn project_mcp_entries_replace_the_entire_launch_identity() {

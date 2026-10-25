@@ -64,13 +64,20 @@ fn slugify(subject: &str) -> String {
 /// Is this path inside something git is ignoring? A decision filed into an
 /// ignored directory is not in the history it was written for, and finding that
 /// out six months later is worse than a line of output now.
+///
+/// All three streams are nulled: an inherited stderr writes git's own message
+/// ("fatal: not a git repository") straight over the TUI's input box.
 fn is_git_ignored(cwd: &Path, path: &Path) -> bool {
+    use std::process::Stdio;
     std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
         .arg("check-ignore")
         .arg("-q")
         .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -245,6 +252,13 @@ mod tests {
 
     fn args(kind: &str) -> Value {
         json!({"kind": kind, "subject": "Pin the worker model", "detail": "pin or retarget?"})
+    }
+
+    #[test]
+    fn outside_a_repo_nothing_is_ignored() {
+        // The case that used to print git's "fatal" over the TUI.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_git_ignored(tmp.path(), &tmp.path().join("decisions")));
     }
 
     #[tokio::test]

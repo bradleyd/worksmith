@@ -171,6 +171,9 @@ struct App {
     /// the whole turn, and awaiting it from the event loop froze the TUI.
     session_path: std::path::PathBuf,
     running: bool,
+    /// The last turn stopped at the step limit, so an empty Enter continues
+    /// it. Cleared by anything sent, so it never outlives the stop it is for.
+    resume_offer: bool,
     compacting: bool,
     model: String,
     context_limit: usize,
@@ -256,6 +259,7 @@ impl App {
             composer: Composer::default(),
             session_path: std::path::PathBuf::new(),
             running: false,
+            resume_offer: false,
             compacting: false,
             model,
             context_limit,
@@ -314,6 +318,7 @@ impl App {
         self.session_path = path;
         self.transcript.clear_for_new_session();
         self.checkpoint_item = None;
+        self.resume_offer = false;
         self.cur_assistant = None;
         self.cur_thinking = None;
         // Counters the footer reads. Totals are per-session: they sit next to a
@@ -931,6 +936,12 @@ async fn run_loop(
     // Startup header.
     app.push(Kind::Notice, format!("worksmith · {}", app.model));
     app.push(Kind::Notice, format!("cwd: {}", cwd.display()));
+    if let Some(repos) = crate::config::folder_of_projects(&cwd) {
+        app.push(
+            Kind::Error,
+            crate::config::folder_of_projects_warning(&cwd, repos),
+        );
+    }
     if !crate::config::load_project_instructions(&cwd)
         .trim()
         .is_empty()
@@ -1460,9 +1471,7 @@ async fn run_loop(
                         // something the user can scroll back to — and say what
                         // to do about it, since "hit step limit" answers
                         // nothing on its own.
-                        if let Some(advice) = r.outcome.advice() {
-                            app.push(Kind::Notice, advice);
-                        }
+                        show_outcome_advice(&mut app, &r.outcome);
                     }
                     Ok(Err(e)) => app.push(Kind::Error, format!("turn error: {e:#}")),
                     Err(_) => app.push(Kind::Error, "turn task failed".to_string()),
@@ -1887,6 +1896,21 @@ async fn handle_enter_key(app: &mut App, ctx: &mut KeyContext<'_>) -> Result<Flo
     if input.is_empty() {
         // Empty input with a pending checkpoint: answer with None (skip).
         if answer_pending_ask(app, None) {
+            return Ok(Flow::Continue);
+        }
+        // One key to carry on after the step limit, instead of a typed word.
+        if app.resume_offer && !app.running && !app.compacting {
+            start_turn(
+                "continue".to_string(),
+                app,
+                ctx.agent,
+                ctx.session,
+                ctx.mem,
+                ctx.cwd,
+                ctx.bash_timeout,
+                ctx.turn,
+                ctx.cancel,
+            );
             return Ok(Flow::Continue);
         }
         // Empty input with nothing pending: Enter does nothing. Without this
@@ -3161,6 +3185,7 @@ fn start_turn(
     let cmd = app.validate_cmd.clone();
     let cwd2 = cwd.to_path_buf();
     app.running = true;
+    app.resume_offer = false;
     app.turn_start = Some(std::time::Instant::now());
     // Open the root here, not on the `UserMessage` event: a checkpoint or an
     // approval arrives on its own channel and can reach the UI before the
@@ -4303,6 +4328,26 @@ fn render_transcript(f: &mut Frame, area: Rect, transcript: &Transcript) {
     f.render_widget(para, area);
 }
 
+/// What a finished turn leaves behind for the user to act on.
+fn show_outcome_advice(app: &mut App, outcome: &crate::agent::TurnOutcome) {
+    let Some(advice) = outcome.advice() else {
+        return;
+    };
+    if !matches!(outcome, crate::agent::TurnOutcome::MaxSteps(_)) {
+        app.push(Kind::Notice, advice);
+        return;
+    }
+    // The checkpoint channel, not a notice: a grey line under a long run is the
+    // thing nobody reads, and this one wants an answer.
+    app.push(
+        Kind::Pair,
+        format!("step limit\n  {advice}\n  Enter continues · type to send it somewhere else"),
+    );
+    app.resume_offer = true;
+    app.status = "Enter continues · type to redirect".into();
+    alert("step limit");
+}
+
 fn input_title(app: &App) -> String {
     // A pending approval owns the keyboard and blocks the turn, so the composer
     // has to say that. It used to keep saying "working…" with the elapsed timer
@@ -4324,6 +4369,8 @@ fn input_title(app: &App) -> String {
         " working… · Enter steers the running turn · Esc aborts ".to_string()
     } else if app.compacting {
         " compacting… · scroll works · wait to send ".to_string()
+    } else if app.resume_offer && app.composer.char_len() == 0 {
+        " STEP LIMIT  Enter continues · type to redirect ".to_string()
     } else {
         " message · Enter send · Ctrl+N newline ".to_string()
     }
@@ -6197,6 +6244,7 @@ mod tests {
         // fields means a counter added later has to be reset to keep this green.
         let mut a = app();
         a.push(Kind::User, "hello");
+        a.resume_offer = true;
         a.apply_event(Event::Thinking {
             text: "x".repeat(400),
         });
@@ -6232,6 +6280,38 @@ mod tests {
             "a new session cannot inherit compaction state"
         );
         assert_eq!(a.compact_start, None);
+        assert!(!a.resume_offer, "a new session has nothing to continue");
+    }
+
+    #[test]
+    fn the_step_limit_stops_on_the_checkpoint_channel_with_one_key_to_continue() {
+        let mut a = app();
+        show_outcome_advice(&mut a, &crate::agent::TurnOutcome::MaxSteps(200));
+        let last = a.transcript.items.last().expect("the stop is written down");
+        assert!(matches!(last.kind, Kind::Pair), "not a grey notice");
+        assert!(last.text.contains("200 steps"), "{}", last.text);
+        assert!(a.resume_offer, "an empty Enter continues");
+        assert!(
+            input_title(&a).contains("STEP LIMIT"),
+            "{}",
+            input_title(&a)
+        );
+
+        // Typing anything turns the title back into a composer.
+        a.composer.insert_str("try the other crate");
+        assert!(!input_title(&a).contains("STEP LIMIT"));
+
+        // Other bad endings stay notices and offer nothing.
+        let mut b = app();
+        show_outcome_advice(
+            &mut b,
+            &crate::agent::TurnOutcome::Stuck("same read four times".into()),
+        );
+        assert!(matches!(
+            b.transcript.items.last().unwrap().kind,
+            Kind::Notice
+        ));
+        assert!(!b.resume_offer);
     }
 
     #[test]
@@ -7606,11 +7686,23 @@ mod tests {
         let block = &rest[open..=end];
         let returns = block.matches("return Ok(Flow::Continue);").count();
         assert_eq!(
-            returns, 2,
-            "the empty-input block needs both returns — one to answer a pending \
-             checkpoint with None, one so an empty composer with nothing pending \
-             does not start a turn:\n{block}"
+            returns, 3,
+            "the empty-input block needs all three returns — one to answer a \
+             pending checkpoint with None, one to continue after the step limit, \
+             one so an empty composer with nothing pending does not start a \
+             turn:\n{block}"
         );
+        // The one turn an empty Enter may start is the step-limit continue, and
+        // only while that offer stands.
+        let resume = block
+            .find("if app.resume_offer")
+            .expect("the offer gates it");
+        let start = block.find("start_turn(").expect("continue starts a turn");
+        assert!(
+            resume < start,
+            "start_turn must sit behind the offer:\n{block}"
+        );
+        assert_eq!(block.matches("start_turn(").count(), 1, "{block}");
     }
 
     #[test]
