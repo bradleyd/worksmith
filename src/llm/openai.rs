@@ -415,6 +415,17 @@ fn build_request_body(
                 // enable_thinking from it.
                 if let Some(e) = think.effort() {
                     body["reasoning_effort"] = serde_json::json!(e.as_str());
+                    // The level is advice to the model; the budget is what the
+                    // server enforces. A quarter of max_tokens stays clear for
+                    // the answer — a budget at the cap is the truncation it is
+                    // meant to prevent.
+                    if let (Some(n), Some(key)) = (e.budget_tokens(), budget_param) {
+                        let n = match req.max_tokens {
+                            Some(m) => n.min(m / 4 * 3),
+                            None => n,
+                        };
+                        body[key] = serde_json::json!(n);
+                    }
                 }
             }
         }
@@ -1071,6 +1082,42 @@ mod thinking_tests {
             b["chat_template_kwargs"],
             serde_json::json!({"enable_thinking": true})
         );
+    }
+
+    #[test]
+    fn an_effort_level_is_backed_by_an_enforced_budget() {
+        // `low` alone is a sentence in the prompt, and Qwen 3.8 reasoned past a
+        // 6,000-token cap with it. The budget is the part the server enforces.
+        let effort = |e, max_tokens| {
+            let mut r = req(Some(Thinking::Effort(e)));
+            r.max_tokens = max_tokens;
+            build_request_body(
+                &r,
+                ThinkingDialect::ChatTemplate,
+                Some("thinking_token_budget"),
+                None,
+            )
+        };
+        use crate::llm::Effort;
+
+        let b = effort(Effort::Low, Some(8_192));
+        assert_eq!(b["reasoning_effort"], serde_json::json!("low"));
+        assert_eq!(b["thinking_token_budget"], serde_json::json!(1_024));
+
+        // Never the whole of max_tokens: room is left for the answer.
+        let b = effort(Effort::Xhigh, Some(8_192));
+        assert_eq!(b["thinking_token_budget"], serde_json::json!(6_144));
+
+        // `max` is uncapped, and no budget field means none is sent.
+        assert!(
+            effort(Effort::Max, Some(8_192))
+                .get("thinking_token_budget")
+                .is_none()
+        );
+        let mut r = req(Some(Thinking::Effort(Effort::Low)));
+        r.max_tokens = Some(8_192);
+        let b = build_request_body(&r, ThinkingDialect::ChatTemplate, None, None);
+        assert!(b.get("thinking_token_budget").is_none());
     }
 
     #[test]

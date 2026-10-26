@@ -325,6 +325,22 @@ impl Effort {
         }
     }
 
+    /// The reasoning budget a level stands for, where the provider can enforce
+    /// one. An effort level on its own is a sentence in the prompt: on vLLM,
+    /// Qwen 3.8 at `low` was told to keep its thinking brief and reasoned to a
+    /// 6,000-token cap anyway, while `thinking_token_budget` stopped it at
+    /// exactly 300, 1,000 and 2,500. `max` means no cap.
+    pub fn budget_tokens(self) -> Option<u32> {
+        match self {
+            Effort::Minimal => Some(512),
+            Effort::Low => Some(1_024),
+            Effort::Medium => Some(4_096),
+            Effort::High => Some(8_192),
+            Effort::Xhigh => Some(16_384),
+            Effort::Max => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Effort::Minimal => "minimal",
