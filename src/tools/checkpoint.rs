@@ -181,11 +181,13 @@ impl Tool for CheckpointTool {
         // The cap is spent by every kind, not just the blocking one: three
         // notes in a turn is the same chattiness that teaches the user to stop
         // reading them.
-        if ctx
+        // `fetch_update`, not its 1.95 rename `try_update`: the dependencies
+        // already build on 1.88, and this one call should not raise the floor.
+        #[allow(deprecated)]
+        let spent = ctx
             .checkpoints_left
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_err()
-        {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        if spent.is_err() {
             return ToolOutput::error(
                 "no checkpoints left this turn — carry on with the work and raise it in your \
                  summary at the end instead.",
