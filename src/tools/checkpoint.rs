@@ -183,7 +183,7 @@ impl Tool for CheckpointTool {
         // reading them.
         if ctx
             .checkpoints_left
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .is_err()
         {
             return ToolOutput::error(
