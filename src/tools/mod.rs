@@ -346,7 +346,7 @@ impl Default for ToolRegistry {
 }
 
 /// Resolve a possibly-relative path argument against the tool cwd.
-fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
+pub(crate) fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
     {

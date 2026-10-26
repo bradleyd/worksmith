@@ -2022,6 +2022,128 @@ async fn edits_alone_cannot_extend_a_turn_past_the_ceiling() {
     }
 }
 
+/// Scratch files are not progress. The measured turn extended itself on
+/// `/tmp/filtertest` and `/tmp/run_test.sh` while going in circles.
+#[tokio::test]
+async fn edits_outside_the_project_do_not_extend_the_turn() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    // One real edit, so the stop is the step limit and not the nothing-written
+    // checkpoint; the rest are scratch writes outside the project.
+    let mut script = vec![tool_call("write", r#"{"path":"real.txt","content":"x"}"#)];
+    for i in 0..60 {
+        let path = scratch.path().join(format!("t{i}.sh"));
+        script.push(tool_call(
+            "write",
+            &serde_json::json!({"path": path, "content": "x"}).to_string(),
+        ));
+    }
+    let asker = Arc::new(Scripted {
+        answer: None,
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker);
+
+    let result = agent
+        .run_turn(
+            &mut session,
+            "debug it",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        scratch.path().join("t30.sh").exists(),
+        "the scratch writes ran"
+    );
+    match result.outcome {
+        // Window one had the real edit; window two had only scratch.
+        TurnOutcome::MaxSteps(n) => assert_eq!(n, 40),
+        other => panic!("wanted a stop after the scratch-only stretch, got {other:?}"),
+    }
+}
+
+/// A failed edit changed nothing, so it is not progress either.
+#[tokio::test]
+async fn failed_edits_do_not_extend_the_turn() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let mut script = vec![tool_call("write", r#"{"path":"real.txt","content":"x"}"#)];
+    for i in 0..60 {
+        script.push(tool_call(
+            "edit",
+            &format!(r#"{{"path":"a.txt","old_string":"missing {i}","new_string":"x"}}"#),
+        ));
+    }
+    let asker = Arc::new(Scripted {
+        answer: None,
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker);
+
+    let result = agent
+        .run_turn(
+            &mut session,
+            "fix it",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    match result.outcome {
+        TurnOutcome::MaxSteps(n) => assert_eq!(n, 40),
+        other => panic!("wanted a stop after the failed-edit stretch, got {other:?}"),
+    }
+}
+
+/// The user stepping in mid-stretch stops the automatic extension, even with
+/// real edits landing: measured, a turn the user called "spinning in circles"
+/// extended itself twice more.
+#[tokio::test]
+async fn steering_mid_stretch_stops_at_the_next_check() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+
+    let script = (0..100)
+        .map(|i| tool_call("write", &format!(r#"{{"path":"f{i}.txt","content":"x"}}"#)))
+        .collect();
+    let asker = Arc::new(Scripted {
+        answer: None,
+        asked: Mutex::new(Vec::new()),
+    });
+    let agent = agent_pairing(MockClient::new(script), dir.path(), asker);
+    // Lands at the first step, inside the first stretch.
+    agent.steering().push("you are spinning in circles");
+
+    let result = agent
+        .run_turn(
+            &mut session,
+            "write them",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    match result.outcome {
+        TurnOutcome::MaxSteps(n) => assert_eq!(n, 20, "no extension after steering"),
+        other => panic!("wanted a stop at the first check, got {other:?}"),
+    }
+}
+
 // ---- compaction refuses to trade context for a sentence --------------------
 
 /// Compaction was silently destroying context on every fire. The summarizer,

@@ -84,10 +84,11 @@ impl TurnOutcome {
             // own doing — telling them what they just did is noise.
             TurnOutcome::Done | TurnOutcome::Aborted => None,
             TurnOutcome::MaxSteps(n) => Some(format!(
-                "Stopped after {n} steps: the last stretch made no new edits, or the turn \
-                 used every stretch it gets. Nothing is lost — `continue` picks up where it \
-                 left off. If it was not getting anywhere, say what to do differently \
-                 instead. `max-steps` under [agent] sets how often progress is checked."
+                "Stopped after {n} steps for a progress check: the last stretch made no new \
+                 edits in the project, it was redirected mid-stretch, or the turn used every \
+                 stretch it gets. Nothing is lost — `continue` picks up where it left off. If \
+                 it was not getting anywhere, say what to do differently instead. \
+                 `max-steps` under [agent] sets how often progress is checked."
             )),
             TurnOutcome::ValidationFailed(r) => Some(format!(
                 "The check never passed: {r}. Retries are spent, but the work is still here — \
@@ -725,249 +726,261 @@ impl Agent {
         let mut spent = 0u32;
         let mut steps_run = 0usize;
         let mut edits_at_check = 0usize;
+        // Someone had to step in during this stretch. Measured: a turn the user
+        // called "spinning in circles" mid-stretch still extended itself twice
+        // on debug edits. An intervention means a person is watching, and
+        // stopping costs them one Enter.
+        let mut steered = false;
         // Snapshot the model once, at the top. A switch landing mid-turn must
         // not change the model out from under an in-flight step, or hand the
         // clamp a context limit the current prompt was not built for. It lands
         // on the next turn.
         let active = self.current();
 
-        let outcome =
-            loop {
-                let idle = self
-                    .run_until_idle(
-                        session,
-                        system_prompt,
-                        memory_context.as_ref(),
-                        &mut final_text,
-                        &cancel,
-                        &active,
-                        &edits,
-                        &mut spent,
-                    )
-                    .await?;
+        let outcome = loop {
+            let idle = self
+                .run_until_idle(
+                    session,
+                    system_prompt,
+                    memory_context.as_ref(),
+                    &mut final_text,
+                    &cancel,
+                    &active,
+                    &edits,
+                    &mut spent,
+                    &mut steered,
+                )
+                .await?;
 
-                match idle {
-                    IdleReason::Aborted => break TurnOutcome::Aborted,
-                    IdleReason::MaxSteps => {
-                        steps_run += self.max_steps;
-                        // Edits since the last check mean a long job, not a lost
-                        // one: give it another window without asking anyone.
-                        // Silent to the model on purpose — a small model that
-                        // sees a countdown starts wrapping up early.
-                        let made = edits.load(Ordering::Relaxed);
-                        if made > edits_at_check && steps_run < self.max_steps * STEP_WINDOWS {
-                            self.emit(
-                                session,
-                                Event::Nudge {
-                                    reason: format!(
-                                        "{} more steps ({} edit(s) since the last check, \
+            match idle {
+                IdleReason::Aborted => break TurnOutcome::Aborted,
+                IdleReason::MaxSteps => {
+                    steps_run += self.max_steps;
+                    // Edits since the last check mean a long job, not a lost
+                    // one: give it another window without asking anyone.
+                    // Silent to the model on purpose — a small model that
+                    // sees a countdown starts wrapping up early.
+                    let made = edits.load(Ordering::Relaxed);
+                    let was_steered = std::mem::take(&mut steered);
+                    if made > edits_at_check
+                        && !was_steered
+                        && steps_run < self.max_steps * STEP_WINDOWS
+                    {
+                        self.emit(
+                            session,
+                            Event::Nudge {
+                                reason: format!(
+                                    "{} more steps ({} edit(s) since the last check, \
                                          {steps_run} steps so far)",
-                                        self.max_steps,
-                                        made - edits_at_check
-                                    ),
-                                },
-                            );
-                            edits_at_check = made;
-                            continue;
-                        }
-                        // The cap reached with *nothing written* is evidence of
-                        // trouble: it read and searched for fifty steps and never
-                        // started. Measured: 46 reads, 21 greps, one file opened
-                        // seventeen times, zero edits.
-                        if made == 0
-                            && !offered_a_way_in
-                            && let Some(a) = self
-                                .harness_checkpoint(
-                                    session,
-                                    &cancel,
-                                    &format!("{} steps, nothing written", self.max_steps),
-                                    &format!(
-                                        "It has used all {} steps without editing anything — it is \
-                                     still trying to understand the code. Point it at the right \
-                                     place, or say what to do first. (Enter to answer, Esc to \
-                                     end the turn.)",
-                                        self.max_steps
-                                    ),
-                                )
-                                .await
-                        {
-                            offered_a_way_in = true;
-                            session.append_message(Message::user(format!(
-                                "You used every step without changing anything. The user says:\n\n\
-                             {a}\n\nStart there."
-                            )))?;
-                            continue;
-                        }
-                        break TurnOutcome::MaxSteps(steps_run);
+                                    self.max_steps,
+                                    made - edits_at_check
+                                ),
+                            },
+                        );
+                        edits_at_check = made;
+                        continue;
                     }
-                    IdleReason::Stuck(r) => {
-                        // Going in circles is the other thing the harness knows
-                        // without judging anything. Ask before ending the turn: a
-                        // sentence from the user is worth more here than the whole
-                        // re-plan machinery, and the alternative is stopping.
-                        if offered_a_way_in {
-                            break TurnOutcome::Stuck(r);
-                        }
-                        match self
+                    // The cap reached with *nothing written* is evidence of
+                    // trouble: it read and searched for fifty steps and never
+                    // started. Measured: 46 reads, 21 greps, one file opened
+                    // seventeen times, zero edits.
+                    if made == 0
+                        && !offered_a_way_in
+                        && let Some(a) = self
                             .harness_checkpoint(
                                 session,
                                 &cancel,
-                                "Going in circles",
+                                &format!("{} steps, nothing written", self.max_steps),
                                 &format!(
-                                    "{r}\n\nIt is repeating itself and the turn is about to end. \
-                                 What should it do differently? (Enter to answer, Esc to stop \
-                                 the turn.)"
+                                    "It has used all {} steps without editing anything in the \
+                                     project — it is still trying to understand the code. \
+                                     Point it at the right place, or say what to do first. \
+                                     (Enter to answer, Esc to end the turn.)",
+                                    self.max_steps
                                 ),
                             )
                             .await
-                        {
-                            Some(a) => {
-                                offered_a_way_in = true;
-                                session.append_message(Message::user(format!(
-                                    "You were repeating yourself ({r}). The user says:\n\n{a}\n\n\
-                                 Follow that."
-                                )))?;
-                            }
-                            None => break TurnOutcome::Stuck(r),
-                        }
+                    {
+                        offered_a_way_in = true;
+                        session.append_message(Message::user(format!(
+                            "You used every step without changing anything. The user says:\n\n\
+                             {a}\n\nStart there."
+                        )))?;
+                        continue;
                     }
-                    IdleReason::Budget(spent) => {
-                        // Same shape as the step cap: the number on its own is not
-                        // evidence of trouble, so offer a way in before ending it.
-                        // Unattended this skips and the turn stops, which is the
-                        // point — a background turn that has spent its budget
-                        // should not keep spending.
-                        if !offered_a_way_in
-                            && let Some(a) = self
-                                .harness_checkpoint(
-                                    session,
-                                    &cancel,
-                                    &format!("{spent} tokens spent, still going"),
-                                    &format!(
-                                        "This turn has generated {spent} tokens without \
+                    break TurnOutcome::MaxSteps(steps_run);
+                }
+                IdleReason::Stuck(r) => {
+                    // Going in circles is the other thing the harness knows
+                    // without judging anything. Ask before ending the turn: a
+                    // sentence from the user is worth more here than the whole
+                    // re-plan machinery, and the alternative is stopping.
+                    if offered_a_way_in {
+                        break TurnOutcome::Stuck(r);
+                    }
+                    match self
+                        .harness_checkpoint(
+                            session,
+                            &cancel,
+                            "Going in circles",
+                            &format!(
+                                "{r}\n\nIt is repeating itself and the turn is about to end. \
+                                 What should it do differently? (Enter to answer, Esc to stop \
+                                 the turn.)"
+                            ),
+                        )
+                        .await
+                    {
+                        Some(a) => {
+                            offered_a_way_in = true;
+                            session.append_message(Message::user(format!(
+                                "You were repeating yourself ({r}). The user says:\n\n{a}\n\n\
+                                 Follow that."
+                            )))?;
+                        }
+                        None => break TurnOutcome::Stuck(r),
+                    }
+                }
+                IdleReason::Budget(spent) => {
+                    // Same shape as the step cap: the number on its own is not
+                    // evidence of trouble, so offer a way in before ending it.
+                    // Unattended this skips and the turn stops, which is the
+                    // point — a background turn that has spent its budget
+                    // should not keep spending.
+                    if !offered_a_way_in
+                        && let Some(a) = self
+                            .harness_checkpoint(
+                                session,
+                                &cancel,
+                                &format!("{spent} tokens spent, still going"),
+                                &format!(
+                                    "This turn has generated {spent} tokens without \
                                      finishing. Say what it should do differently, or how \
                                      to narrow the job. (Enter to answer, Esc to end the \
                                      turn.)"
-                                    ),
-                                )
-                                .await
-                        {
-                            offered_a_way_in = true;
-                            session.append_message(Message::user(format!(
-                                "You have spent {spent} tokens on this turn without finishing. \
+                                ),
+                            )
+                            .await
+                    {
+                        offered_a_way_in = true;
+                        session.append_message(Message::user(format!(
+                            "You have spent {spent} tokens on this turn without finishing. \
                              The user says:\n\n{a}\n\nFollow that."
-                            )))?;
-                            continue;
-                        }
-                        break TurnOutcome::Stuck(format!(
-                            "spent {spent} tokens on this turn without finishing"
-                        ));
+                        )))?;
+                        continue;
                     }
-                    IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
-                    IdleReason::ModelDone => {
-                        let Some(v) = validator else {
-                            break TurnOutcome::Done;
-                        };
+                    break TurnOutcome::Stuck(format!(
+                        "spent {spent} tokens on this turn without finishing"
+                    ));
+                }
+                IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
+                IdleReason::ModelDone => {
+                    let Some(v) = validator else {
+                        break TurnOutcome::Done;
+                    };
 
-                        let check = crate::validation::CheckReport::record(
-                            v.describe(),
-                            v.validate().await,
-                            session.path(),
-                        )
-                        .await;
-                        let passed = check.passed;
-                        let reason = check.failure_reason();
-                        self.emit(
-                            session,
-                            Event::Validation {
-                                ok: passed,
-                                detail: check.display(),
-                                report: Some(Box::new(check)),
-                            },
-                        );
-                        if passed {
-                            break TurnOutcome::Done;
-                        } else {
-                            if retries_left == 0 {
-                                break TurnOutcome::ValidationFailed(reason);
-                            }
-                            retries_left -= 1;
-                            let same_failure_count = validation_failures.record(&reason);
-                            // One failure is the loop working — that is the
-                            // whole differentiator. Two different failures can
-                            // still be progress. The same failure twice means
-                            // the re-plan did not move the check at all, and a
-                            // second identical directive is unlikely to be what
-                            // turns it around. Ask once, here, and only here.
-                            let steer = if same_failure_count == 2 {
-                                self.harness_checkpoint(
-                                    session,
-                                    &cancel,
-                                    &format!("`{}` has failed twice the same way", v.describe()),
-                                    &format!(
-                                        "The check keeps failing:\n\n{}\n\nRe-planning has not \
+                    let check = crate::validation::CheckReport::record(
+                        v.describe(),
+                        v.validate().await,
+                        session.path(),
+                    )
+                    .await;
+                    let passed = check.passed;
+                    let reason = check.failure_reason();
+                    self.emit(
+                        session,
+                        Event::Validation {
+                            ok: passed,
+                            detail: check.display(),
+                            report: Some(Box::new(check)),
+                        },
+                    );
+                    if passed {
+                        break TurnOutcome::Done;
+                    } else {
+                        if retries_left == 0 {
+                            break TurnOutcome::ValidationFailed(reason);
+                        }
+                        retries_left -= 1;
+                        let same_failure_count = validation_failures.record(&reason);
+                        // One failure is the loop working — that is the
+                        // whole differentiator. Two different failures can
+                        // still be progress. The same failure twice means
+                        // the re-plan did not move the check at all, and a
+                        // second identical directive is unlikely to be what
+                        // turns it around. Ask once, here, and only here.
+                        let steer = if same_failure_count == 2 {
+                            self.harness_checkpoint(
+                                session,
+                                &cancel,
+                                &format!("`{}` has failed twice the same way", v.describe()),
+                                &format!(
+                                    "The check keeps failing:\n\n{}\n\nRe-planning has not \
                                      moved it. What should it do differently? (Enter to \
                                      answer, Esc to let it keep trying.)",
-                                        truncate_reason(&reason)
-                                    ),
-                                )
-                                .await
-                            } else {
-                                None
-                            };
-                            let directive = match steer {
-                                Some(a) => {
-                                    format!(
-                                        "The validation check {} failed twice with the same \
+                                    truncate_reason(&reason)
+                                ),
+                            )
+                            .await
+                        } else {
+                            None
+                        };
+                        let directive = match steer {
+                            Some(a) => {
+                                format!(
+                                    "The validation check {} failed twice with the same \
                                      normalized failure:\n\n{}\n\nThe user was asked what \
                                      to do differently and said:\n\n{}\n\nFollow that. Do \
                                      not summarize success from a different command; make \
                                      this required check pass.",
-                                        v.describe(),
-                                        reason,
-                                        a
-                                    )
-                                }
-                                None if same_failure_count > 1 => {
-                                    format!(
-                                        "The validation check {} failed again with the same \
+                                    v.describe(),
+                                    reason,
+                                    a
+                                )
+                            }
+                            None if same_failure_count > 1 => {
+                                format!(
+                                    "The validation check {} failed again with the same \
                                      normalized failure ({} times):\n\n{}\n\nDo not \
                                      summarize success from a different command. Inspect why \
                                      this required check is still failing, fix the underlying \
                                      problem, then make this required check pass.",
-                                        v.describe(),
-                                        same_failure_count,
-                                        reason
-                                    )
-                                }
-                                None => {
-                                    format!(
-                                        "The validation check {} did not pass:\n\n{}\n\nRevise \
+                                    v.describe(),
+                                    same_failure_count,
+                                    reason
+                                )
+                            }
+                            None => {
+                                format!(
+                                    "The validation check {} did not pass:\n\n{}\n\nRevise \
                                      your approach and fix the underlying problem, then \
                                      finish.",
-                                        v.describe(),
-                                        reason
-                                    )
-                                }
-                            };
-                            self.emit(session, Event::Nudge {
-                            reason: if same_failure_count > 1 {
-                                format!(
-                                    "validation failed the same way; re-planning \
+                                    v.describe(),
+                                    reason
+                                )
+                            }
+                        };
+                        self.emit(
+                            session,
+                            Event::Nudge {
+                                reason: if same_failure_count > 1 {
+                                    format!(
+                                        "validation failed the same way; re-planning \
                                      ({retries_left} retries left)"
-                                )
-                            } else {
-                                format!(
-                                    "validation failed; re-planning ({retries_left} retries \
+                                    )
+                                } else {
+                                    format!(
+                                        "validation failed; re-planning ({retries_left} retries \
                                      left)"
-                                )
+                                    )
+                                },
                             },
-                        });
-                            session.append_message(Message::user(directive))?;
-                        }
+                        );
+                        session.append_message(Message::user(directive))?;
                     }
                 }
-            };
+            }
+        };
 
         self.emit(
             session,
@@ -994,6 +1007,7 @@ impl Agent {
         active: &ActiveModel,
         edits: &std::sync::Arc<AtomicUsize>,
         spent: &mut u32,
+        steered: &mut bool,
     ) -> Result<IdleReason> {
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.cancel = cancel.clone();
@@ -1013,6 +1027,7 @@ impl Agent {
             // Steering: anything the supervisor (or the user) posted since the
             // last step lands as a user message before the next model call.
             for message in self.steering.take() {
+                *steered = true;
                 self.emit(
                     session,
                     Event::Nudge {
@@ -1354,9 +1369,6 @@ impl Agent {
                     }
                 }
 
-                if matches!(call.name.as_str(), "write" | "edit") {
-                    edits.fetch_add(1, Ordering::Relaxed);
-                }
                 let (ok, fatal, raw, elapsed_ms) =
                     match serde_json::from_str::<serde_json::Value>(&call.arguments) {
                         Ok(v) => {
@@ -1392,6 +1404,9 @@ impl Agent {
                             )
                         }
                     };
+                if ok && counts_as_progress(&call.name, &call.arguments, &tool_ctx) {
+                    edits.fetch_add(1, Ordering::Relaxed);
+                }
                 let content = cap_tool_output(raw);
 
                 self.emit(
@@ -2499,6 +2514,24 @@ fn cap_tool_output(s: String) -> String {
         "{shown}\n\n[output truncated: showed {end} of {} bytes — narrow the query or read a specific range]",
         s.len()
     )
+}
+
+/// Does this tool call move the work forward, for the step-limit check? A
+/// successful write or edit inside the project. Scratch files in `/tmp` and
+/// failed edits are not progress: a turn that extended itself on
+/// `/tmp/filtertest` and `/tmp/run_test.sh` ran to 200 steps going in circles.
+fn counts_as_progress(name: &str, arguments: &str, ctx: &ToolContext) -> bool {
+    if !matches!(name, "write" | "edit") {
+        return false;
+    }
+    let Some(path) = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+    else {
+        return false;
+    };
+    let full = crate::tools::resolve_path(ctx, &path);
+    !crate::tools::policy::path_escapes_cwd(&full, &ctx.cwd)
 }
 
 /// What the model was just doing, rendered for a human to read.
