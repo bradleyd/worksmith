@@ -24,6 +24,10 @@ pub enum Event {
     /// sharing one local server is enough to trip a 20s timeout on prefill.
     ModelCallStarted,
     ModelCallFinished,
+    /// The connection dropped partway through a reply and the call is being
+    /// made again from the start. Whatever streamed so far is not the answer
+    /// and must not stay on screen, or the retry prints a second copy under it.
+    StreamDiscarded,
     /// Worksmith's view of one completed model request. These timings bracket
     /// the client call, so they include local server queueing and prefill.
     /// Token counts follow `llm::Usage` semantics, independent of provider.

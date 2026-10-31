@@ -54,6 +54,8 @@ similar = "3"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused time, so retry backoff runs instantly under test.
+tokio = { version = "1", features = ["test-util"] }
 
 # Drop debuginfo for dependencies only; worksmith itself keeps full symbols.
 # This buys disk, not speed: measured at 7.2s either way on a warm rebuild,

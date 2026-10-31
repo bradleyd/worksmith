@@ -199,10 +199,11 @@ const MAX_EMPTY_COMPLETIONS: u32 = 2;
 /// characters; theirs counts tokens, and only one of them decides.
 const CONTEXT_RESERVE: usize = 512;
 
-/// How many times to send a request that failed for transport reasons. Three
-/// attempts covers a tunnel reconnecting without papering over a server that is
-/// genuinely down.
-const TRANSPORT_ATTEMPTS: usize = 3;
+/// How many times to send a request that failed for transport reasons. The
+/// waits between them double from 2s (2, 4, 8, 16: 30s in all), because the
+/// common case is a laptop waking from sleep, and wifi takes 5-15s to come
+/// back. Long enough for that without papering over a server that is down.
+const TRANSPORT_ATTEMPTS: usize = 5;
 
 /// Never clamp output to nothing. If the window is this tight the turn is
 /// already in trouble and the server's own error is more useful than a request
@@ -1731,8 +1732,8 @@ impl Agent {
         for attempt in 0..TRANSPORT_ATTEMPTS {
             let (tx, mut rx) = mpsc::channel::<StreamEvent>(256);
             let bus = self.bus.clone();
-            // Retrying after the model has already put words on the screen would
-            // print the answer twice, so a failure mid-stream is final.
+            // Whether anything reached the screen. A retry after that has to
+            // take it back down first (`StreamDiscarded`).
             let streamed = Arc::new(AtomicBool::new(false));
             let saw_output = streamed.clone();
             let first_output_ms = Arc::new(AtomicU64::new(0));
@@ -1816,18 +1817,21 @@ impl Agent {
             };
 
             let last = attempt + 1 >= TRANSPORT_ATTEMPTS;
-            if last
-                || cancel.is_cancelled()
-                || streamed.load(Ordering::Relaxed)
-                || !crate::llm::is_transient(&err)
-            {
+            if last || cancel.is_cancelled() || !crate::llm::is_transient(&err) {
                 return Err(err);
+            }
+            // A drop mid-reply used to be final, so the answer would not print
+            // twice — and a laptop that slept mid-stream ended the turn. The
+            // partial reply was never saved, so asking again is safe; only the
+            // screen needs taking back.
+            if streamed.load(Ordering::Relaxed) {
+                self.emit(session, Event::StreamDiscarded);
             }
 
             // An ssh tunnel that drops after an idle stretch, a server still
-            // loading, a 429: none of these mean the turn is over. Backing off
-            // and asking again is what a person would do.
-            let wait = Duration::from_secs(2u64.pow(attempt as u32));
+            // loading, a 429, a laptop waking up: none of these mean the turn
+            // is over. Backing off and asking again is what a person would do.
+            let wait = Duration::from_secs(2u64.pow(attempt as u32 + 1));
             self.emit(
                 session,
                 Event::Warning {

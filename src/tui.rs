@@ -542,6 +542,21 @@ impl App {
                 self.checkpoint_item = None;
             }
             Event::ModelCallFinished => {}
+            Event::StreamDiscarded => {
+                // Take the partial reply back down: the retry streams the
+                // whole answer again, and both copies on screen would read as
+                // the model repeating itself.
+                for at in [self.cur_assistant.take(), self.cur_thinking.take()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .rev()
+                {
+                    self.transcript.discard(at);
+                }
+                self.step_reasoning_chars = 0;
+            }
             event @ Event::ModelMetrics { .. } => {
                 if let Event::ModelMetrics {
                     session_id: Some(ref id),
@@ -3316,6 +3331,7 @@ fn describe(ev: &Event) -> String {
         ),
         Event::ModelCallStarted => "model call →".to_string(),
         Event::ModelCallFinished => "model call ←".to_string(),
+        Event::StreamDiscarded => "↻ connection dropped mid-reply; asked again".to_string(),
         Event::ModelMetrics {
             prompt_tokens,
             completion_tokens,
@@ -6312,6 +6328,34 @@ mod tests {
             Kind::Notice
         ));
         assert!(!b.resume_offer);
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_a_dropped_connection_comes_off_the_screen() {
+        let mut a = app();
+        a.push(Kind::User, "hello");
+        a.apply_event(Event::Thinking {
+            text: "partial reasoning".into(),
+        });
+        a.apply_event(Event::MessageDelta {
+            text: "half an ans".into(),
+        });
+        let before = a.transcript.items.len();
+
+        a.apply_event(Event::StreamDiscarded);
+        assert_eq!(a.transcript.items.len(), before - 2, "both partials gone");
+        assert!(
+            a.transcript
+                .items
+                .iter()
+                .all(|i| !i.text.contains("half an ans") && !i.text.contains("partial")),
+        );
+
+        // The retry streams into fresh items, not into the discarded ones.
+        a.apply_event(Event::MessageDelta {
+            text: "the whole answer".into(),
+        });
+        assert_eq!(a.transcript.items.last().unwrap().text, "the whole answer");
     }
 
     #[test]

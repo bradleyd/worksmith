@@ -213,6 +213,9 @@ impl LlmClient for OpenAiCompatClient {
                          `stream-idle-timeout` under its [providers.*] section.",
                         self.stream_idle.as_secs()
                     ))
+                } else if dropped_connection(&e) {
+                    anyhow::Error::new(crate::llm::Transient)
+                        .context(format!("connection dropped mid-reply: {e}"))
                 } else {
                     anyhow::Error::new(e).context("reading stream chunk")
                 }
@@ -311,6 +314,33 @@ impl LlmClient for OpenAiCompatClient {
 /// still fails. A 400 stays permanent — retrying an illegal parameter just
 /// spends the budget re-learning it, which is what Z.AI's temperature
 /// rejection would have done.
+/// Did the connection go away under the reply, as opposed to the server
+/// sending something unreadable? Measured: a laptop sleeping mid-stream comes
+/// back as "error decoding response body … Connection reset by peer (os error
+/// 54)", which is a decode error on the outside and a reset underneath.
+fn dropped_connection(err: &(dyn std::error::Error + 'static)) -> bool {
+    use std::io::ErrorKind::*;
+    let mut cause = Some(err);
+    while let Some(e) = cause {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof | TimedOut
+            )
+        {
+            return true;
+        }
+        // hyper says this in words, not with an io::Error underneath.
+        if e.to_string()
+            .contains("connection closed before message completed")
+        {
+            return true;
+        }
+        cause = e.source();
+    }
+    false
+}
+
 fn in_band_is_transient(err: &serde_json::Value) -> bool {
     // `code` is a number for some providers and a string for others.
     let code = err.get("code").and_then(|c| {
@@ -1118,6 +1148,35 @@ mod thinking_tests {
         r.max_tokens = Some(8_192);
         let b = build_request_body(&r, ThinkingDialect::ChatTemplate, None, None);
         assert!(b.get("thinking_token_budget").is_none());
+    }
+
+    #[test]
+    fn a_connection_dropped_under_the_reply_is_worth_retrying() {
+        // The measured shape: a decode error outside, a reset underneath.
+        #[derive(Debug)]
+        struct Decode(std::io::Error);
+        impl std::fmt::Display for Decode {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error decoding response body")
+            }
+        }
+        impl std::error::Error for Decode {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let reset = Decode(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "Connection reset by peer (os error 54)",
+        ));
+        assert!(dropped_connection(&reset));
+
+        // Garbage from a live server is not a dropped connection.
+        let garbage = Decode(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid gzip header",
+        ));
+        assert!(!dropped_connection(&garbage));
     }
 
     #[test]

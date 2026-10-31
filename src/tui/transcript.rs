@@ -325,6 +325,19 @@ impl Transcript {
         true
     }
 
+    /// Remove an item that turned out not to be real (a reply cut off by a
+    /// dropped connection). Only the tail can go — anything after it would have
+    /// its index shift under whoever holds it — so an item further back is
+    /// emptied instead.
+    pub(super) fn discard(&mut self, index: usize) {
+        if index + 1 == self.items.len() {
+            self.items.pop();
+        } else if let Some(item) = self.items.get_mut(index) {
+            item.text.clear();
+        }
+        self.touch(index);
+    }
+
     /// Mark item `index` (and everything after it) as needing re-wrapping.
     pub(super) fn touch(&mut self, index: usize) {
         self.dirty = true;

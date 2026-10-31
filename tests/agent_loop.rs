@@ -274,7 +274,8 @@ async fn a_prompt_bound_request_compacts_instead_of_shrinking_forever() {
     );
 }
 
-#[tokio::test]
+// Paused time: the backoff (2s, 4s, …) is real code, not worth real seconds.
+#[tokio::test(start_paused = true)]
 async fn a_dropped_connection_is_retried_not_fatal() {
     common::isolate_home();
     let dir = tempfile::tempdir().unwrap();
@@ -309,6 +310,89 @@ async fn a_dropped_connection_is_retried_not_fatal() {
         *calls.lock().unwrap(),
         3,
         "two failures should cost two retries"
+    );
+}
+
+/// Fails once *after* streaming part of a reply, the way a laptop sleeping
+/// mid-stream does, then answers.
+struct DropsMidReply {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl LlmClient for DropsMidReply {
+    async fn stream(
+        &self,
+        _req: ChatRequest,
+        sink: mpsc::Sender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Completion> {
+        let n = {
+            let mut c = self.calls.lock().unwrap();
+            *c += 1;
+            *c
+        };
+        if n == 1 {
+            let _ = sink
+                .send(StreamEvent::TextDelta("half an ans".into()))
+                .await;
+            return Err(anyhow::Error::new(worksmith::llm::Transient)
+                .context("connection dropped mid-reply: Connection reset by peer (os error 54)"));
+        }
+        Ok(Completion {
+            content: Some("the whole answer".into()),
+            ..Default::default()
+        })
+    }
+}
+
+/// A drop after output started used to end the turn, so the partial answer
+/// would not print twice. The partial was never saved; the retry is safe as
+/// long as the screen is told to take it back down.
+#[tokio::test(start_paused = true)]
+async fn a_reply_cut_off_mid_stream_is_asked_again() {
+    common::isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create_at(&dir.path().join("s.jsonl"), dir.path()).unwrap();
+    let calls = Arc::new(Mutex::new(0));
+    let agent = build_agent_with_client(
+        Arc::new(DropsMidReply {
+            calls: calls.clone(),
+        }),
+        dir.path(),
+        3,
+    );
+
+    let result = agent
+        .run_turn(
+            &mut session,
+            "hello",
+            "system",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.outcome.is_success(), "{:?}", result.outcome);
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(result.text, "the whole answer");
+    let saved = session
+        .messages()
+        .iter()
+        .filter_map(|m| m.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !saved.contains("half an ans"),
+        "the cut-off reply is not history"
+    );
+    let events = worksmith::session::events(session.path()).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event, worksmith::event::Event::StreamDiscarded)),
+        "the screen is told to drop the partial"
     );
 }
 
