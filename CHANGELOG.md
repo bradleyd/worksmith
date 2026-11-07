@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-11-07
 
 ### Added
 
@@ -12,11 +12,41 @@
   a turn; search opens a folded turn around its match. Labels quote the user;
   no model call produces them. Timing is the local clock around the live turn
   and is never shown for a turn this process did not run.
+- A dropped connection partway through a reply is retried instead of ending
+  the turn. Waits double from 2s (2, 4, 8, 16) across 5 attempts, about 30s,
+  which covers wifi coming back after a laptop wakes. The partial reply comes
+  off the screen before the retry, so the answer is not printed twice.
+- An effort level (`/think low`, `thinking = "medium"`) also sends an enforced
+  reasoning budget when the provider has a `reasoning-budget-param`: `low`
+  1024, `medium` 4096, `high` 8192, `xhigh` 16384, capped at three quarters of
+  `max-tokens`; `max` stays uncapped. On vLLM, Qwen 3.8 at `low` reasoned to a
+  6,000-token cap with no answer; with the budget it stopped at 1,023 tokens
+  and answered.
+- A startup warning when Worksmith is launched in a folder that holds several
+  repos (not a repo itself, two or more children are). Memory, knowledge and
+  decisions are keyed by the launch directory and would be shared by all of
+  them; the `knowledge` tool refuses to index there.
 
 ### Changed
 
 - Model reasoning is hidden in the transcript by default. Ctrl+T shows it; the
   footer's `↻` count is unchanged. Requests and session records are unaffected.
+- `max-steps` is a progress check, not a stop. A 50-step stretch that made
+  successful edits inside the project earns another, up to 4 per turn. A
+  stretch with no project edits, a mid-turn message from you, or the fourth
+  stretch ends the turn. Scratch files outside the project and failed edits do
+  not count.
+- A session turn has a 150,000 completion-token budget by default (the 99th
+  percentile of 758 recorded turns was 57k). `token-budget = 0` turns it off.
+  The count now covers the whole turn instead of resetting per validation retry.
+- The step-limit stop renders on the checkpoint channel with an alert, and an
+  empty Enter continues the turn.
+- Turn memory needs real overlap: a memory must share 15% of the shorter
+  text's words, with common words ignored. One shared word used to be enough,
+  and a 200-word brief pulled in unrelated notes on words like "people".
+- Harness checkpoints put the evidence first and the question last, so a long
+  tool dump cannot push the question off screen.
+- `rust-version = "1.89"` is declared in `Cargo.toml`.
 
 ### Fixed
 
@@ -24,6 +54,20 @@
   bold labels and spacing, plus a border on every wrapped user-message line.
   Speaker separation does not rely on color; user text retains literal markup.
   Expansion, search, copying, and checkpoint behavior are preserved.
+- The terminal is restored when Worksmith is killed or panics, instead of
+  being left in raw mode with mouse capture on.
+- Filing a decision outside a git repository no longer prints git's "not a
+  git repository" error over the input box.
+
+### Compatibility and limitations
+
+- No configuration or session migration is required. A turn that used to stop
+  every 50 steps can now run to 200; set `max-steps` or `token-budget` to bound
+  it tighter.
+- Qwen 3.8 accepts only `low`, `medium` and `xhigh`; `/think high` is rejected
+  by the server with its own message. A provider without
+  `reasoning-budget-param` gets the level alone, as before.
+- Building needs Rust 1.89 or newer.
 
 ## 0.7.0 — 2026-09-11
 
