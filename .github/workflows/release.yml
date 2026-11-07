@@ -16,7 +16,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
+          # Not pinned: GitHub retired macos-14 and v0.8.0's macOS build was
+          # cancelled before it started ("macos-14-arm64-us-default is not
+          # supported"). macos-latest is always a supported Apple Silicon image.
+          - os: macos-latest
             target: aarch64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
