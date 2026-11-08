@@ -1,35 +1,44 @@
 # What to do next
 
-Updated 2026-09-27 after the turn-grouping live dogfood.
+Updated 2026-11-08 after the v0.8.0 release.
 This is the short operational list;
 `PLAN.md` holds the broader roadmap and `LOOSE_ENDS.md` the forensic notes.
 Fresh-start handoff: [`FRESH_START.md`](FRESH_START.md).
 
-## Turn grouping dogfooded, ready to merge
+## v0.8.0 released
 
-Branch `turn-grouping` groups the transcript by turn with working / waiting /
-done / ended status and elapsed time on the root row, folds turns with Enter,
-and hides thinking by default. Tests, Clippy, deliberate guard breaks, and a
-scripted PTY smoke at 80 and 40 columns passed; see `PAIR_PLAN.md` "Turn
-grouping slice" for decisions, the two ordering races it fixed, and limits.
+[v0.8.0](https://github.com/bradleyd/worksmith/releases/tag/v0.8.0) is published
+from `main` at `b3401ad`, with macOS ARM64 and Linux x86-64 musl archives. The
+Homebrew tap is updated and pushed at `54a0ea5`, using the SHA-256 of the
+downloaded macOS archive (`2479d6f0…086e`); that binary reports
+`worksmith 0.8.0 (b3401adbf)`.
 
-Live 27B dogfooding is now done (see `PAIR_PLAN.md` "Live 27B dogfood"). The
-same small `mud-test` task run with pairing off had the model narrate a
-discussion and then plow straight into edits (no `checkpoint` tool call; it
-later reverted from git), while the same task with pairing on issued a real
-checkpoint, waited for the answer, and only then edited. The grouped transcript
-read well to the user. Remaining: merge into `main` and release. Worker trees
-and tabs remain later work.
+It ships the turn grouping and checkpoint speaker work that was waiting on
+`main`, plus a round driven by a two-day 27B session building a POS app:
+`max-steps` as a progress check (only successful in-project edits count, a
+mid-turn steer stops the next extension, 4 stretches at most), a 150k default
+turn token budget, a one-key continue at the step limit, effort levels backed
+by an enforced `thinking_token_budget`, mid-stream connection drops retried
+with 2/4/8/16s backoff, a 15% word-overlap gate on turn memory, and a warning
+plus a `knowledge` refusal when launched in a folder of repos. Full list in
+`CHANGELOG.md`; release text in `RELEASE_NOTES.md`.
 
-## Checkpoint speaker UI merged
+**The tag moved once.** The first `v0.8.0` push was at `1ca2ad1`. Its macOS job
+was cancelled before any step ran: GitHub retired the `macos-14` runner
+("The configuration 'macos-14-arm64-us-default' is not supported"), so the
+release went out with only the Linux archive. `b3401ad` switches the job to
+`macos-latest`; the partial release and the tag were deleted and `v0.8.0` was
+re-pushed at `b3401ad`, where both jobs passed. The Linux job still pins
+`ubuntu-22.04`, which will retire the same way.
 
-The speaker-label, spacing, and user-border fix from
-`codex/checkpoint-conversation-ui` is merged into `main` at `7f2deb6`, unreleased. Automated checks passed (524 tests, Clippy, PTY,
-and docs); the user confirmed collapse, navigation while waiting, and the skip
-message. See `PAIR_PLAN.md` for evidence and the separate skip-policy/model
-comparison follow-ups. No new release or Homebrew update is part of this slice.
+Release verification: 549 tests passed, zero failed, two opt-in live probes
+ignored; all-target Clippy passed with warnings denied; `cargo fmt --check`
+clean. Live checks against the vLLM server (Qwen 3.8 27B): the
+`thinking_token_budget` cut reasoning at exactly 300, 1,000 and 2,500 tokens,
+and `/think low` at `max-tokens` 8192 stopped at 1,023 and answered. The
+website guides were not updated for this release.
 
-## v0.7.0 released
+## Historical v0.7.0 baseline
 
 [v0.7.0](https://github.com/bradleyd/worksmith/releases/tag/v0.7.0) is published
 from `main` at `57101d3`, with macOS ARM64 and Linux x86-64 musl archives.
@@ -44,8 +53,6 @@ binary passed version, checkpoint discussion/expansion PTY, and web-result JSON
 smoke checks. Production and preview site checks passed. The user also manually
 tested the changes in `mud-test` and reported that they work.
 
-Release notes are in `RELEASE_NOTES.md` and `CHANGELOG.md`. No release steps
-remain pending. The v0.6.0 details below are historical context.
 
 ## Historical v0.6.0 baseline
 
@@ -75,22 +82,15 @@ verification and both GitHub release jobs passed. Earlier CLI/REPL/TUI smoke
 checks covered dated sessions, search, worker metrics, and validation output.
 These are release results, not claims of new validation for this Markdown refresh.
 
-## Next: merge the turn grouping, then release
+## Next
 
-The pairing branch now implements request guidance, bounded checkpoint discussion,
-expandable checkpoints and tool entries, and recorded tool durations in JSON and
-the TUI. Two local MUD runs verified discussion before editing and expansion.
-The final review also fixes HTML extraction that discarded article content and
-makes empty fetches explicit failures. See [`PAIR_PLAN.md`](PAIR_PLAN.md) for
-validation and limits.
-
-Turn grouping is built on `turn-grouping` and its §6 step 5 live 27B dogfood is
-now done (see "Live 27B dogfood: turn grouping + pairing"): the same small
-`mud-test` task with pairing off plowed into edits without stopping, while
-pairing on issued a real checkpoint and waited; the grouped transcript read well.
-What remains is to merge into `main`, release, and update the website guide.
-Worker trees and tabs remain later work. Resume uses configured pairing state;
-persisting live mode changes remains deferred.
+- **Website guides for v0.8.0:** the docs site still describes the 50-step
+  stop, effort levels without budgets, and no folder-of-projects warning.
+- **Mark mid-turn steering as a redirect:** after a steer, Qwen re-answered
+  it on every step ("You're right, from the basics…" opened 7 of 8 replies)
+  because it stays the latest user message. Proposed: prefix it as mid-turn
+  input to act on, not a question to answer. Unproven; needs a live check.
+- **Unpin the Linux release runner** before `ubuntu-22.04` is retired.
 
 ## Deferred work and constraints
 
@@ -126,6 +126,13 @@ persisting live mode changes remains deferred.
 - **TUI extraction:** continue only when a feature forces it. Preserve ordering
   around worker completion, synthesis, approvals, checkpoints, mining, compaction,
   and turn completion.
+- **Remote MCP (HTTP transport + OAuth):** not supported; only local stdio
+  servers are. Asked for `https://mcp.privateemail.com/mcp`, which needs OAuth
+  via `id.service.spaceship.com` (dynamic client registration and PKCE). Today's
+  route is the third-party `mcp-remote` bridge as a stdio command, with
+  `HOME = "HOME"` in its `env` so it finds its saved token. Native support means
+  `rmcp`'s HTTP client transport plus a login, token store and refresh under
+  the existing trust and approval gates.
 - **MCP coprocesses orphaned on abnormal exit:** the SIGTERM/SIGINT/panic
   handlers (`install_abnormal_exit_handlers`, `src/tui.rs`) restore the terminal
   and call `process::exit`, which skips `Drop` and `shutdown`. Each MCP server
