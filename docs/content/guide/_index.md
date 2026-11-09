@@ -11,6 +11,9 @@ a run's results.
 
 - [**Model configuration**](@/guide/configuration.md): connect local and hosted
   providers, set how hard the model thinks, and fix setup problems.
+- [**Configuration recipes**](@/guide/recipes.md): complete, tested configs for
+  OpenRouter, Qwen 3.8 on vLLM, oMLX on a Mac, cheap workers, project checks, a
+  project skill, and a remote MCP server.
 - [**The validation loop**](@/guide/validation-loop.md): why the loop exists,
   what "done" means, how a failure becomes a re-plan, how long turns are
   bounded, and the two evals that bound the claim. It is decisive on a weak

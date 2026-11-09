@@ -6,7 +6,8 @@ weight = 5
 
 Worksmith reads `~/.worksmith/config.toml`. The [quickstart](@/quickstart.md)
 shows a minimal hosted setup. This page covers local servers and additional
-provider settings.
+provider settings. For whole files to copy, see the
+[configuration recipes](@/guide/recipes.md).
 
 ## Local models and providers
 

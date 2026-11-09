@@ -49,6 +49,7 @@ and a passing test is still a reason to review the diff.
 
 - [Quickstart](@/quickstart.md): installation, setup, and both ways to run a task.
 - [Model configuration](@/guide/configuration.md): local and hosted providers, reasoning budgets, and setup fixes.
+- [Configuration recipes](@/guide/recipes.md): complete configs to copy for common setups.
 - [Validation loop](@/guide/validation-loop.md): how Worksmith checks completion, retries, and bounds long turns.
 - [Metrics and cost](@/guide/metrics.md): token usage, latency, and the TUI footer.
 - [Measuring the harness](@/guide/measuring.md): evaluation results and their limitations.
