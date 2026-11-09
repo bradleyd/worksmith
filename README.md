@@ -218,19 +218,18 @@ Linux users take the release tarball. To cut a release: tag `v<version>` in
 this repo (the `release` workflow builds and uploads the artifacts), then bump
 the tap's `url`/`sha256` and push.
 
-Pick one location and stick to it. `install.sh` writes to `~/.local/bin` and
-`cargo install --path .` writes to `~/.cargo/bin`; if both exist, whichever comes
-first on your PATH wins, and you can spend a while debugging a bug you already
-fixed. `which -a worksmith` shows the duplicates.
-
-**From source** (needs a Rust toolchain):
+**From source** (needs Rust 1.89 or newer):
 
 ```sh
 git clone https://github.com/bradleyd/worksmith
 cd worksmith
-./install.sh          # release build → ~/.local/bin (on PATH)
-# ./install.sh --debug for a faster dev build
+cargo install --path .   # release build → ~/.cargo/bin
 ```
+
+Pick one install and stick to it. Homebrew puts `worksmith` in
+`/opt/homebrew/bin` and `cargo install` puts it in `~/.cargo/bin`. If both
+exist, whichever comes first on your PATH wins, and you can spend a while
+debugging a bug you already fixed. `which -a worksmith` shows the duplicates.
 
 ## Quick start
 

@@ -152,10 +152,11 @@ the example generated there.
 
 ## Troubleshooting
 
-- **The wrong version runs:** `which -a worksmith` shows all installed copies.
-  `install.sh` prefers a writable `~/.local/bin` already on PATH, then
-  `~/.cargo/bin`, and falls back to `cargo install`. Your shell uses the first
-  matching directory on PATH.
+- **The wrong version runs:** `which -a worksmith` lists every installed copy,
+  and your shell runs the first one on PATH. Homebrew installs to
+  `/opt/homebrew/bin` and `cargo install` to `~/.cargo/bin`. Delete the copies
+  you don't use. Older releases shipped an `install.sh` that copied the binary
+  into `~/.local/bin`, so check there too.
 - **No model is configured:** copy the generated `config.example.toml` to
   `config.toml` and set `model` plus the provider's `base-url`.
 - **Authentication fails:** export the environment variable named by

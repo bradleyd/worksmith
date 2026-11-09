@@ -25,12 +25,12 @@ brew install bradleyd/worksmith/worksmith
 [GitHub releases](https://github.com/bradleyd/worksmith/releases), extract it,
 and put `worksmith` on your PATH.
 
-**From source (requires Rust):**
+**From source (requires Rust 1.89 or newer):**
 
 ```sh
 git clone https://github.com/bradleyd/worksmith
 cd worksmith
-./install.sh
+cargo install --path .
 ```
 
 Check the installation:
