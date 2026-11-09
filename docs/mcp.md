@@ -67,6 +67,35 @@ One-call approval applies to the pending argument object. Headless runs refuse
 approvals unless `--approve-all` was explicitly supplied. The plain REPL retains
 that existing unattended policy; it has no interactive approval channel.
 
+## Remote servers
+
+Only local stdio servers are supported. A server reached by URL, such as
+`https://mcp.example.com/mcp`, speaks MCP over HTTP and usually wants an OAuth
+login, and Worksmith has neither yet.
+
+The workaround is a bridge that logs in and presents the remote server as a
+local stdio program. [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) is
+a common one. It is third-party code that will hold your token, so the warning
+at the top of this page applies to it too.
+
+1. Install it once instead of letting `npx -y` fetch it at every launch:
+   `npm install -g mcp-remote`.
+2. Log in from a normal terminal: `mcp-remote https://mcp.example.com/mcp`. It
+   opens your browser and saves the token under `~/.mcp-auth`. Do this outside
+   Worksmith, because Worksmith discards server stderr and a failed login would
+   only show up as a generic startup failure.
+3. Point Worksmith at the bridge, passing `HOME` through so it finds the token:
+
+```toml
+[mcp.example]
+enabled = true
+command = "/opt/homebrew/bin/mcp-remote"   # wherever `which mcp-remote` points
+args = ["https://mcp.example.com/mcp"]
+
+[mcp.example.env]
+HOME = "HOME"
+```
+
 ## Bounds and failure behavior
 
 Per-server settings and initial defaults:

@@ -80,6 +80,11 @@ repository you want to work on, then launch:
 worksmith
 ```
 
+Launch in the project's own folder. Memory, the knowledge index, and filed
+decisions all belong to the directory you start in, so starting in a folder
+that holds several projects (like `~/Projects`) would mix them. Worksmith warns
+at startup if you do.
+
 <figure class="screenshot">
   <a href="/images/worksmith-tui-commands.png" aria-label="View the Worksmith TUI screenshot at full size">
     <img src="/images/worksmith-tui-commands.png" width="2624" height="1696" alt="Worksmith TUI with the command menu open, showing help, skills, workers, validation, and metrics above the message input and model status bar." loading="lazy" decoding="async">
@@ -118,6 +123,14 @@ decision that deserves a checkpoint. Use `/pair off` to turn it off.
 Esc at a checkpoint skips the question and lets the assistant decide and continue;
 it does not cancel the turn.
 
+Long tasks keep going on their own while the model is making edits. Every 50
+steps Worksmith checks for progress, and a stretch that changed files in the
+project earns another 50, up to 200. A turn stops early if a stretch changed
+nothing, or if you sent a message mid-turn. When it stops at the limit, the
+input box says `STEP LIMIT`; press Enter on the empty box to continue, or type
+what it should do differently. The [validation loop](@/guide/validation-loop.md#long-turns)
+page has the details.
+
 To work on a failing test, set the check first by entering:
 
 ```text
@@ -148,6 +161,8 @@ worksmith --until "cargo test" "make the failing test pass"
 | Toggle selected entry or turn | Enter in transcript navigation |
 | Show or hide model reasoning | Ctrl+T |
 | Enable pairing | `/pair on` |
+| Steer the running turn | Type a message and press Enter |
+| Continue after the step limit | Enter on an empty input |
 | Stop the current turn | Esc |
 | Read the transcript | Esc with an empty input; `i` to return to typing |
 | Show available commands | `/help` |

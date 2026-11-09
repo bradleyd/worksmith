@@ -49,7 +49,9 @@ sessions without recorded worker links cannot recover that association.
 
 Counts cover successfully returned requests for which Worksmith wrote a
 `model_metrics` event. Failed or interrupted requests that never return usage
-may still incur provider charges that this accounting cannot see. A transport
+may still incur provider charges that this accounting cannot see. That includes
+a reply cut off by a dropped connection: Worksmith asks again from the start,
+and the tokens the cut-off attempt generated are not counted. A transport
 attempt is not a completed model call. The separate `usage` event drives live
 UI counters; it is not added again to the metrics totals.
 
@@ -141,7 +143,7 @@ same token, call, time, and cost definitions within that turn.
 | `reasoning` / `reasoning_tokens` | Sum of the reported or estimated reasoning subset of output. |
 | `model` / `model_ms` | Sum of elapsed model-request times. It is not session wall-clock duration. Combined worker time can exceed wall time because workers run concurrently. |
 | `compactions` | Completed compaction events in this scope. |
-| `nudges` | Recorded `nudge` events. This is not a count of all retries or all interventions. |
+| `nudges` | Recorded `nudge` events: validation re-plans, repeated-call and empty-reply nudges, your mid-turn messages and supervisor steering, and the `↻ 50 more steps` notice when a long turn earns another stretch. It is not a count of all retries or all interventions, and a high count on a long productive turn is normal. |
 | `cache` numerator / `cached_tokens` | Input tokens served from cache, summed only where reported. Each request's count is capped at its input-token count for aggregation. |
 | `cache` denominator / `cache_prompt_tokens` | Input tokens from calls that reported cache-read telemetry. Calls with unavailable telemetry are excluded from this denominator. |
 | `cache` percentage | `100 × cached_tokens / cache_prompt_tokens`, or zero for a zero denominator. It is a token-weighted hit rate over reporting calls. |

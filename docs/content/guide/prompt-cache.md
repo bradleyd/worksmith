@@ -34,6 +34,28 @@ Moving memory closer to the latest question is a possible follow-up, but it also
 changes instruction placement. The probe below compares that hypothetical layout;
 production memory placement is unchanged pending task-quality validation.
 
+## Where skills live
+
+A skill is a folder holding a `SKILL.md` in the published Agent Skills format.
+Its frontmatter needs a `name` and a `description`, and the `name` has to match
+the folder name. Worksmith looks in these places, and when two skills share a
+name the later one wins:
+
+1. `<project>/skills/`
+2. `~/.claude/skills/`
+3. `~/.worksmith/skills/`
+4. `<project>/.claude/skills/`
+5. `<project>/.worksmith/skills/`
+
+`<project>` is the directory you launched in. Worksmith does not search parent
+folders, so a skill under `myapp/.worksmith/skills/` loads when you start in
+`myapp` and not when you start in `myapp/src`. A project copy can replace a
+global skill of the same name for that project alone. Project skills load
+without the trust prompt that gates a project's `config.toml`.
+
+A `SKILL.md` sitting directly in a folder at the project root, instead of
+under `skills/`, gets a warning at startup. That is the usual mistake.
+
 ## Skill controls and limits
 
 `/skill` opens a searchable list and instruction preview. Tab changes the focused

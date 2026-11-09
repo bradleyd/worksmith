@@ -8,7 +8,7 @@ full-screen terminal interface for interactive work, or run a single task
 from the command line. It connects to local and hosted models through an
 OpenAI-compatible API.
 
-**[Start with the quickstart](@/quickstart.md)** — install, connect a model,
+**[Start with the quickstart](@/quickstart.md)** to install, connect a model,
 and run your first task.
 
 ## Two ways to work
@@ -47,10 +47,10 @@ and a passing test is still a reason to review the diff.
 
 ## Find what you need
 
-- [Quickstart](@/quickstart.md) — installation, setup, and both ways to run a task.
-- [Model configuration](@/guide/configuration.md) — local and hosted providers, plus setup fixes.
-- [Validation loop](@/guide/validation-loop.md) — how Worksmith checks completion and retries.
-- [Metrics and cost](@/guide/metrics.md) — token usage, latency, and the TUI footer.
-- [Measuring the harness](@/guide/measuring.md) — evaluation results and their limitations.
+- [Quickstart](@/quickstart.md): installation, setup, and both ways to run a task.
+- [Model configuration](@/guide/configuration.md): local and hosted providers, reasoning budgets, and setup fixes.
+- [Validation loop](@/guide/validation-loop.md): how Worksmith checks completion, retries, and bounds long turns.
+- [Metrics and cost](@/guide/metrics.md): token usage, latency, and the TUI footer.
+- [Measuring the harness](@/guide/measuring.md): evaluation results and their limitations.
 
 For commands while you work, type `/help` in an interactive session.
