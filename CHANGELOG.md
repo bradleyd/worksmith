@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- `install.sh`. Build from source with `cargo install --path .`, which installs
+  to `~/.cargo/bin`. The script's fast path copied the binary into
+  `~/.local/bin`, where old copies outlived upgrades and shadowed newer
+  installs; check there for leftovers with `which -a worksmith`.
+
+### Documentation
+
+- A configuration recipes page with complete configs for common setups.
+  `cargo test` now parses every TOML example in the README and docs with the
+  real config loader, and installs every skill example, so a renamed setting
+  fails the build instead of a reader's copy.
+
 ## 0.8.0 — 2026-11-07
 
 ### Added
