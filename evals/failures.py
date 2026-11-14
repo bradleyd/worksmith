@@ -13,8 +13,12 @@ connection). Its *cause* is read from the events the harness wrote, never
 guessed, so the grouping is deterministic and needs no model call. Stage 2
 labels the agent behaviour behind each failure; that one needs a model.
 
-Turns that ended `done` but were wrong are invisible here: nothing recorded
-says so. Eval runs with a validator are the only place that is knowable.
+Turns that ended `done` but were wrong are invisible in ordinary sessions:
+nothing recorded says so. Eval traces (`evals/run.py` keeps them) carry the
+check's verdict, so there the check decides: a `done` that failed it is a
+`check_failed`, and a turn that passed is not a failure whatever its outcome.
+
+    python3 evals/failures.py --root ~/.worksmith/eval-traces/<run>
 """
 import argparse
 import collections
@@ -189,6 +193,20 @@ def turns_of(path: Path) -> tuple[dict, list[dict]]:
     return session, turns
 
 
+def verdict_for(path: Path, root: Path) -> dict | None:
+    """The eval verdict saved beside this session's attempt, if any."""
+    for parent in path.parents:
+        v = parent / "verdict.json"
+        if v.is_file():
+            try:
+                return json.loads(v.read_text())
+            except json.JSONDecodeError:
+                return None
+        if parent == root:
+            break
+    return None
+
+
 def session_files(root: Path) -> list[Path]:
     return sorted(root.glob("**/*.jsonl"))
 
@@ -206,6 +224,11 @@ def mine(root: Path, since: datetime.date | None, sources: set[str] | None,
             continue
         if project and project not in session["cwd"]:
             continue
+        verdict = verdict_for(path, root)
+        # A worker's session sits in the same attempt; the verdict is the
+        # parent's, the session the eval ran.
+        if verdict and verdict.get("session_id") not in (None, session["id"]):
+            verdict = None
         for i, t in enumerate(turns):
             when = datetime.datetime.fromtimestamp(t["ts"] or 0).date()
             if since and when < since:
@@ -217,9 +240,19 @@ def mine(root: Path, since: datetime.date | None, sources: set[str] | None,
                 totals["open"] += 1
                 continue
             totals["turns"] += 1
-            if t["outcome"] == "done":
+            if verdict is not None:
+                # The check is ground truth: a pass is not a failure, and a
+                # `done` that fails it is the premature finish nothing else sees.
+                if verdict.get("passed"):
+                    continue
+                if t["outcome"] == "done":
+                    cause, detail = "check_failed", f"said done; `{verdict.get('validate')}` failed"
+                else:
+                    cause, detail = cause_of(t["outcome"], t["last_error"])
+            elif t["outcome"] == "done":
                 continue
-            cause, detail = cause_of(t["outcome"], t["last_error"])
+            else:
+                cause, detail = cause_of(t["outcome"], t["last_error"])
             failures.append({
                 "session": session["id"] or path.parent.name,
                 "path": str(path),
@@ -227,7 +260,8 @@ def mine(root: Path, since: datetime.date | None, sources: set[str] | None,
                 "date": when.isoformat(),
                 "source": src,
                 "project": session["cwd"],
-                "model": t["model"] or "unknown (before 2026-09)",
+                "model": t["model"] or (verdict or {}).get("model") or "unknown (before 2026-09)",
+                "check": (verdict or {}).get("validate"),
                 "cause": cause,
                 "detail": detail,
                 "prompt": t["prompt"][:300],
@@ -251,6 +285,8 @@ def report(failures: list[dict], totals: collections.Counter) -> str:
     out.append(f"{n} finished turns, {len(failures)} failed "
                f"({100 * len(failures) / max(n, 1):.0f}%); "
                f"{totals['open']} last turns without an outcome skipped as possibly live")
+    if not failures:
+        return "\n".join(out)
     by_cause = collections.Counter(f["cause"] for f in failures)
     out.append("\nby cause")
     for cause, k in by_cause.most_common():

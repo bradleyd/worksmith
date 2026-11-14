@@ -44,6 +44,29 @@ TASKS_DIR = Path(__file__).resolve().parent / "tasks"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
+def default_traces_dir() -> Path:
+    """Outside the repo, beside the user's own sessions. Eval traces carry no
+    private prompts, but a full run is tens of megabytes."""
+    home = Path(os.environ.get("WORKSMITH_HOME") or Path.home() / ".worksmith")
+    return home / "eval-traces" / time.strftime("%Y%m%d-%H%M%S")
+
+
+def save_trace(workdir: Path, dest: Path, verdict: dict) -> Path | None:
+    """Copy an attempt's sessions out of its scratch dir before it is deleted,
+    with the check's verdict beside them.
+
+    Rows alone hold totals, which says a run failed but not what the agent did.
+    The trace is what failure mining reads, and the verdict is ground truth it
+    cannot get from a session: a turn can end `done` and still fail the check."""
+    sessions = workdir / ".worksmith-home" / "sessions"
+    if not sessions.is_dir():
+        return None
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(sessions, dest / "sessions", dirs_exist_ok=True)
+    (dest / "verdict.json").write_text(json.dumps(verdict, indent=2))
+    return dest
+
+
 def worksmith_bin() -> str:
     meta = json.loads(
         subprocess.check_output(
@@ -247,7 +270,8 @@ def validate(workdir: Path, cmd: str) -> bool:
 
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
-            fast: bool = False, think: str | None = None) -> dict:
+            fast: bool = False, think: str | None = None,
+            trace_to: Path | None = None) -> dict:
     workdir = setup_workdir(task, seed_memory=mode == "memory")
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
@@ -312,6 +336,15 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
         row["error"] = f"timeout after {timeout}s"
     finally:
         row["elapsed"] = round(time.time() - t0, 1)
+        if trace_to is not None:
+            saved = save_trace(workdir, trace_to, {
+                "task": task["name"], "mode": mode, "model": model,
+                "thinking": thinking, "passed": row["passed"],
+                "outcome": row.get("outcome"), "session_id": row.get("session_id"),
+                "validate": task["validate"], "error": row.get("error"),
+            })
+            if saved:
+                row["trace"] = str(saved)
         # Keeping the workdir is the difference between diagnosing a failure and
         # guessing at it from token counts.
         if keep and not row["passed"]:
@@ -355,7 +388,13 @@ def main() -> int:
                     help="print the command for each run without executing it")
     ap.add_argument("--keep", action="store_true",
                     help="keep the scratch dir of any run that fails, for inspection")
+    ap.add_argument("--traces", type=Path, default=None,
+                    help="where each attempt's sessions and verdict are kept "
+                         "(default: $WORKSMITH_HOME/eval-traces/<timestamp>)")
+    ap.add_argument("--no-traces", action="store_true",
+                    help="discard the sessions as before")
     args = ap.parse_args()
+    traces = None if args.no_traces else (args.traces or default_traces_dir())
 
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     tasks = load_tasks(args.task)
@@ -363,6 +402,9 @@ def main() -> int:
         print("no matching tasks", file=sys.stderr)
         return 1
 
+    if traces and not args.dry_run:
+        print(f"keeping traces in {traces}  (mine with: python3 evals/failures.py "
+              f"--root {traces})", file=sys.stderr)
     print("building worksmith…", file=sys.stderr)
     subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)], check=True)
     binp = worksmith_bin()
@@ -412,8 +454,9 @@ def main() -> int:
                 # mid-stream and reports it as a failure of the harness rather
                 # than of the clock.
                 budget = int(task.get("timeout") or args.timeout)
+                trace_to = (traces / f"{task['name']}-{mode}-{i + 1}") if traces else None
                 row = run_one(binp, task, mode, args.model, budget, args.keep,
-                              args.worker_model, args.fast, args.think)
+                              args.worker_model, args.fast, args.think, trace_to)
                 row["run"] = i
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"

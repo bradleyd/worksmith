@@ -133,5 +133,42 @@ class MineTest(unittest.TestCase):
         self.assertEqual((f["prompt"], f["source"]), ("subtask", "worker"))
 
 
+class VerdictTest(unittest.TestCase):
+    """Eval traces carry the check's verdict, and there it is ground truth."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def attempt(self, name, passed, *events, cwd="/private/var/folders/x/T/wseval-a"):
+        sessions = self.root / name / "sessions"
+        sessions.mkdir(parents=True)
+        path = write_session(sessions, cwd, *events)
+        (self.root / name / "verdict.json").write_text(json.dumps({
+            "task": "fix-bug", "mode": "raw", "model": "vllm/qwen9b", "passed": passed,
+            "session_id": path.parent.name, "validate": "python3 -m pytest -q"}))
+        return path
+
+    def test_done_that_fails_the_check_is_the_premature_finish(self):
+        self.attempt("fix-bug-raw-1", False, *turn("fix it", "done"))
+        (f,) = F.mine(self.root, None, None, None)[0]
+        self.assertEqual((f["cause"], f["check"], f["model"]),
+                         ("check_failed", "python3 -m pytest -q", "vllm/qwen9b"))
+
+    def test_a_passing_check_is_not_a_failure_whatever_the_outcome(self):
+        self.attempt("fix-bug-raw-1", True, *turn("fix it", "hit step limit (50)"))
+        self.assertEqual(F.mine(self.root, None, None, None)[0], [])
+
+    def test_a_workers_session_is_not_judged_by_the_parents_verdict(self):
+        parent = self.attempt("split-workers-1", True, *turn("split it", "done"))
+        write_session(parent.parent.parent.parent.parent.parent,
+                      "/private/var/folders/x/T/wseval-a", *turn("subtask", "aborted"))
+        (f,) = F.mine(self.root, None, None, None)[0]
+        self.assertEqual((f["prompt"], f["cause"]), ("subtask", "aborted"))
+
+
 if __name__ == "__main__":
     unittest.main()

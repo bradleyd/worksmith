@@ -167,6 +167,8 @@ def excerpt(f: dict, steps: int = 12) -> str:
         parts.append(f"({cut} earlier trace lines omitted)")
     parts += shown
     parts.append(f"TURN ENDED: {cause} ({clip(detail, 200)})")
+    if f.get("check"):
+        parts.append(f"THE TASK'S CHECK FAILED: `{clip(f['check'], 200)}`")
     parts.append(f"USER'S NEXT MESSAGE: {clip(next_user, 500) if next_user else '(none)'}")
     return "\n".join(parts)
 
