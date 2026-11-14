@@ -36,7 +36,8 @@ ignored; all-target Clippy passed with warnings denied; `cargo fmt --check`
 clean. Live checks against the vLLM server (Qwen 3.8 27B): the
 `thinking_token_budget` cut reasoning at exactly 300, 1,000 and 2,500 tokens,
 and `/think low` at `max-tokens` 8192 stopped at 1,023 and answered. The
-website guides were not updated for this release.
+website guides were updated after the release (`be9cf80`), with a tested
+recipes page (`755c828`).
 
 ## Historical v0.7.0 baseline
 
@@ -84,12 +85,18 @@ These are release results, not claims of new validation for this Markdown refres
 
 ## Next
 
-- **Website guides for v0.8.0:** the docs site still describes the 50-step
-  stop, effort levels without budgets, and no folder-of-projects warning.
-- **Mark mid-turn steering as a redirect:** after a steer, Qwen re-answered
-  it on every step ("You're right, from the basics…" opened 7 of 8 replies)
-  because it stays the latest user message. Proposed: prefix it as mid-turn
-  input to act on, not a question to answer. Unproven; needs a live check.
+- **Failure signatures (in progress, branch `failure-signatures`):** classify
+  failed eval attempts and sessions by what the checker rejected, what the
+  agent did, and the mechanism, then group them. Step 1 of taking the ideas in
+  Self-Harness (arXiv 2606.09498); per-model harness settings would follow.
+- **Mark mid-turn steering as a redirect: tested, rejected (2026-11-14).** The
+  worry was that a mid-turn message, as the latest user message, gets
+  re-answered every step. All recorded sessions held 55 mid-turn messages;
+  of the 252 replies with text that followed them, 23 (9%) opened with an
+  acknowledgement, and the normal shape is one acknowledgement then work. Only
+  the POS "spinning in circles" message repeated (5 of 7 replies), from a model
+  already circling deep into a compacted session. Not a pattern, so nothing
+  built and no probe run.
 - **Unpin the Linux release runner** before `ubuntu-22.04` is retired.
 
 ## Deferred work and constraints
