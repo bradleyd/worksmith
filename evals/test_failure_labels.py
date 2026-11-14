@@ -74,7 +74,7 @@ class LabelTest(unittest.TestCase):
     def test_request_failures_are_never_sent_to_the_model(self):
         ask, calls = fake(GOOD)
         cache = L.label_all(self.failures, {}, ask, None, log=lambda *_, **__: None)
-        self.assertEqual(len(calls), 1, "only the token-budget turn is the agent's")
+        self.assertEqual(len(calls), 3, "three votes, all for the token-budget turn")
         (label,) = cache.values()
         self.assertEqual((label["cause"], label["behaviour"]), ("token_budget", "loop_same_action"))
 
@@ -82,14 +82,35 @@ class LabelTest(unittest.TestCase):
         ask, calls = fake(GOOD)
         cache = L.label_all(self.failures, {}, ask, None, log=lambda *_, **__: None)
         L.label_all(self.failures, cache, ask, None, log=lambda *_, **__: None)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 3)
 
-    def test_a_reply_that_stays_malformed_is_marked_not_guessed(self):
+    def test_votes_that_stay_malformed_are_dropped_not_guessed(self):
         ask, calls = fake(ValueError("behaviour not in the list"))
         cache = L.label_all(self.failures, {}, ask, None, log=lambda *_, **__: None)
-        self.assertEqual(len(calls), 2, "one retry, then give up")
+        self.assertEqual(len(calls), 6, "each of three votes gets one retry")
         (label,) = cache.values()
-        self.assertEqual(label["behaviour"], "unlabeled")
+        self.assertEqual((label["behaviour"], label["votes"]), ("ambiguous", []))
+
+
+class DecideTest(unittest.TestCase):
+    def vote(self, behaviour, causal="caused"):
+        return {**GOOD, "behaviour": behaviour, "causal": causal}
+
+    def test_two_of_three_wins_with_the_agreeing_causal(self):
+        label = L.decide([self.vote("loop_same_action", "contributed"),
+                          self.vote("ignored_error"),
+                          self.vote("loop_same_action", "contributed")])
+        self.assertEqual((label["behaviour"], label["causal"]),
+                         ("loop_same_action", "contributed"))
+
+    def test_a_three_way_split_is_ambiguous_not_a_coin_toss(self):
+        # Measured: the same trace came back kept_going_after_done on one run
+        # and explore_without_acting on the next.
+        label = L.decide([self.vote("kept_going_after_done"),
+                          self.vote("explore_without_acting"),
+                          self.vote("loop_same_action")])
+        self.assertEqual(label["behaviour"], "ambiguous")
+        self.assertIn("explore_without_acting", label["note"])
 
     def test_report_groups_by_cause_and_behaviour(self):
         labels = [
@@ -101,7 +122,12 @@ class LabelTest(unittest.TestCase):
              "model": "vllm/qwen38", "session": "c", "turn": 1, "date": "2026-10-31",
              "prompt": "p"},
         ]
+        labels.append({**GOOD, "behaviour": "ambiguous", "causal": "", "cause": "aborted",
+                       "model": "m", "session": "d", "turn": 1, "date": "2026-10-31",
+                       "prompt": "p", "votes": ["a", "b", "c"]})
         text = L.report(labels)
+        self.assertIn("4 failures voted on: 3 labeled", text)
+        self.assertIn("1 ambiguous", text)
         self.assertIn("step_limit           loop_same_action         caused 1/2", text)
         self.assertIn("aborted              user_changed_course      caused 1/1", text)
 

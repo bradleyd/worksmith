@@ -228,8 +228,36 @@ def key_of(f: dict) -> str:
     return f"{f['session']}#{f['turn']}"
 
 
+def one_vote(ask_fn, evidence: str) -> dict | None:
+    """One label, with one retry: a malformed reply is often a one-off."""
+    for _ in range(2):
+        try:
+            return ask_fn(evidence)
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def decide(votes: list[dict]) -> dict:
+    """The majority label, or `ambiguous` when no behaviour has two votes.
+
+    One sample per failure was not a signature: on the local 27B, two of three
+    labels changed between identical runs at temperature 0. A label is kept
+    only when most votes agree, and the disagreement is reported rather than
+    resolved by picking one."""
+    counts = collections.Counter(v["behaviour"] for v in votes)
+    top, k = counts.most_common(1)[0] if counts else ("", 0)
+    if k < 2:
+        return {"behaviour": "ambiguous", "causal": "", "evidence": "",
+                "note": "votes: " + ", ".join(v["behaviour"] for v in votes) or "no valid votes"}
+    agreeing = [v for v in votes if v["behaviour"] == top]
+    causal = collections.Counter(v["causal"] for v in agreeing).most_common(1)[0][0]
+    pick = next(v for v in agreeing if v["causal"] == causal)
+    return {**pick, "causal": causal}
+
+
 def label_all(failures: list[dict], cache: dict, ask_fn, limit: int | None,
-              log=print) -> dict:
+              votes: int = 3, log=print) -> dict:
     todo = [f for f in failures if f["cause"] not in SKIP_CAUSES and key_of(f) not in cache]
     if limit is not None:
         todo = todo[:limit]
@@ -237,26 +265,27 @@ def label_all(failures: list[dict], cache: dict, ask_fn, limit: int | None,
         log(f"  [{n}/{len(todo)}] {key_of(f)[:14]} {f['cause']:20s} ...", end="", flush=True)
         evidence = excerpt(f)
         try:
-            label = ask_fn(evidence)
-        except (ValueError, json.JSONDecodeError):
-            try:
-                label = ask_fn(evidence)  # one retry: a malformed reply is often a one-off
-            except Exception as e:  # noqa: BLE001
-                label = {"behaviour": "unlabeled", "causal": "", "evidence": "",
-                         "note": f"labeling failed: {clip(str(e), 200)}"}
+            got = [one_vote(ask_fn, evidence) for _ in range(votes)]
         except (urllib.error.URLError, TimeoutError) as e:
             log(f"\nstopping: the model server failed ({e}); labels so far are kept")
             break
-        cache[key_of(f)] = {**label, "cause": f["cause"], "model": f["model"],
+        valid = [v for v in got if v]
+        label = decide(valid)
+        cache[key_of(f)] = {**label, "votes": [v["behaviour"] for v in valid],
+                            "cause": f["cause"], "model": f["model"],
                             "source": f["source"], "session": f["session"],
                             "turn": f["turn"], "date": f["date"],
                             "prompt": clip(f["prompt"], 160)}
-        log(f" {label['behaviour']} ({label['causal']})")
+        log(f" {label['behaviour']} ({label['causal'] or '-'}) votes {'/'.join(cache[key_of(f)]['votes'])}")
     return cache
 
 
-def report(labels: list[dict]) -> str:
-    out = [f"{len(labels)} labeled failures"]
+def report(all_labels: list[dict]) -> str:
+    ambiguous = [l for l in all_labels if l["behaviour"] == "ambiguous"]
+    labels = [l for l in all_labels if l["behaviour"] != "ambiguous"]
+    unanimous = sum(1 for l in labels if len(set(l.get("votes", []))) == 1)
+    out = [f"{len(all_labels)} failures voted on: {len(labels)} labeled "
+           f"({unanimous} unanimous), {len(ambiguous)} ambiguous (no behaviour had two votes)"]
     groups = collections.Counter((l["cause"], l["behaviour"]) for l in labels)
     out.append("\nby cause + behaviour (the failure signature)")
     for (cause, behaviour), k in groups.most_common():
@@ -285,6 +314,7 @@ def main() -> int:
     ap.add_argument("--model", help="provider/model from your config (default: its `model`)")
     ap.add_argument("--budget", type=int, default=1024, help="reasoning tokens per label")
     ap.add_argument("--limit", type=int, help="label at most this many new failures")
+    ap.add_argument("--votes", type=int, default=3, help="labels asked per failure (majority wins)")
     # Labels quote session prompts, which are private; keep them beside the
     # sessions they came from, not in the repo.
     ap.add_argument("--out", type=Path, default=F.home() / "failure-labels.json",
@@ -313,13 +343,13 @@ def main() -> int:
         print(f"labeling with {endpoint['spec']}; {skipped} request failures skipped "
               f"(the agent never got to act)")
         try:
-            label_all(failures, cache, ask_fn, args.limit)
+            label_all(failures, cache, ask_fn, args.limit, args.votes)
         finally:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(cache, indent=2))
 
     wanted = {key_of(f) for f in failures}
-    labels = [l for k, l in cache.items() if k in wanted and l["behaviour"] != "unlabeled"]
+    labels = [l for k, l in cache.items() if k in wanted]
     if args.show:
         by_key = {key_of(f): f for f in failures}
         for k, l in cache.items():
