@@ -85,10 +85,19 @@ These are release results, not claims of new validation for this Markdown refres
 
 ## Next
 
-- **Failure signatures (in progress, branch `failure-signatures`):** classify
-  failed eval attempts and sessions by what the checker rejected, what the
-  agent did, and the mechanism, then group them. Step 1 of taking the ideas in
-  Self-Harness (arXiv 2606.09498); per-model harness settings would follow.
+- **Failure signatures (branch `failure-signatures`):** `evals/failures.py`
+  finds failed turns and reads their cause from recorded events;
+  `evals/failure_labels.py` has the local model label the agent behaviour,
+  three votes each. First full run (2026-11-14, `vllm/qwen38` labelling): 121
+  failures, 28 of them request errors the agent never acted in, 91 labelled,
+  82 unanimous, 2 ambiguous. Most are from August, before metrics recorded the
+  model (repeated calls, reasoning overruns, malformed replies, all since
+  addressed). Since October the main group is step-limit turns spent reading
+  new crates' source, 15 of 21 step-limit failures had edits, so v0.8.0's
+  progress check would have extended them. **Gap:** only 17 failures name a
+  model and none are the 9B, so this cannot yet say anything per model. Next:
+  make `evals/run.py` keep each attempt's session trace, run the suite on the
+  9B and the 27B, and mine those. Per-model harness settings wait on that.
 - **Mark mid-turn steering as a redirect: tested, rejected (2026-11-14).** The
   worry was that a mid-turn message, as the latest user message, gets
   re-answered every step. All recorded sessions held 55 mid-turn messages;

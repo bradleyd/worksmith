@@ -37,7 +37,9 @@ import failures as F
 # What the agent did. Order is the order the model sees them in.
 BEHAVIOURS = {
     "loop_same_action": "repeated the same or nearly the same action without getting new information",
-    "explore_without_acting": "kept reading and searching but never made the change that was needed",
+    # Not "never edited": hand-checked turns with 10-13 edits that spent 30-37
+    # of 50 steps reading library source were labelled this, rightly.
+    "explore_without_acting": "spent most of its steps reading and searching rather than changing things",
     "unverified_assumption": "acted on a guess about an API, file, command or fact without checking it",
     "stale_state": "worked from an old build, binary, file contents or data that had since changed",
     "ignored_error": "a tool reported an error and the following steps did not deal with it",
