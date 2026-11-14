@@ -95,7 +95,7 @@ def cause_of(outcome: str | None, last_error: str | None = None) -> tuple[str, s
     o = outcome.strip()
     low = o.lower()
     if low == "aborted":
-        return "aborted", "cancelled by the user"
+        return "aborted", "cancelled: by the user, or by the parent if this was a worker"
     if low.startswith("hit step limit"):
         return "step_limit", o
     if low.startswith("validation failed"):

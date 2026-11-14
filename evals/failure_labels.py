@@ -41,7 +41,9 @@ BEHAVIOURS = {
     "stale_state": "worked from an old build, binary, file contents or data that had since changed",
     "ignored_error": "a tool reported an error and the following steps did not deal with it",
     "premature_done": "said the work was finished when it was not",
-    "overthinking": "spent its reply budget reasoning instead of acting or answering",
+    "kept_going_after_done": "the work was already finished but it kept testing, checking or changing things",
+    "reasoning_too_long": "its hidden reasoning used up the reply's token budget, so no action or answer came out "
+                          "(not slow or redundant actions, which are other behaviours)",
     "malformed_output": "produced a broken or cut-off tool call or answer",
     "scope_drift": "worked on something other than what was asked",
     "lost_context": "forgot facts or decisions already established earlier in the session",
@@ -65,7 +67,10 @@ SYSTEM = (
     + "\n\nCausal status:\n"
     + "\n".join(f"- {k}: {v}" for k, v in CAUSAL.items())
     + "\n\nThe user's next message after the turn, when present, is strong evidence "
-    "of what went wrong. Quote one short line from the trace as evidence. Reply "
+    "of what went wrong. Choose user_changed_course only when a message from the "
+    "user (mid-turn or next) shows a change of direction; a cancelled turn with no "
+    "such message says nothing about why, so judge it by what the agent did. "
+    "Quote one short line from the trace as evidence. Reply "
     "with JSON only: "
     '{"behaviour": "...", "causal": "...", "evidence": "...", "note": "one sentence"}'
 )
@@ -184,7 +189,9 @@ def ask(endpoint: dict, evidence: str, budget: int, structured: bool = True) -> 
         "messages": [{"role": "system", "content": SYSTEM},
                      {"role": "user", "content": evidence}],
         "max_tokens": budget + 1024,
-        "temperature": 0.2,
+        # Zero: the same evidence has to get the same label, or it is not a
+        # signature. Measured at 0.2: two of three labels changed on a rerun.
+        "temperature": 0,
     }
     if endpoint["chat_template"]:
         body["chat_template_kwargs"] = {"enable_thinking": True}
@@ -197,7 +204,9 @@ def ask(endpoint: dict, evidence: str, budget: int, structured: bool = True) -> 
                                  headers={"content-type": "application/json"})
     if endpoint["key"]:
         req.add_header("authorization", f"Bearer {endpoint['key']}")
-    with urllib.request.urlopen(req, timeout=600) as r:
+    # A label takes 10-20s on a free server; three minutes means it is stuck
+    # or busy, and waiting longer only hides that.
+    with urllib.request.urlopen(req, timeout=180) as r:
         reply = json.load(r)
     return parse(reply["choices"][0]["message"].get("content") or "")
 
@@ -225,6 +234,7 @@ def label_all(failures: list[dict], cache: dict, ask_fn, limit: int | None,
     if limit is not None:
         todo = todo[:limit]
     for n, f in enumerate(todo, 1):
+        log(f"  [{n}/{len(todo)}] {key_of(f)[:14]} {f['cause']:20s} ...", end="", flush=True)
         evidence = excerpt(f)
         try:
             label = ask_fn(evidence)
@@ -235,14 +245,13 @@ def label_all(failures: list[dict], cache: dict, ask_fn, limit: int | None,
                 label = {"behaviour": "unlabeled", "causal": "", "evidence": "",
                          "note": f"labeling failed: {clip(str(e), 200)}"}
         except (urllib.error.URLError, TimeoutError) as e:
-            log(f"stopping: the model server failed ({e}); labels so far are kept")
+            log(f"\nstopping: the model server failed ({e}); labels so far are kept")
             break
         cache[key_of(f)] = {**label, "cause": f["cause"], "model": f["model"],
                             "source": f["source"], "session": f["session"],
                             "turn": f["turn"], "date": f["date"],
                             "prompt": clip(f["prompt"], 160)}
-        log(f"  [{n}/{len(todo)}] {key_of(f)[:14]} {f['cause']:20s} -> "
-            f"{label['behaviour']} ({label['causal']})")
+        log(f" {label['behaviour']} ({label['causal']})")
     return cache
 
 

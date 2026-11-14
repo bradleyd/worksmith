@@ -73,20 +73,20 @@ class LabelTest(unittest.TestCase):
 
     def test_request_failures_are_never_sent_to_the_model(self):
         ask, calls = fake(GOOD)
-        cache = L.label_all(self.failures, {}, ask, None, log=lambda *_: None)
+        cache = L.label_all(self.failures, {}, ask, None, log=lambda *_, **__: None)
         self.assertEqual(len(calls), 1, "only the token-budget turn is the agent's")
         (label,) = cache.values()
         self.assertEqual((label["cause"], label["behaviour"]), ("token_budget", "loop_same_action"))
 
     def test_cached_labels_are_not_asked_again(self):
         ask, calls = fake(GOOD)
-        cache = L.label_all(self.failures, {}, ask, None, log=lambda *_: None)
-        L.label_all(self.failures, cache, ask, None, log=lambda *_: None)
+        cache = L.label_all(self.failures, {}, ask, None, log=lambda *_, **__: None)
+        L.label_all(self.failures, cache, ask, None, log=lambda *_, **__: None)
         self.assertEqual(len(calls), 1)
 
     def test_a_reply_that_stays_malformed_is_marked_not_guessed(self):
         ask, calls = fake(ValueError("behaviour not in the list"))
-        cache = L.label_all(self.failures, {}, ask, None, log=lambda *_: None)
+        cache = L.label_all(self.failures, {}, ask, None, log=lambda *_, **__: None)
         self.assertEqual(len(calls), 2, "one retry, then give up")
         (label,) = cache.values()
         self.assertEqual(label["behaviour"], "unlabeled")
