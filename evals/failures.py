@@ -40,12 +40,35 @@ def home() -> Path:
     return Path(os.environ.get("WORKSMITH_HOME") or Path.home() / ".worksmith")
 
 
-def source_of(cwd: str) -> str:
+def source_of(cwd: str, session_id: str | None = None,
+              workers: set[str] = frozenset()) -> str:
+    """Where a session ran. A worker in a worktree shows it in its path; one
+    run in the project directory itself (`--shared`) looks exactly like you,
+    so it is found through its parent's `worker` link instead. Sessions from
+    before 2026-09 wrote no links, so their shared-mode workers still count
+    as interactive."""
     if TEMP.match(cwd):
         return "eval"
-    if "/.worksmith/worktrees/" in cwd:
+    if "/.worksmith/worktrees/" in cwd or (session_id and session_id in workers):
         return "worker"
     return "interactive"
+
+
+def linked_workers(paths: list[Path]) -> set[str]:
+    """Session ids that some parent recorded as its worker."""
+    ids = set()
+    for path in paths:
+        with open(path, errors="ignore") as f:
+            for line in f:
+                if '"type":"worker"' not in line.replace(" ", ""):
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "worker":
+                    ids.add((d.get("data") or {}).get("session_id"))
+    return ids
 
 
 TRANSPORT = re.compile(r"sending chat completion request|reading stream chunk|connection"
@@ -174,9 +197,11 @@ def mine(root: Path, since: datetime.date | None, sources: set[str] | None,
          project: str | None) -> tuple[list[dict], collections.Counter]:
     failures = []
     totals = collections.Counter()
-    for path in session_files(root):
+    paths = session_files(root)
+    workers = linked_workers(paths)
+    for path in paths:
         session, turns = turns_of(path)
-        src = source_of(session["cwd"])
+        src = source_of(session["cwd"], session["id"], workers)
         if sources and src not in sources:
             continue
         if project and project not in session["cwd"]:

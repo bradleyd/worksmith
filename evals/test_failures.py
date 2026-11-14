@@ -123,6 +123,15 @@ class MineTest(unittest.TestCase):
         self.assertEqual(mine({"interactive"}), ["interactive"])
         self.assertEqual(mine(None, "Projects/pos"), ["interactive"])
 
+    def test_a_shared_mode_worker_is_found_through_its_parents_link(self):
+        child = write_session(self.root, "/Users/x/Projects/pos", *turn("subtask", "aborted"))
+        parent = write_session(self.root, "/Users/x/Projects/pos", *turn("main", "done"))
+        with open(parent, "a") as f:
+            f.write(json.dumps({"type": "worker", "ts": 1792000000,
+                                "data": {"id": "w1", "session_id": child.parent.name}}) + "\n")
+        (f,) = F.mine(self.root, None, None, None)[0]
+        self.assertEqual((f["prompt"], f["source"]), ("subtask", "worker"))
+
 
 if __name__ == "__main__":
     unittest.main()
