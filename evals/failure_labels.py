@@ -25,6 +25,7 @@ import collections
 import datetime
 import json
 import os
+import re
 import sys
 import tomllib
 import urllib.error
@@ -88,8 +89,15 @@ SCHEMA = {
 }
 
 
+# Chat-template markup quoted from a trace. A failure where the model wrote
+# its tool call as text carries a literal <tool_call>; when the labeller
+# quotes it back, the server's tool-call parser takes it for a real call and
+# the request dies with HTTP 500. A lookalike bracket keeps it readable.
+MARKUP = re.compile(r"<(/?)(tool_call|tool_response|think|function|parameter)\b", re.I)
+
+
 def clip(text: str, n: int) -> str:
-    text = " ".join((text or "").split())
+    text = MARKUP.sub(r"‹\1\2", " ".join((text or "").split()))
     return text if len(text) <= n else text[: n - 1] + "…"
 
 

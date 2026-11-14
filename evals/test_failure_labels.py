@@ -38,6 +38,14 @@ class ParseTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             L.parse("I think it looped.")
 
+    def test_chat_template_markup_is_defused(self):
+        # A literal <tool_call> in the evidence made vLLM answer HTTP 500.
+        text = L.clip("agent said: <tool_call>{\"name\": \"bash\"}</tool_call> and <think>", 200)
+        self.assertNotIn("<tool_call>", text)
+        self.assertNotIn("</tool_call>", text)
+        self.assertNotIn("<think>", text)
+        self.assertIn("‹tool_call>", text)
+
     def test_json_wrapped_in_prose_still_parses(self):
         self.assertEqual(L.parse(f"Here you go:\n{json.dumps(GOOD)}\n")["causal"], "caused")
 
