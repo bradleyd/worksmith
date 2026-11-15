@@ -307,6 +307,19 @@ impl LlmClient for OpenAiCompatClient {
     }
 }
 
+/// A reasoning budget that fits the room this request actually has: never more
+/// than three quarters of its `max_tokens`, so a quarter stays clear for the
+/// answer. `max_tokens` is clamped per request to what the context window has
+/// left, so a fixed budget can be larger than the whole reply. Measured on the
+/// 27B in a 12,000-token window: `thinking = 2000` with replies squeezed to
+/// 256-1,448 tokens, every one all reasoning and cut off with no answer.
+fn fit_to_room(budget: u32, max_tokens: Option<u32>) -> u32 {
+    match max_tokens {
+        Some(m) => budget.min(m / 4 * 3),
+        None => budget,
+    }
+}
+
 /// The reasoning budget this request actually carried, in whichever field the
 /// dialect uses for it.
 fn sent_reasoning_budget(body: &serde_json::Value, budget_param: Option<&str>) -> Option<u32> {
@@ -465,7 +478,9 @@ fn build_request_body(
                 // an actual answer. OpenRouter converts it to an effort level
                 // for models that only understand effort.
                 body["reasoning"] = match (think.budget(), think.effort()) {
-                    (Some(n), _) => serde_json::json!({ "max_tokens": n }),
+                    (Some(n), _) => {
+                        serde_json::json!({ "max_tokens": fit_to_room(n, req.max_tokens) })
+                    }
                     (_, Some(e)) => serde_json::json!({ "effort": e.as_str() }),
                     _ => serde_json::json!({ "enabled": think.enabled() }),
                 };
@@ -478,7 +493,7 @@ fn build_request_body(
                 // asking the model to be brief. Sent only when the provider
                 // says it has the field, since llama.cpp and friends do not.
                 if let (Some(n), Some(key)) = (think.budget(), budget_param) {
-                    body[key] = serde_json::json!(n);
+                    body[key] = serde_json::json!(fit_to_room(n, req.max_tokens));
                 }
                 // vLLM takes reasoning_effort directly and injects
                 // enable_thinking from it.
@@ -489,11 +504,7 @@ fn build_request_body(
                     // the answer — a budget at the cap is the truncation it is
                     // meant to prevent.
                     if let (Some(n), Some(key)) = (e.budget_tokens(), budget_param) {
-                        let n = match req.max_tokens {
-                            Some(m) => n.min(m / 4 * 3),
-                            None => n,
-                        };
-                        body[key] = serde_json::json!(n);
+                        body[key] = serde_json::json!(fit_to_room(n, req.max_tokens));
                     }
                 }
             }
@@ -1216,6 +1227,32 @@ mod thinking_tests {
             "invalid gzip header",
         ));
         assert!(!dropped_connection(&garbage));
+    }
+
+    #[test]
+    fn a_fixed_budget_shrinks_with_the_room_the_request_has() {
+        // The 27B in a 12,000-token window: replies squeezed to 256-1,448
+        // tokens against `thinking = 2000`, all reasoning, no answer.
+        let squeezed = |max_tokens, dialect, key| {
+            let mut r = req(Some(Thinking::Budget(2000)));
+            r.max_tokens = Some(max_tokens);
+            build_request_body(&r, dialect, key, None)
+        };
+        let b = squeezed(
+            1448,
+            ThinkingDialect::ChatTemplate,
+            Some("thinking_token_budget"),
+        );
+        assert_eq!(b["thinking_token_budget"], serde_json::json!(1086));
+        let b = squeezed(256, ThinkingDialect::Reasoning, None);
+        assert_eq!(b["reasoning"], serde_json::json!({"max_tokens": 192}));
+        // With room to spare the budget is sent as set.
+        let b = squeezed(
+            8192,
+            ThinkingDialect::ChatTemplate,
+            Some("thinking_token_budget"),
+        );
+        assert_eq!(b["thinking_token_budget"], serde_json::json!(2000));
     }
 
     #[test]

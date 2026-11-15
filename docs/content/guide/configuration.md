@@ -98,8 +98,11 @@ reasoned to a 6,000-token cap with no answer. So when the provider has a
 | `xhigh` | 16,384 |
 | `max` | none |
 
-A level's budget never goes above three quarters of `max-tokens`, so there is
-always room left for the answer. A number you set yourself is sent as is. With the budget, the same Qwen question at `low`
+No budget, from a level or a number you set, goes above three quarters of the
+reply's room, so there is always space left for the answer. The room shrinks as
+the context window fills, so a `thinking = 2000` shrinks with it: in a nearly
+full window, a reply squeezed to 1,000 tokens gets a 750-token budget instead of
+a 2,000-token one it could never finish. With the budget, the same Qwen question at `low`
 stopped reasoning at 1,023 tokens and answered.
 
 Servers disagree on which levels exist. Qwen 3.8 accepts only `low`, `medium`,
