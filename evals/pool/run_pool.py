@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run import MANIFEST, REPO, parse_events, worksmith_bin  # noqa: E402
+from run import REPO, built_snapshot, parse_events  # noqa: E402
 
 
 def server_status(model: str | None) -> dict | None:
@@ -561,9 +561,9 @@ def main() -> int:
         binp = args.bin
     else:
         print("building worksmith…", file=sys.stderr)
-        subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)],
-                       check=True)
-        binp = worksmith_bin()
+        # A private copy: a rebuild in the shared target dir mid-sweep would
+        # otherwise change what later tasks measure.
+        binp, _build = built_snapshot()
 
     results = []
     for path in args.backlogs:

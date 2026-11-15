@@ -22,6 +22,7 @@ bare+test versus harness is the number that matters. bare versus bare+test says
 how much of any gain was just showing the model the test.
 """
 import argparse
+import gzip
 import json
 import random
 import re
@@ -35,9 +36,64 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 from floor import ask, provider_of  # noqa: E402
-from run import parse_events, worksmith_bin  # noqa: E402
+from run import built_snapshot, parse_events  # noqa: E402
 
 FENCE = re.compile(r"```(?:python)?\n(.*?)```", re.S)
+
+
+DEFAULT_DATA = Path.home() / ".worksmith" / "eval-data" / "HumanEvalPlus.jsonl.gz"
+PLUS_URL = ("https://github.com/evalplus/humanevalplus_release/releases/download/"
+            "v0.1.10/HumanEvalPlus.jsonl.gz")
+
+
+def load_problems(path: Path) -> list[dict]:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt") as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def plus_test(p: dict) -> str:
+    """HumanEval+ grading: the original check(), then the candidate against the
+    reference solution on every extra input, as EvalPlus does.
+
+    HumanEval itself is saturated (top models score 96-98%; the harness arm
+    scored 99%), so it can no longer show a change. The extra inputs, up to 999
+    per problem, are what make HumanEval+ stricter. find_zero has many valid
+    roots, so it is graded by the polynomial being near zero (no worse than the
+    reference's own root), not by matching."""
+    ref = f"_reference_{p['entry_point']}"
+    canonical = p["prompt"] + p["canonical_solution"]
+    canonical = canonical.replace(f"def {p['entry_point']}(", f"def {ref}(", 1)
+    inputs = list(p.get("base_input") or []) + list(p.get("plus_input") or [])
+    return f"""
+import copy, math
+{canonical}
+
+{p['test']}
+
+def _same(got, want, atol):
+    if isinstance(want, float) or isinstance(got, float):
+        return math.isclose(got, want, rel_tol=1e-6, abs_tol=atol or 1e-6)
+    if isinstance(want, (list, tuple)) and isinstance(got, (list, tuple)) and len(got) == len(want):
+        return all(_same(g, w, atol) for g, w in zip(got, want))
+    return got == want
+
+def check_plus(candidate):
+    atol = {p.get('atol') or 0!r}
+    for args in {inputs!r}:
+        if {p['entry_point']!r} == "find_zero":
+            # Any root will do; judged against the reference's own accuracy,
+            # since on HumanEval+'s huge coefficients even the reference root
+            # leaves |poly| far above any fixed tolerance (up to 2.8e20).
+            x = candidate(*copy.deepcopy(args))
+            r = {ref}(*copy.deepcopy(args))
+            limit = max(atol or 1e-6, 10 * abs(poly(args[0], r)))
+            assert abs(poly(args[0], x)) <= limit, (args, x)
+            continue
+        want = {ref}(*copy.deepcopy(args))
+        got = candidate(*copy.deepcopy(args))
+        assert _same(got, want, atol), (args, got, want)
+"""
 
 
 def workdir_for(p: dict, seed_stub: bool) -> Path:
@@ -45,9 +101,12 @@ def workdir_for(p: dict, seed_stub: bool) -> Path:
     every arm so the arms are comparable."""
     d = Path(tempfile.mkdtemp(prefix="he-"))
     (d / "solution.py").write_text(p["prompt"] if seed_stub else "")
+    plus = "plus_input" in p
     (d / "test.py").write_text(
-        f"from solution import {p['entry_point']}\n{p['test']}\n"
-        f"check({p['entry_point']})\nprint('ok')\n"
+        f"from solution import *\n{plus_test(p) if plus else p['test']}\n"
+        f"check({p['entry_point']})\n"
+        + (f"check_plus({p['entry_point']})\n" if plus else "")
+        + "print('ok')\n"
     )
     return d
 
@@ -102,10 +161,9 @@ def harnessed(p: dict, binp: str, model: str, timeout: int) -> tuple[bool, int]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
-    ap.add_argument("--data", type=Path,
-                    default=Path("/private/tmp/claude-501/"
-                                 "-Users-bradleydsmith-Projects-worksmith/"
-                                 "dcea7351-86e8-40b7-bdde-63cfb2c05ad8/HumanEval.jsonl"))
+    ap.add_argument("--data", type=Path, default=DEFAULT_DATA,
+                    help="HumanEval+ (.jsonl.gz) by default; an original HumanEval "
+                         ".jsonl grades with its own tests only")
     ap.add_argument("--limit", type=int, default=60)
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--max-tokens", type=int, default=3000)
@@ -113,7 +171,12 @@ def main() -> int:
     ap.add_argument("--json")
     args = ap.parse_args()
 
-    problems = [json.loads(l) for l in args.data.read_text().splitlines() if l.strip()]
+    if not args.data.exists():
+        print(f"no dataset at {args.data}. Fetch HumanEval+ with:\n"
+              f"  mkdir -p {args.data.parent} && curl -L -o {args.data} {PLUS_URL}",
+              file=sys.stderr)
+        return 2
+    problems = load_problems(args.data)
     # Fixed seed: every arm and every re-run must see the same problems, or the
     # comparison is between samples rather than between arms.
     random.Random(20260830).shuffle(problems)
@@ -121,7 +184,7 @@ def main() -> int:
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
 
     base, key, name = provider_of(args.model)
-    binp = worksmith_bin()
+    binp, _build = built_snapshot()
     res = {a: {"pass": 0, "graded": 0, "tok": 0} for a in arms}
     rows = []
     for i, p in enumerate(problems, 1):

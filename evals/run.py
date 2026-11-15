@@ -92,6 +92,22 @@ def snapshot_binary(built: Path, dest_dir: Path) -> Path:
     return dest
 
 
+def built_snapshot(dest_dir: Path | None = None) -> tuple[str, dict]:
+    """Build from this checkout, then run a private copy of the result.
+
+    For every runner: run.py, the pool and HumanEval. humaneval.py used to run
+    whatever binary sat in the shared target dir without building at all, and
+    every runner was exposed to a rebuild mid-run (see snapshot_binary)."""
+    subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)], check=True)
+    dest = dest_dir or Path(tempfile.mkdtemp(prefix="wseval-bin-"))
+    binp = snapshot_binary(Path(worksmith_bin()), dest)
+    build = build_info(binp)
+    print(f"measuring {build['version']} at {build['commit']}"
+          f"{' (uncommitted changes)' if build['dirty'] else ''}; binary {binp}",
+          file=sys.stderr)
+    return str(binp), build
+
+
 def build_info(binp: Path) -> dict:
     """What was measured: the binary's own version line and the checkout it
     came from, with whether that checkout had uncommitted changes."""
@@ -585,6 +601,13 @@ def main() -> int:
             if mode == "memory" and not task.get("memory"):
                 print(f"skipping {task['name']} [memory]: no [[memory]] rows in the task",
                       file=sys.stderr)
+                continue
+            # A task can say which modes mean anything for it. memory-convention
+            # in raw or guided mode has an answer that exists nowhere, so models
+            # went searching the disk for it.
+            if task.get("modes") and mode not in task["modes"]:
+                print(f"skipping {task['name']} [{mode}]: the task only runs in "
+                      f"{', '.join(task['modes'])}", file=sys.stderr)
                 continue
             for i in range(args.repeat):
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")

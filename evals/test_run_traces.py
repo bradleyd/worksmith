@@ -76,6 +76,10 @@ class SnapshotTest(unittest.TestCase):
 
 
 class LengthTest(unittest.TestCase):
+    def test_memory_convention_declares_memory_mode_only(self):
+        (task,) = run.load_tasks("memory-convention")
+        self.assertEqual(task["modes"], ["memory"])
+
     def test_task_takes_a_comma_list(self):
         names = [t["name"] for t in run.load_tasks("fix-bug,compaction-refactor")]
         self.assertEqual(sorted(names), ["compaction-refactor", "fix-bug"])

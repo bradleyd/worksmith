@@ -1,5 +1,9 @@
 name = "memory-convention"
 description = "Use project memory to apply an unstated formatting convention"
+# Memory mode only. The convention exists nowhere but the seeded memory, so in
+# raw or guided mode there is nothing to find, and before the eval fence models
+# searched the user's disk for it (and read this file's check).
+modes = ["memory"]
 goal = "Update formatter.py so `python3 report.py` prints the current project convention for status lines. Do not change report.py."
 validate = '''
 python3 - <<'PY'
