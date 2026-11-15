@@ -175,7 +175,9 @@ def prompt_for(task: dict, produced: dict) -> str:
 def run_task(binp: str, task: dict, workdir: Path, produced: dict,
              model: str | None, timeout: int, fast: bool = False,
              think: str | None = None, trace_dir: Path | None = None) -> dict:
-    cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
+    # No --approve-all: unattended, the gate refuses writes outside the workdir
+    # instead of approving them (see reference_ok for what approving cost).
+    cmd = [binp, "--mode", "json", "--trust-project"]
     if model:
         cmd += ["--model", model]
     # A model that always reasons will spend its whole budget thinking and

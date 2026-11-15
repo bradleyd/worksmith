@@ -418,13 +418,15 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             token_budget: int | None = None) -> dict:
     workdir = setup_workdir(task, seed_memory=mode == "memory",
                             model=model or configured_model(), token_budget=token_budget)
-    # Unattended and trusted: the approval gate has nobody to ask here, and a
-    # refusal would score as a task failure rather than the safety behaviour it
-    # is. Real interactive runs prompt instead.
+    # No --approve-all. Unattended, the approval gate refuses instead of asking,
+    # and a refusal is an error the model works around, so an attempt stays in
+    # its scratch dir. With it, attempts that lost their way read private
+    # sessions, ~/Projects and the task files holding the hidden checks, and one
+    # rewrote another worktree's fixture after a compaction (2026-11-15).
     # --trust-project: the workdir is a fresh temp dir each run, and trust is
     # keyed by path, so the config this harness just wrote there would be
     # untrusted and silently ignored. It is our own file.
-    cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
+    cmd = [binp, "--mode", "json", "--trust-project"]
     if model:
         cmd += ["--model", model]
     if fast:
@@ -594,8 +596,7 @@ def main() -> int:
                     # workdir is a fresh temp dir each run and trust is keyed
                     # by path, so the config this harness just wrote there
                     # would be untrusted and silently ignored. It is our file.
-                    cmd = [binp, "--mode", "json", "--approve-all",
-                           "--trust-project"]
+                    cmd = [binp, "--mode", "json", "--trust-project"]
                     if args.model:
                         cmd += ["--model", args.model]
                     if args.fast:

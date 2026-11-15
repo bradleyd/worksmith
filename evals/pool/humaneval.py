@@ -84,7 +84,7 @@ def harnessed(p: dict, binp: str, model: str, timeout: int) -> tuple[bool, int]:
     d = workdir_for(p, seed_stub=True)
     try:
         r = subprocess.run(
-            [binp, "--mode", "json", "--approve-all", "--trust-project",
+            [binp, "--mode", "json", "--trust-project",
              "--model", model, "--fast", "--until", "python3 test.py",
              f"Implement the function in solution.py. Keep the existing "
              f"signature. `python3 test.py` must pass."],

@@ -62,9 +62,13 @@ or writing real global sessions or memory. The repo's own `.worksmith/config.tom
 is copied in as the project config so the eval uses the same project defaults.
 Set `--model` to override.
 
-Runs pass `--approve-all` and `--trust-project`, because nobody is there to
-answer either prompt and the project config in the workdir is one this harness
-wrote itself. Real interactive runs prompt for both.
+Runs pass `--trust-project`, because the project config in the workdir is one
+this harness wrote itself. They do **not** pass `--approve-all`: unattended,
+the approval gate refuses instead of asking, so an attempt cannot read, write
+or run anything outside its scratch directory. A refusal is an error the model
+works around, not the end of the attempt. With `--approve-all`, attempts that
+lost their way read private sessions, other projects and the task files that
+hold the hidden checks, and one rewrote another worktree's fixture.
 
 `memory` mode seeds only the rows declared by the selected task. Tasks without
 `[[memory]]` rows are skipped in that mode.
