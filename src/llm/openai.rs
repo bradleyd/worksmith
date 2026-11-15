@@ -26,6 +26,8 @@ pub struct OpenAiCompatClient {
     sort: Option<String>,
     /// A dropped reasoning budget is worth saying once, not once per step.
     warned_no_budget: std::sync::atomic::AtomicBool,
+    /// Same, for a budget that was sent and ignored.
+    warned_unenforced: std::sync::atomic::AtomicBool,
     /// What the client's `read_timeout` was set to, so a stall can name the
     /// setting that ended it instead of reporting "operation timed out".
     stream_idle: std::time::Duration,
@@ -50,6 +52,7 @@ impl OpenAiCompatClient {
             budget_param: None,
             sort: None,
             warned_no_budget: std::sync::atomic::AtomicBool::new(false),
+            warned_unenforced: std::sync::atomic::AtomicBool::new(false),
             stream_idle: std::time::Duration::from_secs(crate::llm::DEFAULT_STREAM_IDLE_SECS),
         }
     }
@@ -130,6 +133,7 @@ impl LlmClient for OpenAiCompatClient {
             req.sort.as_deref().or(self.sort.as_deref()),
         );
 
+        let sent_budget = sent_reasoning_budget(&body, self.budget_param.as_deref());
         let mut builder = self.http.post(self.endpoint()).json(&body);
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
@@ -291,8 +295,43 @@ impl LlmClient for OpenAiCompatClient {
         // really once per process.
         completion.rescued =
             crate::llm::rescue::rescue_text_tool_calls(&mut completion, &req.tools);
+        if let Some(note) = sent_budget
+            .and_then(|sent| unenforced_budget_note(sent, completion.usage.reasoning_tokens))
+            && !self
+                .warned_unenforced
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = sink.send(StreamEvent::Warning(note)).await;
+        }
         Ok(completion)
     }
+}
+
+/// The reasoning budget this request actually carried, in whichever field the
+/// dialect uses for it.
+fn sent_reasoning_budget(body: &serde_json::Value, budget_param: Option<&str>) -> Option<u32> {
+    body.get("reasoning")
+        .and_then(|r| r.get("max_tokens"))
+        .or_else(|| budget_param.and_then(|k| body.get(k)))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+}
+
+/// Say so when a provider ignores the budget it was sent. Measured on
+/// OpenRouter's qwen3.5-9b: asked for 2,000, replies reasoned up to 8,329,
+/// filling max-tokens, and those runaways were the run's failures. Without
+/// this, `/think` looks like it is working until turns start failing.
+/// The slack covers a server stopping at the next boundary and a count
+/// estimated from text; a budget that held is never close to it.
+fn unenforced_budget_note(sent: u32, used: u32) -> Option<String> {
+    if used <= sent + sent / 4 + 256 {
+        return None;
+    }
+    Some(format!(
+        "this provider is not enforcing the reasoning budget: asked for {sent} tokens, the \
+         reply reasoned {used}. `/think` cannot cap it here, so a long reasoning run can still \
+         fill max-tokens. A provider with an enforced budget, or `/fast`, avoids that."
+    ))
 }
 
 /// Build the JSON request body by hand — this gives us exact control over the
@@ -1177,6 +1216,47 @@ mod thinking_tests {
             "invalid gzip header",
         ));
         assert!(!dropped_connection(&garbage));
+    }
+
+    #[test]
+    fn an_ignored_budget_is_named_once_it_is_clearly_exceeded() {
+        // OpenRouter's qwen3.5-9b: asked 2,000, reasoned 8,329.
+        let note = unenforced_budget_note(2000, 8329).expect("clearly ignored");
+        assert!(note.contains("2000") && note.contains("8329"), "{note}");
+        // A budget that held, or overshot by a boundary, says nothing.
+        assert!(unenforced_budget_note(2000, 1990).is_none());
+        assert!(unenforced_budget_note(2000, 2700).is_none());
+        assert!(unenforced_budget_note(1024, 1023).is_none());
+    }
+
+    #[test]
+    fn the_sent_budget_is_read_from_whichever_field_carried_it() {
+        let or = build_request_body(
+            &req(Some(Thinking::Budget(2000))),
+            ThinkingDialect::Reasoning,
+            None,
+            None,
+        );
+        assert_eq!(sent_reasoning_budget(&or, None), Some(2000));
+        let mut r = req(Some(Thinking::Effort(crate::llm::Effort::Low)));
+        r.max_tokens = Some(8192);
+        let vllm = build_request_body(
+            &r,
+            ThinkingDialect::ChatTemplate,
+            Some("thinking_token_budget"),
+            None,
+        );
+        assert_eq!(
+            sent_reasoning_budget(&vllm, Some("thinking_token_budget")),
+            Some(1024)
+        );
+        let none = build_request_body(
+            &req(Some(Thinking::On)),
+            ThinkingDialect::ChatTemplate,
+            None,
+            None,
+        );
+        assert_eq!(sent_reasoning_budget(&none, None), None);
     }
 
     #[test]
