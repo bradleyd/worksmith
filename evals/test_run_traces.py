@@ -71,5 +71,23 @@ class LengthTest(unittest.TestCase):
         self.assertFalse(short & long)
 
 
+class ConfigTest(unittest.TestCase):
+    def test_toml_dump_round_trips_the_real_project_config(self):
+        import tomllib
+        original = tomllib.loads((run.REPO / ".worksmith" / "config.toml").read_text())
+        self.assertEqual(tomllib.loads(run.toml_dump(original)), original)
+
+    def test_force_context_wins_over_a_per_model_window(self):
+        import tomllib
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text('[models."vllm/qwen38"]\ncontext = 131072\ntemperature = 0.6\n')
+            run.force_context(cfg, "vllm/qwen38", 24000)
+            data = tomllib.loads(cfg.read_text())
+            self.assertEqual(data["models"]["vllm/qwen38"]["context"], 24000)
+            self.assertEqual(data["models"]["vllm/qwen38"]["temperature"], 0.6, "the rest survives")
+            self.assertEqual(data["agent"]["context-limit"], 24000)
+
+
 if __name__ == "__main__":
     unittest.main()

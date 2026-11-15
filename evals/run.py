@@ -126,6 +126,17 @@ def load_tasks(only: str | None, length: str = "all") -> list[dict]:
     return tasks
 
 
+def configured_model() -> str | None:
+    """The model a run without --model uses: the project config's, else the
+    global one's."""
+    for cfg in (REPO / ".worksmith" / "config.toml", active_global_config()):
+        if cfg.exists():
+            model = tomllib.loads(cfg.read_text()).get("model")
+            if model:
+                return model
+    return None
+
+
 def active_global_config() -> Path:
     home = os.environ.get("WORKSMITH_HOME")
     if home:
@@ -204,7 +215,53 @@ def seed_project_memory(path: Path, rows: list[dict]) -> None:
         conn.close()
 
 
-def setup_workdir(task: dict, seed_memory: bool = False) -> Path:
+def toml_dump(data: dict) -> str:
+    """Enough TOML to write a config back out: tables, strings, numbers,
+    booleans and flat arrays, which is all a Worksmith config holds. tomllib
+    reads but the stdlib cannot write, and this is too small to add a
+    dependency for."""
+    def value(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return repr(v)
+        if isinstance(v, str):
+            return json.dumps(v)
+        if isinstance(v, list):
+            return "[" + ", ".join(value(x) for x in v) + "]"
+        raise TypeError(f"cannot write {type(v).__name__} to TOML")
+
+    def key(k):
+        return k if k.replace("-", "").replace("_", "").isalnum() else json.dumps(k)
+
+    lines: list[str] = []
+
+    def table(path, d):
+        scalars = {k: v for k, v in d.items() if not isinstance(v, dict)}
+        if path and scalars:
+            lines.append("\n[" + ".".join(key(p) for p in path) + "]")
+        lines.extend(f"{key(k)} = {value(v)}" for k, v in scalars.items())
+        for k, v in d.items():
+            if isinstance(v, dict):
+                table(path + [k], v)
+
+    table([], data)
+    return "\n".join(lines).lstrip("\n") + "\n"
+
+
+def force_context(config: Path, model: str | None, tokens: int) -> None:
+    """Shrink the context window for the model under test, so a long task hits
+    compaction in minutes. Per-model `context` wins over `[agent]
+    context-limit`, and a global config can name one for this model, so both
+    are set in the project config, which overrides the global field by field."""
+    data = tomllib.loads(config.read_text()) if config.exists() else {}
+    data.setdefault("agent", {})["context-limit"] = tokens
+    if model:
+        data.setdefault("models", {}).setdefault(model, {})["context"] = tokens
+    config.write_text(toml_dump(data))
+
+
+def setup_workdir(task: dict, seed_memory: bool = False, model: str | None = None) -> Path:
     d = Path(tempfile.mkdtemp(prefix=f"wseval-{task['name']}-"))
     # Copy the active global config into an isolated home, so evals can use the
     # same provider/model without reading or writing the user's real memory DB.
@@ -229,7 +286,15 @@ def setup_workdir(task: dict, seed_memory: bool = False) -> Path:
         src = FIXTURES_DIR / fx
         dst = d / fx
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dst)
+        if src.is_dir():
+            # A whole project. `fixture_root = "<name>"` puts its contents at the
+            # workdir root, so the agent starts inside the project.
+            shutil.copytree(src, d if task.get("fixture_root") == fx else dst,
+                            dirs_exist_ok=True)
+        else:
+            shutil.copy(src, dst)
+    if task.get("context"):
+        force_context(ws / "config.toml", model, int(task["context"]))
     if seed_memory:
         seed_project_memory(ws / "memory.db", task.get("memory") or [])
     return d
@@ -310,7 +375,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
             fast: bool = False, think: str | None = None,
             trace_to: Path | None = None, build: dict | None = None) -> dict:
-    workdir = setup_workdir(task, seed_memory=mode == "memory")
+    workdir = setup_workdir(task, seed_memory=mode == "memory",
+                            model=model or configured_model())
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
     # is. Real interactive runs prompt instead.
