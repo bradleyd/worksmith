@@ -61,7 +61,13 @@ def snapshot_binary(built: Path, dest_dir: Path) -> Path:
     run, and the comparison it was for lost two of its tasks."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / built.name
-    shutil.copy2(built, dest)
+    # Copy beside it, then rename into place. Copying straight onto `dest`
+    # rewrites the file in place, and when two runs shared a traces dir that
+    # rewrote a binary another run was executing: macOS killed every later
+    # launch (exit 137). A rename swaps the name; a running copy keeps its file.
+    tmp = dest_dir / f".{built.name}.{os.getpid()}.tmp"
+    shutil.copy2(built, tmp)
+    os.replace(tmp, dest)
     return dest
 
 

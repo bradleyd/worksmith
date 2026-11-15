@@ -49,6 +49,21 @@ class SnapshotTest(unittest.TestCase):
             self.assertNotEqual(copy, built)
             self.assertEqual(run.build_info(copy)["version"], "worksmith 0.8.0 (old)")
 
+    def test_a_second_snapshot_does_not_rewrite_the_first_in_place(self):
+        # Two runs sharing a traces dir: the first run's binary must keep its
+        # own file, not be overwritten while it runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            built = Path(tmp) / "worksmith"
+            built.write_text("#!/bin/sh\necho one\n")
+            built.chmod(0o755)
+            first = run.snapshot_binary(built, Path(tmp) / "run")
+            held = open(first, "rb")  # stands in for the running process
+            built.write_text("#!/bin/sh\necho two\n")
+            run.snapshot_binary(built, Path(tmp) / "run")
+            self.assertEqual(held.read(), b"#!/bin/sh\necho one\n")
+            held.close()
+            self.assertEqual(list((Path(tmp) / "run").glob(".*.tmp")), [])
+
     def test_build_info_names_the_checkout(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = Path(tmp) / "worksmith"
