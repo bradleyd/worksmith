@@ -37,6 +37,22 @@ a local server: two resident models can exhaust unified memory. Straddling
 (local workers, remote judge) avoids it, as does `--no-synthesis` plus a
 second command with the models swapped.
 
+## Limits: tokens, not seconds
+
+Each attempt is limited by a **token budget**, written into its project config
+as Worksmith's own `[agent] token-budget`, so running out ends it the same way
+on any hardware (`stuck: spent N tokens on this turn without finishing`, a
+failure). Short tasks default to 20,000 generated tokens; a long task declares
+`token_budget`. Budgets are about twice the largest passing attempt on record.
+Raw and guided get the same budget, so guided has to fit its re-plans inside
+it: the comparison is the loop at equal cost.
+
+Wall-clock time is only a safety net (20 minutes short, an hour long, or the
+task's `timeout`). A run that hits it is marked `TIME`, not `FAIL`, and counted
+apart in the summary. It measures the machine: on 2026-11-14 the local 9B at
+about 19 tokens/s lost 7 of 10 attempts to a 900s clock, two of them passes
+that had finished at 736s and 828s.
+
 ## What config a run uses
 
 Each task runs in a fresh temp directory. The harness creates an isolated

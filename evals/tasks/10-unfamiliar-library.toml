@@ -2,9 +2,9 @@ name = "unfamiliar-library"
 description = "Learn an undocumented library from its source, then use it correctly (family: unfamiliar-library, variant ledgerline)"
 family = "unfamiliar-library"
 length = "long"
-# Long tasks get room: 240s, the short-task default, killed the first
-# unfamiliar-library attempt while it was still reading the library.
-timeout = 900
+# The limit is tokens, about twice the largest passing attempt on record;
+# the wall-clock limit is only a safety net (run.py's long-task default).
+token_budget = 30000
 goal = "Create report.py with a function monthly_net(ledger_path, year, month) that returns the net income for that calendar month (income minus expenses) as a string like '198.30', or '-7.75' for a loss. books.ledger is the bar's ledger. Use the ledgerline library in this directory to read and total it; it has no documentation, so read its source. Do not change anything under ledgerline/."
 fixtures = ["ledgerline"]
 fixture_root = "ledgerline"

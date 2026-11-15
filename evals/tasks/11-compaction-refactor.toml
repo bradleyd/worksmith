@@ -2,9 +2,9 @@ name = "compaction-refactor"
 description = "A rename across a whole project, with the context window forced small enough that compaction fires mid-task (family: compaction-refactor, variant inventory)"
 family = "compaction-refactor"
 length = "long"
-# Long tasks get room: 240s, the short-task default, killed the first
-# unfamiliar-library attempt while it was still reading the library.
-timeout = 900
+# The limit is tokens, about twice the largest passing attempt on record;
+# the wall-clock limit is only a safety net (run.py's long-task default).
+token_budget = 100000
 goal = "In this inventory project, rename the product-code concept from `sku` to `item_code` everywhere: field, parameter and variable names, method and function names (Catalog.skus becomes Catalog.item_codes, Order.skus becomes Order.item_codes, search.by_sku_prefix becomes search.by_item_code_prefix), dict keys, error messages, comments, docstrings, report headings, and the header of stock.csv. Also make Item reject an item_code that is not three capital letters, a dash and four digits (like 'PRO-0001') by raising ValueError. Everything else must keep working exactly as before."
 fixtures = ["inventory"]
 fixture_root = "inventory"

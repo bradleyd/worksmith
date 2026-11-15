@@ -104,5 +104,28 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(data["agent"]["context-limit"], 24000)
 
 
+class LimitsTest(unittest.TestCase):
+    def test_every_task_has_a_token_budget_and_a_safety_net(self):
+        for task in run.load_tasks(None):
+            budget, timeout = run.limits(task)
+            self.assertGreater(budget, 0, task["name"])
+            self.assertGreaterEqual(timeout, 1200, f"{task['name']}: the clock is only a safety net")
+
+    def test_a_long_task_must_declare_its_budget(self):
+        with self.assertRaises(ValueError):
+            run.limits({"name": "x", "length": "long"})
+        self.assertEqual(run.limits({"name": "x"}), (20_000, 1200))
+        self.assertEqual(run.limits({"name": "x"}, timeout_override=60)[1], 60)
+
+    def test_the_budget_lands_in_the_project_config(self):
+        import tomllib
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text("[agent]\nmax-steps = 100\n")
+            run.set_token_budget(cfg, 30000)
+            agent = tomllib.loads(cfg.read_text())["agent"]
+            self.assertEqual((agent["token-budget"], agent["max-steps"]), (30000, 100))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,27 @@ TASKS_DIR = Path(__file__).resolve().parent / "tasks"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
+# The real limit on an attempt is tokens, which mean the same on any hardware.
+# Wall-clock time measured the machine: on 2026-11-14 the local 9B (about 19
+# tokens/s on a Mac) failed 7 of 10 attempts by timeout, two compaction passes
+# had finished at 736s and 828s against a 900s limit, and guided mode, which
+# does more work, timed out most. Budgets are about twice the largest
+# generation of any passing attempt on record; a task may declare its own.
+DEFAULT_TOKEN_BUDGET = {"short": 20_000}
+# Only a safety net now, so nothing hangs forever. Generous on purpose.
+DEFAULT_SAFETY_TIMEOUT = {"short": 1200, "long": 3600}
+
+
+def limits(task: dict, timeout_override: int | None = None) -> tuple[int, int]:
+    """(token budget, safety timeout in seconds) for one task."""
+    length = task.get("length", "short")
+    budget = task.get("token_budget") or DEFAULT_TOKEN_BUDGET.get(length)
+    if not budget:
+        raise ValueError(f"{task['name']}: a {length} task must declare token_budget")
+    timeout = timeout_override or task.get("timeout") or DEFAULT_SAFETY_TIMEOUT[length]
+    return int(budget), int(timeout)
+
+
 def default_traces_dir() -> Path:
     """Outside the repo, beside the user's own sessions. Eval traces carry no
     private prompts, but a full run is tens of megabytes."""
@@ -267,7 +288,16 @@ def force_context(config: Path, model: str | None, tokens: int) -> None:
     config.write_text(toml_dump(data))
 
 
-def setup_workdir(task: dict, seed_memory: bool = False, model: str | None = None) -> Path:
+def set_token_budget(config: Path, tokens: int) -> None:
+    """Worksmith's own per-turn limit, so an attempt ends the same way on any
+    hardware: `stuck: spent N tokens on this turn without finishing`."""
+    data = tomllib.loads(config.read_text()) if config.exists() else {}
+    data.setdefault("agent", {})["token-budget"] = tokens
+    config.write_text(toml_dump(data))
+
+
+def setup_workdir(task: dict, seed_memory: bool = False, model: str | None = None,
+                  token_budget: int | None = None) -> Path:
     d = Path(tempfile.mkdtemp(prefix=f"wseval-{task['name']}-"))
     # Copy the active global config into an isolated home, so evals can use the
     # same provider/model without reading or writing the user's real memory DB.
@@ -301,6 +331,8 @@ def setup_workdir(task: dict, seed_memory: bool = False, model: str | None = Non
             shutil.copy(src, dst)
     if task.get("context"):
         force_context(ws / "config.toml", model, int(task["context"]))
+    if token_budget:
+        set_token_budget(ws / "config.toml", token_budget)
     if seed_memory:
         seed_project_memory(ws / "memory.db", task.get("memory") or [])
     return d
@@ -380,9 +412,10 @@ def validate(workdir: Path, cmd: str) -> bool:
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
             fast: bool = False, think: str | None = None,
-            trace_to: Path | None = None, build: dict | None = None) -> dict:
+            trace_to: Path | None = None, build: dict | None = None,
+            token_budget: int | None = None) -> dict:
     workdir = setup_workdir(task, seed_memory=mode == "memory",
-                            model=model or configured_model())
+                            model=model or configured_model(), token_budget=token_budget)
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
     # is. Real interactive runs prompt instead.
@@ -414,7 +447,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
            "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None,
            "ctx_peak": 0, "model_ms": 0, "first_output_ms": 0,
            "prompt_tps": 0.0, "decode_tps": 0.0, "context_breakdown": {},
-           "memory_used": False, "memory_ids": []}
+           "memory_used": False, "memory_ids": [], "timed_out": False,
+           "token_budget": token_budget}
     t0 = time.time()
     try:
         env = os.environ.copy()
@@ -444,6 +478,7 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             row["error"] = stderr[:200]
     except subprocess.TimeoutExpired:
         row["error"] = f"timeout after {timeout}s"
+        row["timed_out"] = True
     finally:
         row["elapsed"] = round(time.time() - t0, 1)
         if trace_to is not None:
@@ -452,7 +487,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
                 "thinking": thinking, "passed": row["passed"],
                 "outcome": row.get("outcome"), "session_id": row.get("session_id"),
                 "validate": task["validate"], "error": row.get("error"),
-                "build": build,
+                "build": build, "token_budget": token_budget,
+                "timed_out": row["timed_out"],
             })
             if saved:
                 row["trace"] = str(saved)
@@ -484,7 +520,9 @@ def main() -> int:
                          "long-context runs (tasks declare `length`, default short)")
     ap.add_argument("--modes", default="raw,guided")
     ap.add_argument("--model")
-    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="override every task's wall-clock safety net (seconds); "
+                         "the real limit is each task's token budget")
     ap.add_argument("--repeat", type=int, default=1,
                     help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
@@ -577,13 +615,14 @@ def main() -> int:
                 # three full drafts plus a review in one turn; 240s kills it
                 # mid-stream and reports it as a failure of the harness rather
                 # than of the clock.
-                budget = int(task.get("timeout") or args.timeout)
+                token_budget, budget = limits(task, args.timeout)
                 trace_to = (traces / f"{task['name']}-{mode}-{i + 1}") if traces else None
                 row = run_one(binp, task, mode, args.model, budget, args.keep,
-                              args.worker_model, args.fast, args.think, trace_to, build)
+                              args.worker_model, args.fast, args.think, trace_to, build,
+                              token_budget)
                 row["run"] = i
                 rows.append(row)
-                mark = "PASS" if row["passed"] else "FAIL"
+                mark = "PASS" if row["passed"] else ("TIME" if row.get("timed_out") else "FAIL")
                 extra = f" ({row['error']})" if row["error"] else ""
                 reason = (f" reason_tok={row['reasoning_tokens']}"
                           if row["reasoning_tokens"] else "")
@@ -627,14 +666,19 @@ def main() -> int:
         if not mr:
             continue
         passed = sum(1 for r in mr if r["passed"])
+        timed_out = sum(1 for r in mr if r.get("timed_out"))
         gen = sum(r["gen_tokens"] for r in mr)
         reason = sum(r["reasoning_tokens"] for r in mr)
         secs = sum(r["elapsed"] for r in mr)
         # Cost per *solved* task is the number that decides whether a thinking
         # level is worth it; totals reward doing nothing.
         per = round(gen / passed) if passed else "-"
-        print(f"  {mode:<8} {passed}/{len(mr)} passed   gen_tokens={gen} "
+        print(f"  {mode:<8} {passed}/{len(mr)} passed, {len(mr) - passed - timed_out} failed, "
+              f"{timed_out} timed out   gen_tokens={gen} "
               f"(reasoning={reason}, {per}/solved)   {round(secs)}s")
+        if timed_out:
+            print(f"           {timed_out} hit the wall-clock safety net, not the token budget: "
+                  "that measures the machine, so read them apart from failures")
         known = sum(r.get("known_cost_usd", 0.0) for r in mr)
         complete = all("metrics" in r and not r.get("unpriced_calls")
                        and not r["metrics"].get("warnings") for r in mr)
