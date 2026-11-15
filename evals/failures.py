@@ -235,8 +235,9 @@ def mine(root: Path, since: datetime.date | None, sources: set[str] | None,
                 continue
             last = i == len(turns) - 1
             # A session's last turn with no outcome may simply still be
-            # running; only an earlier one is certainly cut off.
-            if t["outcome"] is None and last:
+            # running; only an earlier one is certainly cut off. An eval
+            # attempt has exited, so there it was killed: a failure, not live.
+            if t["outcome"] is None and last and verdict is None:
                 totals["open"] += 1
                 continue
             totals["turns"] += 1
@@ -247,6 +248,8 @@ def mine(root: Path, since: datetime.date | None, sources: set[str] | None,
                     continue
                 if t["outcome"] == "done":
                     cause, detail = "check_failed", f"said done; `{verdict.get('validate')}` failed"
+                elif t["outcome"] is None and "timeout" in str(verdict.get("error") or ""):
+                    cause, detail = "eval_timeout", f"killed mid-turn: {verdict['error']}"
                 else:
                     cause, detail = cause_of(t["outcome"], t["last_error"])
             elif t["outcome"] == "done":

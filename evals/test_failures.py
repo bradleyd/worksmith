@@ -162,6 +162,18 @@ class VerdictTest(unittest.TestCase):
         self.attempt("fix-bug-raw-1", True, *turn("fix it", "hit step limit (50)"))
         self.assertEqual(F.mine(self.root, None, None, None)[0], [])
 
+    def test_an_attempt_killed_by_the_eval_timeout_is_a_failure_not_live(self):
+        sessions = self.root / "slow-raw-1" / "sessions"
+        sessions.mkdir(parents=True)
+        path = write_session(sessions, "/private/var/folders/x/T/wseval-a",
+                             *turn("do it", None, ev("usage", completion_tokens=900)))
+        (self.root / "slow-raw-1" / "verdict.json").write_text(json.dumps({
+            "passed": False, "session_id": path.parent.name, "validate": "true",
+            "error": "timeout after 240s"}))
+        failures, totals = F.mine(self.root, None, None, None)
+        self.assertEqual([f["cause"] for f in failures], ["eval_timeout"])
+        self.assertEqual(totals["open"], 0)
+
     def test_a_workers_session_is_not_judged_by_the_parents_verdict(self):
         parent = self.attempt("split-workers-1", True, *turn("split it", "done"))
         write_session(parent.parent.parent.parent.parent.parent,
