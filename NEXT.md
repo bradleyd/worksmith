@@ -114,8 +114,29 @@ These are release results, not claims of new validation for this Markdown refres
   - Done: no rescue of tool calls from cut-off or brainstorming replies (16
     of the OpenRouter 9B's 17 "stuck" failures); warn once when a provider
     ignores the reasoning budget.
-  - Next: cap the reasoning budget to the output room actually left (27B
-    compaction replies squeezed to 256-1,448 tokens, all reasoning).
+  - Done, kept: cap every reasoning budget at three quarters of the output
+    room the request has (`be048d3`). Measured before/after on both models,
+    compaction-refactor plus the 8 short tasks, 3 attempts each, token limits:
+
+    | | 27B before -> after | 9B (oMLX) before -> after |
+    |---|---|---|
+    | compaction-refactor | 6 -> 5 of 6 | 4 -> 6 of 6 |
+    | 8 short tasks | 44 -> 42 of 48 | 44 -> 40 of 48 |
+    | replies cut off by length | 13 -> 7 | 0 -> 0 |
+    | ...all reasoning, no answer | 2 -> 0 | 0 -> 0 |
+
+    The mechanism works (all-reasoning cut-offs 2 -> 0). The pass rates are
+    noise: the 9B never had a cut-off reply, so the cap barely touched it, yet
+    it moved +2 and -4. That is the noise floor at 3 attempts per task. The
+    27B's memory-convention guided 3/3 -> 0/3 was three runs out of the 20,000
+    short-task budget in large windows the cap cannot reach. By Self-Harness's
+    strict rule (no split worse) both would be rejected; kept anyway because
+    the change only acts when room is under ~2,700 tokens and removed the exact
+    failure it targets. **Lesson: before the accept/reject loop can decide
+    anything, the suite needs more variants per family or more repeats, so a
+    real 1-2 pass change stands out from noise.**
+  - Todo: memory-convention guided needed 15,500 tokens on a pass; the 20,000
+    short default is too tight for it (give it a declared budget, ~40,000).
   - Decide: a hard refusal ends the turn; returning an error instead would
     have saved 3 of the 27B's 6 docx-styling attempts (`cd /tmp/x && rm -rf *`).
   - Try: a missing-argument error that shows a filled-in example (the
