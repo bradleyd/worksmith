@@ -85,19 +85,44 @@ These are release results, not claims of new validation for this Markdown refres
 
 ## Next
 
-- **Failure signatures (branch `failure-signatures`):** `evals/failures.py`
-  finds failed turns and reads their cause from recorded events;
-  `evals/failure_labels.py` has the local model label the agent behaviour,
-  three votes each. First full run (2026-11-14, `vllm/qwen38` labelling): 121
-  failures, 28 of them request errors the agent never acted in, 91 labelled,
-  82 unanimous, 2 ambiguous. Most are from August, before metrics recorded the
-  model (repeated calls, reasoning overruns, malformed replies, all since
-  addressed). Since October the main group is step-limit turns spent reading
-  new crates' source, 15 of 21 step-limit failures had edits, so v0.8.0's
-  progress check would have extended them. **Gap:** only 17 failures name a
-  model and none are the 9B, so this cannot yet say anything per model. Next:
-  make `evals/run.py` keep each attempt's session trace, run the suite on the
-  9B and the 27B, and mine those. Per-model harness settings wait on that.
+- **Failure signatures and eval rounds (branch `failure-signatures`).**
+  `evals/failures.py` finds failed turns and reads their cause from recorded
+  events; `evals/failure_labels.py` has a model label the behaviour, three
+  votes each (labels flipped run to run at temperature 0 on one sample).
+  `evals/run.py` now keeps every attempt's trace and verdict, runs a private
+  copy of the binary (a `cargo test` once swapped it under a live run), limits
+  attempts by token budget with wall-clock only as a safety net, and splits
+  tasks into short and long. Two long coding tasks were added as the first
+  variants of families (`unfamiliar-library`, `compaction-refactor`), so later
+  variants can be held out as Self-Harness (arXiv 2606.09498) requires.
+
+  Round 2 results (pass counts of 6, fixed build):
+
+  | Task | 27B vLLM | 9B OpenRouter, thinking | 9B OpenRouter, `--fast` | 9B local oMLX |
+  |---|---|---|---|---|
+  | unfamiliar-library | 6 | 0 | 5 | 6 |
+  | compaction-refactor | 3 | not run | 0 | 2 |
+  | docx-styling | 3 | not run | 3 | 2 |
+
+  The OpenRouter 9B's 0/6 was the provider ignoring the reasoning budget (24
+  of 587 calls past 2,000, up to 8,329); oMLX enforces it exactly and the same
+  model went 6/6. Settings depend on provider and model, not model alone. The
+  local 9B's oMLX losses were mostly the 900s clock (7 of 10), which is why the
+  limits are now tokens.
+
+  Harness changes found, each tied to a measured failure:
+  - Done: no rescue of tool calls from cut-off or brainstorming replies (16
+    of the OpenRouter 9B's 17 "stuck" failures); warn once when a provider
+    ignores the reasoning budget.
+  - Next: cap the reasoning budget to the output room actually left (27B
+    compaction replies squeezed to 256-1,448 tokens, all reasoning).
+  - Decide: a hard refusal ends the turn; returning an error instead would
+    have saved 3 of the 27B's 6 docx-styling attempts (`cd /tmp/x && rm -rf *`).
+  - Try: a missing-argument error that shows a filled-in example (the
+    `--fast` 9B sent the same argument-less edit five times, 6 of 6).
+  - Later: per-model settings keyed by `provider/model` (#2), and harder
+    variants of unfamiliar-library (the 27B passed 6/6, so it cannot tell
+    harness changes apart there).
 - **Mark mid-turn steering as a redirect: tested, rejected (2026-11-14).** The
   worry was that a mid-turn message, as the latest user message, gets
   re-answered every step. All recorded sessions held 55 mid-turn messages;
