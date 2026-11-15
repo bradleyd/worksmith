@@ -33,5 +33,32 @@ class SaveTraceTest(unittest.TestCase):
             self.assertFalse(dest.exists())
 
 
+class SnapshotTest(unittest.TestCase):
+    def test_a_rebuild_after_the_snapshot_does_not_change_what_runs(self):
+        # The 2026-11-14 run: `cargo test` rewrote the shared binary under the
+        # last 12 attempts. The run must hold its own copy.
+        with tempfile.TemporaryDirectory() as tmp:
+            built = Path(tmp) / "target" / "worksmith"
+            built.parent.mkdir()
+            built.write_text("#!/bin/sh\necho 'worksmith 0.8.0 (old)'\n")
+            built.chmod(0o755)
+
+            copy = run.snapshot_binary(built, Path(tmp) / "run")
+            built.write_text("#!/bin/sh\necho 'worksmith 0.8.0 (rebuilt)'\n")
+
+            self.assertNotEqual(copy, built)
+            self.assertEqual(run.build_info(copy)["version"], "worksmith 0.8.0 (old)")
+
+    def test_build_info_names_the_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "worksmith"
+            fake.write_text("#!/bin/sh\necho 'worksmith 0.8.0'\n")
+            fake.chmod(0o755)
+            info = run.build_info(fake)
+            self.assertEqual(info["version"], "worksmith 0.8.0")
+            self.assertTrue(info["commit"], "the repo's commit is recorded")
+            self.assertIn(info["dirty"], (True, False))
+
+
 if __name__ == "__main__":
     unittest.main()

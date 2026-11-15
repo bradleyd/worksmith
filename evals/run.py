@@ -51,6 +51,37 @@ def default_traces_dir() -> Path:
     return home / "eval-traces" / time.strftime("%Y%m%d-%H%M%S")
 
 
+def snapshot_binary(built: Path, dest_dir: Path) -> Path:
+    """A private copy of the binary for this run.
+
+    The build lands in the shared cargo target dir, and every `cargo build` or
+    `cargo test` in the repo rewrites that file. Running it directly meant a
+    rebuild mid-run silently changed what was being measured: on 2026-11-14 a
+    `cargo test` swapped the binary under the last 12 attempts of a 54-attempt
+    run, and the comparison it was for lost two of its tasks."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / built.name
+    shutil.copy2(built, dest)
+    return dest
+
+
+def build_info(binp: Path) -> dict:
+    """What was measured: the binary's own version line and the checkout it
+    came from, with whether that checkout had uncommitted changes."""
+    def out(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return r.stdout.strip() if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    status = out(["git", "-C", str(REPO), "status", "--porcelain"])
+    return {
+        "version": out([str(binp), "--version"]),
+        "commit": out(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]),
+        "dirty": bool(status) if status is not None else None,
+    }
+
+
 def save_trace(workdir: Path, dest: Path, verdict: dict) -> Path | None:
     """Copy an attempt's sessions out of its scratch dir before it is deleted,
     with the check's verdict beside them.
@@ -271,7 +302,7 @@ def validate(workdir: Path, cmd: str) -> bool:
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
             fast: bool = False, think: str | None = None,
-            trace_to: Path | None = None) -> dict:
+            trace_to: Path | None = None, build: dict | None = None) -> dict:
     workdir = setup_workdir(task, seed_memory=mode == "memory")
     # Unattended and trusted: the approval gate has nobody to ask here, and a
     # refusal would score as a task failure rather than the safety behaviour it
@@ -342,6 +373,7 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
                 "thinking": thinking, "passed": row["passed"],
                 "outcome": row.get("outcome"), "session_id": row.get("session_id"),
                 "validate": task["validate"], "error": row.get("error"),
+                "build": build,
             })
             if saved:
                 row["trace"] = str(saved)
@@ -407,7 +439,17 @@ def main() -> int:
               f"--root {traces})", file=sys.stderr)
     print("building worksmith…", file=sys.stderr)
     subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)], check=True)
-    binp = worksmith_bin()
+    if args.dry_run:
+        binp, build = worksmith_bin(), None
+    else:
+        # Run a private copy, never the shared build: see snapshot_binary.
+        binp = str(snapshot_binary(
+            Path(worksmith_bin()),
+            traces if traces else Path(tempfile.mkdtemp(prefix="wseval-bin-"))))
+        build = build_info(Path(binp))
+        print(f"measuring {build['version']} at {build['commit']}"
+              f"{' (uncommitted changes)' if build['dirty'] else ''}; binary {binp}",
+              file=sys.stderr)
 
     rows = []
     for task in tasks:
@@ -456,7 +498,7 @@ def main() -> int:
                 budget = int(task.get("timeout") or args.timeout)
                 trace_to = (traces / f"{task['name']}-{mode}-{i + 1}") if traces else None
                 row = run_one(binp, task, mode, args.model, budget, args.keep,
-                              args.worker_model, args.fast, args.think, trace_to)
+                              args.worker_model, args.fast, args.think, trace_to, build)
                 row["run"] = i
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "FAIL"
