@@ -76,6 +76,10 @@ class SnapshotTest(unittest.TestCase):
 
 
 class LengthTest(unittest.TestCase):
+    def test_task_takes_a_comma_list(self):
+        names = [t["name"] for t in run.load_tasks("fix-bug,compaction-refactor")]
+        self.assertEqual(sorted(names), ["compaction-refactor", "fix-bug"])
+
     def test_the_suite_splits_by_declared_length(self):
         short = {t["name"] for t in run.load_tasks(None, "short")}
         long = {t["name"] for t in run.load_tasks(None, "long")}

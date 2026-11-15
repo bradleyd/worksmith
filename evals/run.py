@@ -145,7 +145,9 @@ def load_tasks(only: str | None, length: str = "all") -> list[dict]:
     for f in sorted(TASKS_DIR.glob("*.toml")):
         with open(f, "rb") as fh:
             t = tomllib.load(fh)
-        if only and t["name"] != only:
+        # A comma list, so one invocation (one build, one binary) can cover
+        # several tasks; each separate run.py rebuilds from the checkout.
+        if only and t["name"] not in only.split(","):
             continue
         if length != "all" and t.get("length", "short") != length:
             continue
@@ -514,7 +516,7 @@ def metrics_fields(stats: dict) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--task")
+    ap.add_argument("--task", help="one task name, or several separated by commas")
     ap.add_argument("--length", choices=["short", "long", "all"], default="all",
                     help="short: seconds-to-a-minute mechanics checks; long: "
                          "long-context runs (tasks declare `length`, default short)")
