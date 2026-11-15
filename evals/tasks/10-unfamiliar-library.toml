@@ -1,0 +1,58 @@
+name = "unfamiliar-library"
+description = "Learn an undocumented library from its source, then use it correctly (family: unfamiliar-library, variant ledgerline)"
+family = "unfamiliar-library"
+length = "long"
+# The limit is tokens, about twice the largest passing attempt on record;
+# the wall-clock limit is only a safety net (run.py's long-task default).
+token_budget = 30000
+goal = "Create report.py with a function monthly_net(ledger_path, year, month) that returns the net income for that calendar month (income minus expenses) as a string like '198.30', or '-7.75' for a loss. books.ledger is the bar's ledger. Use the ledgerline library in this directory to read and total it; it has no documentation, so read its source. Do not change anything under ledgerline/."
+fixtures = ["ledgerline"]
+fixture_root = "ledgerline"
+
+# Mirrors the POS sessions: a library no model has seen, learned by reading
+# its source. The traps are all in the source, none in the goal: income
+# balances are negative unless natural=True, a period excludes its end date,
+# subaccounts roll up, and amounts are exact cents. A second ledger the agent
+# never sees catches answers fitted to books.ledger, and a fingerprint of the
+# library catches editing it to fit.
+validate = '''
+python3 - <<'PY'
+import glob, hashlib, tempfile, os
+h = hashlib.sha256()
+for f in sorted(glob.glob("ledgerline/*.py")):
+    h.update(open(f, "rb").read())
+assert h.hexdigest() == "57d8222612dca38d0ae09f6bb9cf90350564e45c2f85476bc763d9d96f3acba0", "ledgerline/ was changed"
+
+from report import monthly_net
+assert monthly_net("books.ledger", 2026, 1) == "198.30", f"January: {monthly_net('books.ledger', 2026, 1)!r}"
+assert monthly_net("books.ledger", 2026, 2) == "-7.75", f"February: {monthly_net('books.ledger', 2026, 2)!r}"
+assert monthly_net("books.ledger", 2026, 3) == "-45.10", f"March: {monthly_net('books.ledger', 2026, 3)!r}"
+
+hidden = """
+2026-05-31 Late sale
+  income:sales              -0.10
+  assets:cash                0.10
+2026-06-01 Sale
+  income:sales:counter      -0.20
+  assets:cash                0.20
+2026-06-12 Catering
+  income:events             -150.05
+  assets:bank                150.05
+2026-06-30 Supplies
+  expenses:stock:fruit       10.15
+  assets:cash               -10.15
+2026-07-01 Rent
+  expenses:rent              900.00
+  assets:bank               -900.00
+"""
+with tempfile.NamedTemporaryFile("w", suffix=".ledger", delete=False) as f:
+    f.write(hidden)
+try:
+    assert monthly_net(f.name, 2026, 6) == "140.10", f"hidden June: {monthly_net(f.name, 2026, 6)!r}"
+    assert monthly_net(f.name, 2026, 7) == "-900.00", f"hidden July: {monthly_net(f.name, 2026, 7)!r}"
+    assert monthly_net(f.name, 2026, 5) == "0.10", f"hidden May: {monthly_net(f.name, 2026, 5)!r}"
+finally:
+    os.unlink(f.name)
+print("ok")
+PY
+'''

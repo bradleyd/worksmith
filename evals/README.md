@@ -37,6 +37,22 @@ a local server: two resident models can exhaust unified memory. Straddling
 (local workers, remote judge) avoids it, as does `--no-synthesis` plus a
 second command with the models swapped.
 
+## Limits: tokens, not seconds
+
+Each attempt is limited by a **token budget**, written into its project config
+as Worksmith's own `[agent] token-budget`, so running out ends it the same way
+on any hardware (`stuck: spent N tokens on this turn without finishing`, a
+failure). Short tasks default to 20,000 generated tokens; a long task declares
+`token_budget`. Budgets are about twice the largest passing attempt on record.
+Raw and guided get the same budget, so guided has to fit its re-plans inside
+it: the comparison is the loop at equal cost.
+
+Wall-clock time is only a safety net (20 minutes short, an hour long, or the
+task's `timeout`). A run that hits it is marked `TIME`, not `FAIL`, and counted
+apart in the summary. It measures the machine: on 2026-11-14 the local 9B at
+about 19 tokens/s lost 7 of 10 attempts to a 900s clock, two of them passes
+that had finished at 736s and 828s.
+
 ## What config a run uses
 
 Each task runs in a fresh temp directory. The harness creates an isolated
@@ -46,9 +62,13 @@ or writing real global sessions or memory. The repo's own `.worksmith/config.tom
 is copied in as the project config so the eval uses the same project defaults.
 Set `--model` to override.
 
-Runs pass `--approve-all` and `--trust-project`, because nobody is there to
-answer either prompt and the project config in the workdir is one this harness
-wrote itself. Real interactive runs prompt for both.
+Runs pass `--trust-project`, because the project config in the workdir is one
+this harness wrote itself. They do **not** pass `--approve-all`: unattended,
+the approval gate refuses instead of asking, so an attempt cannot read, write
+or run anything outside its scratch directory. A refusal is an error the model
+works around, not the end of the attempt. With `--approve-all`, attempts that
+lost their way read private sessions, other projects and the task files that
+hold the hidden checks, and one rewrote another worktree's fixture.
 
 `memory` mode seeds only the rows declared by the selected task. Tasks without
 `[[memory]]` rows are skipped in that mode.

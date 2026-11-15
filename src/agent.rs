@@ -1975,16 +1975,17 @@ impl Agent {
         // `plan_fanout` learned this already: "'No preamble' is a request a
         // weak model ignores... A required prefix makes the shape checkable
         // instead of hoped for." Same trick, applied here at last.
-        let sys = "You are writing handover notes for a coding agent that is about to lose \
-                   this conversation. It keeps only what you write.\n\n\
-                   Output ONLY the notes, under these four headings, exactly:\n\
-                   ## Goal\n## Locations\n## Established\n## Unfinished\n\n\
-                   Under Locations, list every file and line range that mattered, one per \
-                   line, as `path:line — what is there`. Under Established, list facts already \
-                   proven, so nobody looks them up twice. Under Unfinished, what is left.\n\n\
-                   Write no preamble, no reasoning, and nothing about what you intend to do \
-                   next. Do not address the reader. This is a document, not a reply.";
-        let summary = self.ask(sys, &transcript, 1024).await?;
+        //
+        // Headings in order of what is hardest to rebuild. Locations came
+        // second and was told to list every file, so it ate the budget: all ten
+        // summaries in two long POS sessions were cut off mid-sentence, none
+        // reached Unfinished and four never reached Established. The agent lost
+        // what was left to do after every compaction. Locations can be re-read
+        // from disk; it goes last and is bounded, so a cut costs the cheapest part.
+        let sys = COMPACTION_PROMPT;
+        let summary = self
+            .ask(sys, &transcript, summary_budget(active.context_limit))
+            .await?;
 
         // A summary that is not one is worse than not compacting. Trading the
         // whole working context for a sentence loses every location the model
@@ -2239,11 +2240,38 @@ fn unusable_summary(s: &str) -> Option<String> {
             return Some("answered conversationally instead of writing notes".to_string());
         }
     }
-    // The headings are the checkable part of the contract.
-    if !t.contains("## Locations") && !t.contains("## Established") {
-        return Some("did not use the required headings".to_string());
+    // The headings are the checkable part of the contract. Goal and Unfinished
+    // are required: they are what the agent cannot rebuild by reading files. The
+    // old check accepted any one heading, which is exactly the shape of the ten
+    // truncated POS summaries.
+    for heading in ["## Goal", "## Unfinished"] {
+        if !t.contains(heading) {
+            return Some(format!("left out {heading}"));
+        }
     }
     None
+}
+
+/// The handover-notes prompt; see `compact` for why the headings run in this order.
+const COMPACTION_PROMPT: &str = "You are writing handover notes for an agent that is about to lose \
+     this conversation. It keeps only what you write. The work may be code, writing or anything \
+     else; describe it in its own terms.\n\n\
+     Output ONLY the notes, under these four headings, exactly, in this order:\n\
+     ## Goal\n## Unfinished\n## Established\n## Locations\n\n\
+     Under Goal, the task in the user's terms and the working directory. Under Unfinished, the \
+     next concrete steps, and anything tried that failed and why. Under Established, what is \
+     already settled: facts verified, decisions made, the user's stated preferences, so nobody \
+     revisits them. Under Locations, at most 15 lines, the files and the parts of them that \
+     matter most, as `path:line — what is there` or `path § section — what is there`.\n\n\
+     Write no preamble, no reasoning, and nothing about what you intend to do next. Do not \
+     address the reader. This is a document, not a reply.";
+
+/// Room for the handover notes: a tenth of the window or so, between 1,024 and
+/// 3,072 tokens. A flat 1,024 cut all ten POS summaries off at ~830 tokens of
+/// notes, mid-sentence; a 131k window can easily afford three times that, and
+/// a 12k one keeps the old floor.
+fn summary_budget(context_limit: usize) -> u32 {
+    (context_limit / 12).clamp(1_024, 3_072) as u32
 }
 
 /// Keep a checkpoint question readable. The full failure output is already in
@@ -3159,6 +3187,49 @@ mod checkpoint_tests {
             log.contains("recovered"),
             "it says the call was recovered, not that it broke"
         );
+    }
+
+    /// The shape of all ten POS summaries: cut off mid-sentence by the old
+    /// 1,024-token cap, Unfinished never reached. It must not be accepted.
+    #[test]
+    fn a_summary_cut_off_before_unfinished_is_not_accepted() {
+        let truncated = "## Goal\nAdd Stripe Tax to WellnessPOS.\n\n## Locations\n\
+                         - `src/payments.rs:126-172` — calculate_tax\n\n## Established\n\
+                         - The Stripe account is DEN Blends. The dashboard \"Simulate a reader\" UI is hard to find;";
+        assert_eq!(
+            unusable_summary(truncated).as_deref(),
+            Some("left out ## Unfinished")
+        );
+        let whole = "## Goal\nAdd Stripe Tax.\n\n## Unfinished\nMake the sandbox tap succeed.\n\n\
+                     ## Established\nThe account is DEN Blends.\n\n## Locations\n- src/payments.rs:126";
+        assert_eq!(unusable_summary(whole), None);
+    }
+
+    #[test]
+    fn the_prompt_puts_what_cannot_be_reread_first() {
+        let at = |h: &str| {
+            COMPACTION_PROMPT
+                .find(h)
+                .unwrap_or_else(|| panic!("{h} missing"))
+        };
+        assert!(at("## Goal") < at("## Unfinished"));
+        assert!(at("## Unfinished") < at("## Established"));
+        assert!(
+            at("## Established") < at("## Locations"),
+            "Locations is rebuildable; it goes last"
+        );
+        assert!(COMPACTION_PROMPT.contains("at most 15 lines"));
+    }
+
+    #[test]
+    fn the_summary_budget_scales_with_the_window() {
+        assert_eq!(
+            summary_budget(12_000),
+            1_024,
+            "a small window keeps the old floor"
+        );
+        assert_eq!(summary_budget(32_768), 2_730);
+        assert_eq!(summary_budget(131_072), 3_072, "capped");
     }
 
     /// The checkpoint carries the evidence, not a summary of it. The first one

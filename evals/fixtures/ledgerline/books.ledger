@@ -1,0 +1,48 @@
+; The bar's books. Amounts are debit-positive: credits are negative.
+2026-01-02 Opening float
+  assets:cash                 200.00
+  equity:owner               -200.00
+
+2026-01-05 Smoothie sales
+  income:sales:counter        -84.25
+  assets:cash                  84.25
+
+2026-01-09 Protein powder
+  expenses:stock               61.40
+  assets:cash                 -61.40
+
+2026-01-14 Online orders
+  income:sales:online         -132.10
+  assets:bank                  132.10
+
+2026-01-28 Card fees
+  expenses:fees                 3.95
+  assets:bank                  -3.95
+
+2026-01-31 Smoothie sales
+  income:sales:counter         -47.30
+  assets:cash                   47.30
+
+2026-02-01 Smoothie sales
+  income:sales:counter        -58.00
+  assets:cash                  58.00
+
+2026-02-07 Refund, wrong order
+  income:sales:online          12.10
+  assets:bank                 -12.10
+
+2026-02-11 Blender repair
+  expenses:equipment           95.00
+  assets:cash                 -95.00
+
+2026-02-20 Online orders
+  income:sales:online         -41.35
+  assets:bank                  41.35
+
+2026-03-03 Rent
+  expenses:rent               400.00
+  assets:bank                -400.00
+
+2026-03-15 Smoothie sales
+  income:sales:counter        -354.90
+  assets:cash                  354.90

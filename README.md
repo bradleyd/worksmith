@@ -401,7 +401,7 @@ One table, because prices, sampling, and window all want the same key.
 | `validate` | none | Default success check. `--until` overrides per run. |
 | `context-limit` | `128000` | Fallback window; compaction fires at 75%. Prefer per-model `context`. |
 | `keep-recent-turns` | `6` | Turns kept verbatim when compacting. |
-| `thinking` | server's | `on`, `off`, an effort level, or a token budget. `off` is fast mode. A level is only advice to the model, so where the provider has a `reasoning-budget-param` each one also sends an enforced budget (`low` 1024, `medium` 4096, `high` 8192, `xhigh` 16384, capped at ¾ of `max-tokens`; `max` is uncapped). Also `--fast` / `--think` / `/fast` / `/think`. |
+| `thinking` | server's | `on`, `off`, an effort level, or a token budget. `off` is fast mode. A level is only advice to the model, so where the provider has a `reasoning-budget-param` each one also sends an enforced budget (`low` 1024, `medium` 4096, `high` 8192, `xhigh` 16384, `max` is uncapped). Every budget, a level's or a number, is capped at ¾ of the reply's room, which shrinks as the context fills. Also `--fast` / `--think` / `/fast` / `/think`. |
 | `pair` | `false` | Offer the pairing checkpoint, so the loop can stop to ask you, tell you why, or hand you the hard part. Also `/pair`. Spawned workers never checkpoint. |
 
 ### `[agents]`, for spawned workers

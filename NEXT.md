@@ -36,7 +36,8 @@ ignored; all-target Clippy passed with warnings denied; `cargo fmt --check`
 clean. Live checks against the vLLM server (Qwen 3.8 27B): the
 `thinking_token_budget` cut reasoning at exactly 300, 1,000 and 2,500 tokens,
 and `/think low` at `max-tokens` 8192 stopped at 1,023 and answered. The
-website guides were not updated for this release.
+website guides were updated after the release (`be9cf80`), with a tested
+recipes page (`755c828`).
 
 ## Historical v0.7.0 baseline
 
@@ -84,12 +85,73 @@ These are release results, not claims of new validation for this Markdown refres
 
 ## Next
 
-- **Website guides for v0.8.0:** the docs site still describes the 50-step
-  stop, effort levels without budgets, and no folder-of-projects warning.
-- **Mark mid-turn steering as a redirect:** after a steer, Qwen re-answered
-  it on every step ("You're right, from the basics…" opened 7 of 8 replies)
-  because it stays the latest user message. Proposed: prefix it as mid-turn
-  input to act on, not a question to answer. Unproven; needs a live check.
+- **Failure signatures and eval rounds (branch `failure-signatures`).**
+  `evals/failures.py` finds failed turns and reads their cause from recorded
+  events; `evals/failure_labels.py` has a model label the behaviour, three
+  votes each (labels flipped run to run at temperature 0 on one sample).
+  `evals/run.py` now keeps every attempt's trace and verdict, runs a private
+  copy of the binary (a `cargo test` once swapped it under a live run), limits
+  attempts by token budget with wall-clock only as a safety net, and splits
+  tasks into short and long. Two long coding tasks were added as the first
+  variants of families (`unfamiliar-library`, `compaction-refactor`), so later
+  variants can be held out as Self-Harness (arXiv 2606.09498) requires.
+
+  Round 2 results (pass counts of 6, fixed build):
+
+  | Task | 27B vLLM | 9B OpenRouter, thinking | 9B OpenRouter, `--fast` | 9B local oMLX |
+  |---|---|---|---|---|
+  | unfamiliar-library | 6 | 0 | 5 | 6 |
+  | compaction-refactor | 3 | not run | 0 | 2 |
+  | docx-styling | 3 | not run | 3 | 2 |
+
+  The OpenRouter 9B's 0/6 was the provider ignoring the reasoning budget (24
+  of 587 calls past 2,000, up to 8,329); oMLX enforces it exactly and the same
+  model went 6/6. Settings depend on provider and model, not model alone. The
+  local 9B's oMLX losses were mostly the 900s clock (7 of 10), which is why the
+  limits are now tokens.
+
+  Harness changes found, each tied to a measured failure:
+  - Done: no rescue of tool calls from cut-off or brainstorming replies (16
+    of the OpenRouter 9B's 17 "stuck" failures); warn once when a provider
+    ignores the reasoning budget.
+  - Done, kept: cap every reasoning budget at three quarters of the output
+    room the request has (`be048d3`). Measured before/after on both models,
+    compaction-refactor plus the 8 short tasks, 3 attempts each, token limits:
+
+    | | 27B before -> after | 9B (oMLX) before -> after |
+    |---|---|---|
+    | compaction-refactor | 6 -> 5 of 6 | 4 -> 6 of 6 |
+    | 8 short tasks | 44 -> 42 of 48 | 44 -> 40 of 48 |
+    | replies cut off by length | 13 -> 7 | 0 -> 0 |
+    | ...all reasoning, no answer | 2 -> 0 | 0 -> 0 |
+
+    The mechanism works (all-reasoning cut-offs 2 -> 0). The pass rates are
+    noise: the 9B never had a cut-off reply, so the cap barely touched it, yet
+    it moved +2 and -4. That is the noise floor at 3 attempts per task. The
+    27B's memory-convention guided 3/3 -> 0/3 was three runs out of the 20,000
+    short-task budget in large windows the cap cannot reach. By Self-Harness's
+    strict rule (no split worse) both would be rejected; kept anyway because
+    the change only acts when room is under ~2,700 tokens and removed the exact
+    failure it targets. **Lesson: before the accept/reject loop can decide
+    anything, the suite needs more variants per family or more repeats, so a
+    real 1-2 pass change stands out from noise.**
+  - Todo: memory-convention guided needed 15,500 tokens on a pass; the 20,000
+    short default is too tight for it (give it a declared budget, ~40,000).
+  - Decide: a hard refusal ends the turn; returning an error instead would
+    have saved 3 of the 27B's 6 docx-styling attempts (`cd /tmp/x && rm -rf *`).
+  - Try: a missing-argument error that shows a filled-in example (the
+    `--fast` 9B sent the same argument-less edit five times, 6 of 6).
+  - Later: per-model settings keyed by `provider/model` (#2), and harder
+    variants of unfamiliar-library (the 27B passed 6/6, so it cannot tell
+    harness changes apart there).
+- **Mark mid-turn steering as a redirect: tested, rejected (2026-11-14).** The
+  worry was that a mid-turn message, as the latest user message, gets
+  re-answered every step. All recorded sessions held 55 mid-turn messages;
+  of the 252 replies with text that followed them, 23 (9%) opened with an
+  acknowledgement, and the normal shape is one acknowledgement then work. Only
+  the POS "spinning in circles" message repeated (5 of 7 replies), from a model
+  already circling deep into a compacted session. Not a pattern, so nothing
+  built and no probe run.
 - **Unpin the Linux release runner** before `ubuntu-22.04` is retired.
 
 ## Deferred work and constraints

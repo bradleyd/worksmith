@@ -1,0 +1,92 @@
+name = "compaction-refactor"
+description = "A rename across a whole project, with the context window forced small enough that compaction fires mid-task (family: compaction-refactor, variant inventory)"
+family = "compaction-refactor"
+length = "long"
+# The limit is tokens, about twice the largest passing attempt on record;
+# the wall-clock limit is only a safety net (run.py's long-task default).
+token_budget = 100000
+goal = "In this inventory project, rename the product-code concept from `sku` to `item_code` everywhere: field, parameter and variable names, method and function names (Catalog.skus becomes Catalog.item_codes, Order.skus becomes Order.item_codes, search.by_sku_prefix becomes search.by_item_code_prefix), dict keys, error messages, comments, docstrings, report headings, and the header of stock.csv. Also make Item reject an item_code that is not three capital letters, a dash and four digits (like 'PRO-0001') by raising ValueError. Everything else must keep working exactly as before."
+fixtures = ["inventory"]
+fixture_root = "inventory"
+# Small on purpose: about 2,200 tokens of code, and a window this size makes
+# compaction fire partway through. That is where the POS sessions lost the
+# thread, and no short task can reach it.
+context = 12000
+
+validate = '''
+python3 - <<'PY'
+import glob, re, subprocess, sys
+
+left = []
+for f in sorted(glob.glob("inventory/*.py")) + ["stock.csv"]:
+    for n, line in enumerate(open(f), 1):
+        if re.search("sku", line, re.I):
+            left.append(f"{f}:{n}: {line.strip()}")
+assert not left, "sku is still here:\n" + "\n".join(left[:10])
+
+from inventory import audit, search
+from inventory.catalog import Catalog
+from inventory.csv_io import load_catalog, save_catalog
+from inventory.discounts import add_tier
+from inventory.labels import label
+from inventory.models import Item
+from inventory.orders import Order
+from inventory.pricing import price_of, set_promo
+from inventory.reports import stock_report, stock_value_cents
+from inventory.stock import OutOfStock, low_stock, receive, take
+from inventory.transfers import transfer
+
+for bad in ["pro-0001", "PRO0001", "PRO-001", "PROD-0001", "PRO-00012", ""]:
+    try:
+        Item(item_code=bad, name="x", price_cents=1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"Item accepted a malformed item_code {bad!r}")
+Item(item_code="ABC-1234", name="ok", price_cents=1)
+
+c = load_catalog("stock.csv")
+assert c.item_codes() == ["CUP-0301", "FRU-0101", "FRU-0102", "PRO-0001", "PRO-0002", "SUP-0201"], c.item_codes()
+assert stock_value_cents(c) == 73956, stock_value_cents(c)
+assert low_stock(c) == ["FRU-0102", "PRO-0002", "SUP-0201"], low_stock(c)
+assert [i.item_code for i in search.by_item_code_prefix(c, "fru")] == ["FRU-0101", "FRU-0102"]
+assert "item_code" in stock_report(c).splitlines()[0]
+assert label(c, "CUP-0301").endswith("|CUP-0301|")
+
+audit.clear()
+receive(c, "SUP-0201", 4, note="delivery")
+take(c, "SUP-0201", 2)
+assert [(e["action"], e["item_code"], e["qty"]) for e in audit.history("SUP-0201")] == [("receive", "SUP-0201", 4), ("take", "SUP-0201", 2)]
+try:
+    take(c, "SUP-0201", 99)
+except OutOfStock as e:
+    assert e.item_code == "SUP-0201" and e.have == 3
+else:
+    raise AssertionError("OutOfStock was not raised")
+
+set_promo("PRO-0001", 3999)
+add_tier("FRU-0101", 5, 10)
+o = Order(c)
+o.add("PRO-0001", 1)
+o.add("FRU-0101", 5)
+assert o.item_codes() == ["PRO-0001", "FRU-0101"]
+assert o.total_cents() == 3999 + 5 * (1349 * 90 // 100), o.total_cents()
+
+other = Catalog()
+transfer(c, other, "CUP-0301", 5)
+assert other.get("CUP-0301").qty == 5 and c.get("CUP-0301").qty == 15
+
+import os, tempfile
+fd, rt = tempfile.mkstemp(suffix=".csv")
+os.close(fd)
+save_catalog(c, rt)
+assert open(rt).readline().startswith("item_code,")
+assert load_catalog(rt).item_codes() == c.item_codes()
+os.unlink(rt)
+
+out = subprocess.run([sys.executable, "-m", "inventory.cli", "stock.csv", "value"],
+                     capture_output=True, text=True)
+assert out.stdout.strip() == "73956", out
+print("ok")
+PY
+'''

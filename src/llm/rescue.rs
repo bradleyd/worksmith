@@ -38,6 +38,15 @@ pub(crate) fn rescue_text_tool_calls(
     if !completion.tool_calls.is_empty() {
         return None;
     }
+    // A reply cut off by the token limit is unfinished thinking, not a
+    // decision. Measured on the 9B: 8,192 tokens, 7,563 of them reasoning that
+    // brainstormed 240 calls as text, 112 of them `rm -f chapter.docx`. All 240
+    // were promoted and stuck detection ended the turn on the repeats before
+    // anything ran. Left alone, the reply reads as empty and the agent's
+    // output-limit nudge asks again, which is what that turn needed.
+    if completion.finish_reason.as_deref() == Some("length") {
+        return None;
+    }
 
     // Content first: if the model put the call where text goes, that is what it
     // meant. Only when content yields nothing do we read the reasoning, which is
@@ -51,6 +60,9 @@ pub(crate) fn rescue_text_tool_calls(
         let (mut calls, kept) = extract(text, tools);
         if calls.is_empty() {
             continue;
+        }
+        if !looks_like_a_decision(&calls) {
+            return None;
         }
 
         for (i, call) in calls.iter_mut().enumerate() {
@@ -86,6 +98,21 @@ pub(crate) fn rescue_text_tool_calls(
         ));
     }
     None
+}
+
+/// A model that writes its calls in the wrong field writes a handful of
+/// distinct ones. Dozens, or the same call twice, is a brainstorm or a
+/// degenerate loop in the text, and running it would act on thinking.
+const MAX_RESCUED: usize = 8;
+
+fn looks_like_a_decision(calls: &[ToolCall]) -> bool {
+    if calls.len() > MAX_RESCUED {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    calls
+        .iter()
+        .all(|c| seen.insert((c.name.as_str(), c.arguments.as_str())))
 }
 
 #[derive(Clone, Copy)]
@@ -518,6 +545,46 @@ mod tests {
         assert_eq!(c.tool_calls[0].arguments, r#"{"path":"a.txt"}"#);
         assert_eq!(c.tool_calls[1].arguments, r#"{"path":"b.txt"}"#);
         assert_ne!(c.tool_calls[0].id, c.tool_calls[1].id, "ids are distinct");
+    }
+
+    fn bash_block(cmd: &str) -> String {
+        format!("<function=bash>\n<parameter=command>\n{cmd}\n</parameter>\n</function>\n")
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_the_token_limit_is_never_rescued() {
+        // The 9B's docx run: reasoning truncated at 8,192 tokens, brainstorming
+        // calls as text. Thinking that ran out of room is not a decision.
+        let mut c = from_reasoning(&bash_block("unzip -p chapter.docx word/document.xml"));
+        c.finish_reason = Some("length".into());
+        assert!(rescue_text_tool_calls(&mut c, &tools()).is_none());
+        assert!(c.tool_calls.is_empty());
+        assert!(c.reasoning.is_some(), "left exactly as it arrived");
+    }
+
+    #[test]
+    fn a_brainstorm_of_many_calls_is_not_run() {
+        let text: String = (0..9).map(|i| bash_block(&format!("echo {i}"))).collect();
+        let mut c = from_reasoning(&text);
+        assert!(rescue_text_tool_calls(&mut c, &tools()).is_none());
+        assert!(c.tool_calls.is_empty());
+
+        let text: String = (0..8).map(|i| bash_block(&format!("echo {i}"))).collect();
+        let mut c = from_reasoning(&text);
+        assert!(
+            rescue_text_tool_calls(&mut c, &tools()).is_some(),
+            "a handful still comes through"
+        );
+        assert_eq!(c.tool_calls.len(), 8);
+    }
+
+    #[test]
+    fn the_same_call_twice_is_a_loop_not_a_plan() {
+        // 112 of the 240 brainstormed calls were `rm -f chapter.docx`.
+        let text = bash_block("rm -f chapter.docx").repeat(2);
+        let mut c = from_reasoning(&text);
+        assert!(rescue_text_tool_calls(&mut c, &tools()).is_none());
+        assert!(c.tool_calls.is_empty());
     }
 
     #[test]

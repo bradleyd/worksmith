@@ -44,6 +44,103 @@ TASKS_DIR = Path(__file__).resolve().parent / "tasks"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
+# The real limit on an attempt is tokens, which mean the same on any hardware.
+# Wall-clock time measured the machine: on 2026-11-14 the local 9B (about 19
+# tokens/s on a Mac) failed 7 of 10 attempts by timeout, two compaction passes
+# had finished at 736s and 828s against a 900s limit, and guided mode, which
+# does more work, timed out most. Budgets are about twice the largest
+# generation of any passing attempt on record; a task may declare its own.
+DEFAULT_TOKEN_BUDGET = {"short": 20_000}
+# Only a safety net now, so nothing hangs forever. Generous on purpose.
+DEFAULT_SAFETY_TIMEOUT = {"short": 1200, "long": 3600}
+
+
+def limits(task: dict, timeout_override: int | None = None) -> tuple[int, int]:
+    """(token budget, safety timeout in seconds) for one task."""
+    length = task.get("length", "short")
+    budget = task.get("token_budget") or DEFAULT_TOKEN_BUDGET.get(length)
+    if not budget:
+        raise ValueError(f"{task['name']}: a {length} task must declare token_budget")
+    timeout = timeout_override or task.get("timeout") or DEFAULT_SAFETY_TIMEOUT[length]
+    return int(budget), int(timeout)
+
+
+def default_traces_dir() -> Path:
+    """Outside the repo, beside the user's own sessions. Eval traces carry no
+    private prompts, but a full run is tens of megabytes."""
+    home = Path(os.environ.get("WORKSMITH_HOME") or Path.home() / ".worksmith")
+    return home / "eval-traces" / time.strftime("%Y%m%d-%H%M%S")
+
+
+def snapshot_binary(built: Path, dest_dir: Path) -> Path:
+    """A private copy of the binary for this run.
+
+    The build lands in the shared cargo target dir, and every `cargo build` or
+    `cargo test` in the repo rewrites that file. Running it directly meant a
+    rebuild mid-run silently changed what was being measured: on 2026-11-14 a
+    `cargo test` swapped the binary under the last 12 attempts of a 54-attempt
+    run, and the comparison it was for lost two of its tasks."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / built.name
+    # Copy beside it, then rename into place. Copying straight onto `dest`
+    # rewrites the file in place, and when two runs shared a traces dir that
+    # rewrote a binary another run was executing: macOS killed every later
+    # launch (exit 137). A rename swaps the name; a running copy keeps its file.
+    tmp = dest_dir / f".{built.name}.{os.getpid()}.tmp"
+    shutil.copy2(built, tmp)
+    os.replace(tmp, dest)
+    return dest
+
+
+def built_snapshot(dest_dir: Path | None = None) -> tuple[str, dict]:
+    """Build from this checkout, then run a private copy of the result.
+
+    For every runner: run.py, the pool and HumanEval. humaneval.py used to run
+    whatever binary sat in the shared target dir without building at all, and
+    every runner was exposed to a rebuild mid-run (see snapshot_binary)."""
+    subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)], check=True)
+    dest = dest_dir or Path(tempfile.mkdtemp(prefix="wseval-bin-"))
+    binp = snapshot_binary(Path(worksmith_bin()), dest)
+    build = build_info(binp)
+    print(f"measuring {build['version']} at {build['commit']}"
+          f"{' (uncommitted changes)' if build['dirty'] else ''}; binary {binp}",
+          file=sys.stderr)
+    return str(binp), build
+
+
+def build_info(binp: Path) -> dict:
+    """What was measured: the binary's own version line and the checkout it
+    came from, with whether that checkout had uncommitted changes."""
+    def out(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return r.stdout.strip() if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    status = out(["git", "-C", str(REPO), "status", "--porcelain"])
+    return {
+        "version": out([str(binp), "--version"]),
+        "commit": out(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]),
+        "dirty": bool(status) if status is not None else None,
+    }
+
+
+def save_trace(workdir: Path, dest: Path, verdict: dict) -> Path | None:
+    """Copy an attempt's sessions out of its scratch dir before it is deleted,
+    with the check's verdict beside them.
+
+    Rows alone hold totals, which says a run failed but not what the agent did.
+    The trace is what failure mining reads, and the verdict is ground truth it
+    cannot get from a session: a turn can end `done` and still fail the check."""
+    sessions = workdir / ".worksmith-home" / "sessions"
+    if not sessions.is_dir():
+        return None
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(sessions, dest / "sessions", dirs_exist_ok=True)
+    (dest / "verdict.json").write_text(json.dumps(verdict, indent=2))
+    return dest
+
+
 def worksmith_bin() -> str:
     meta = json.loads(
         subprocess.check_output(
@@ -54,15 +151,35 @@ def worksmith_bin() -> str:
     return os.path.join(meta["target_directory"], "debug", "worksmith")
 
 
-def load_tasks(only: str | None) -> list[dict]:
+def load_tasks(only: str | None, length: str = "all") -> list[dict]:
+    """Tasks to run. `length` splits the suite: a short task finishes in
+    seconds to a minute and checks the loop's mechanics; a long one runs for
+    many minutes and long context, where compaction and step limits live.
+    Measured 2026-11-14 on the 27B: the seven short tasks took 13 minutes in
+    all, one long task took 95% of the run."""
     tasks = []
     for f in sorted(TASKS_DIR.glob("*.toml")):
         with open(f, "rb") as fh:
             t = tomllib.load(fh)
-        if only and t["name"] != only:
+        # A comma list, so one invocation (one build, one binary) can cover
+        # several tasks; each separate run.py rebuilds from the checkout.
+        if only and t["name"] not in only.split(","):
+            continue
+        if length != "all" and t.get("length", "short") != length:
             continue
         tasks.append(t)
     return tasks
+
+
+def configured_model() -> str | None:
+    """The model a run without --model uses: the project config's, else the
+    global one's."""
+    for cfg in (REPO / ".worksmith" / "config.toml", active_global_config()):
+        if cfg.exists():
+            model = tomllib.loads(cfg.read_text()).get("model")
+            if model:
+                return model
+    return None
 
 
 def active_global_config() -> Path:
@@ -143,7 +260,62 @@ def seed_project_memory(path: Path, rows: list[dict]) -> None:
         conn.close()
 
 
-def setup_workdir(task: dict, seed_memory: bool = False) -> Path:
+def toml_dump(data: dict) -> str:
+    """Enough TOML to write a config back out: tables, strings, numbers,
+    booleans and flat arrays, which is all a Worksmith config holds. tomllib
+    reads but the stdlib cannot write, and this is too small to add a
+    dependency for."""
+    def value(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return repr(v)
+        if isinstance(v, str):
+            return json.dumps(v)
+        if isinstance(v, list):
+            return "[" + ", ".join(value(x) for x in v) + "]"
+        raise TypeError(f"cannot write {type(v).__name__} to TOML")
+
+    def key(k):
+        return k if k.replace("-", "").replace("_", "").isalnum() else json.dumps(k)
+
+    lines: list[str] = []
+
+    def table(path, d):
+        scalars = {k: v for k, v in d.items() if not isinstance(v, dict)}
+        if path and scalars:
+            lines.append("\n[" + ".".join(key(p) for p in path) + "]")
+        lines.extend(f"{key(k)} = {value(v)}" for k, v in scalars.items())
+        for k, v in d.items():
+            if isinstance(v, dict):
+                table(path + [k], v)
+
+    table([], data)
+    return "\n".join(lines).lstrip("\n") + "\n"
+
+
+def force_context(config: Path, model: str | None, tokens: int) -> None:
+    """Shrink the context window for the model under test, so a long task hits
+    compaction in minutes. Per-model `context` wins over `[agent]
+    context-limit`, and a global config can name one for this model, so both
+    are set in the project config, which overrides the global field by field."""
+    data = tomllib.loads(config.read_text()) if config.exists() else {}
+    data.setdefault("agent", {})["context-limit"] = tokens
+    if model:
+        data.setdefault("models", {}).setdefault(model, {})["context"] = tokens
+    config.write_text(toml_dump(data))
+
+
+def set_token_budget(config: Path, tokens: int) -> None:
+    """Worksmith's own per-turn limit, so an attempt ends the same way on any
+    hardware: `stuck: spent N tokens on this turn without finishing`."""
+    data = tomllib.loads(config.read_text()) if config.exists() else {}
+    data.setdefault("agent", {})["token-budget"] = tokens
+    config.write_text(toml_dump(data))
+
+
+def setup_workdir(task: dict, seed_memory: bool = False, model: str | None = None,
+                  token_budget: int | None = None) -> Path:
     d = Path(tempfile.mkdtemp(prefix=f"wseval-{task['name']}-"))
     # Copy the active global config into an isolated home, so evals can use the
     # same provider/model without reading or writing the user's real memory DB.
@@ -168,7 +340,17 @@ def setup_workdir(task: dict, seed_memory: bool = False) -> Path:
         src = FIXTURES_DIR / fx
         dst = d / fx
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dst)
+        if src.is_dir():
+            # A whole project. `fixture_root = "<name>"` puts its contents at the
+            # workdir root, so the agent starts inside the project.
+            shutil.copytree(src, d if task.get("fixture_root") == fx else dst,
+                            dirs_exist_ok=True)
+        else:
+            shutil.copy(src, dst)
+    if task.get("context"):
+        force_context(ws / "config.toml", model, int(task["context"]))
+    if token_budget:
+        set_token_budget(ws / "config.toml", token_budget)
     if seed_memory:
         seed_project_memory(ws / "memory.db", task.get("memory") or [])
     return d
@@ -247,15 +429,20 @@ def validate(workdir: Path, cmd: str) -> bool:
 
 def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             keep: bool = False, worker_model: str | None = None,
-            fast: bool = False, think: str | None = None) -> dict:
-    workdir = setup_workdir(task, seed_memory=mode == "memory")
-    # Unattended and trusted: the approval gate has nobody to ask here, and a
-    # refusal would score as a task failure rather than the safety behaviour it
-    # is. Real interactive runs prompt instead.
+            fast: bool = False, think: str | None = None,
+            trace_to: Path | None = None, build: dict | None = None,
+            token_budget: int | None = None) -> dict:
+    workdir = setup_workdir(task, seed_memory=mode == "memory",
+                            model=model or configured_model(), token_budget=token_budget)
+    # No --approve-all. Unattended, the approval gate refuses instead of asking,
+    # and a refusal is an error the model works around, so an attempt stays in
+    # its scratch dir. With it, attempts that lost their way read private
+    # sessions, ~/Projects and the task files holding the hidden checks, and one
+    # rewrote another worktree's fixture after a compaction (2026-11-15).
     # --trust-project: the workdir is a fresh temp dir each run, and trust is
     # keyed by path, so the config this harness just wrote there would be
     # untrusted and silently ignored. It is our own file.
-    cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
+    cmd = [binp, "--mode", "json", "--trust-project"]
     if model:
         cmd += ["--model", model]
     if fast:
@@ -280,7 +467,8 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
            "reasoning_tokens": 0, "outcome": None, "elapsed": 0.0, "error": None,
            "ctx_peak": 0, "model_ms": 0, "first_output_ms": 0,
            "prompt_tps": 0.0, "decode_tps": 0.0, "context_breakdown": {},
-           "memory_used": False, "memory_ids": []}
+           "memory_used": False, "memory_ids": [], "timed_out": False,
+           "token_budget": token_budget}
     t0 = time.time()
     try:
         env = os.environ.copy()
@@ -310,8 +498,20 @@ def run_one(binp: str, task: dict, mode: str, model: str | None, timeout: int,
             row["error"] = stderr[:200]
     except subprocess.TimeoutExpired:
         row["error"] = f"timeout after {timeout}s"
+        row["timed_out"] = True
     finally:
         row["elapsed"] = round(time.time() - t0, 1)
+        if trace_to is not None:
+            saved = save_trace(workdir, trace_to, {
+                "task": task["name"], "mode": mode, "model": model,
+                "thinking": thinking, "passed": row["passed"],
+                "outcome": row.get("outcome"), "session_id": row.get("session_id"),
+                "validate": task["validate"], "error": row.get("error"),
+                "build": build, "token_budget": token_budget,
+                "timed_out": row["timed_out"],
+            })
+            if saved:
+                row["trace"] = str(saved)
         # Keeping the workdir is the difference between diagnosing a failure and
         # guessing at it from token counts.
         if keep and not row["passed"]:
@@ -334,10 +534,15 @@ def metrics_fields(stats: dict) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--task")
+    ap.add_argument("--task", help="one task name, or several separated by commas")
+    ap.add_argument("--length", choices=["short", "long", "all"], default="all",
+                    help="short: seconds-to-a-minute mechanics checks; long: "
+                         "long-context runs (tasks declare `length`, default short)")
     ap.add_argument("--modes", default="raw,guided")
     ap.add_argument("--model")
-    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="override every task's wall-clock safety net (seconds); "
+                         "the real limit is each task's token budget")
     ap.add_argument("--repeat", type=int, default=1,
                     help="runs per task/mode (averages over model nondeterminism)")
     ap.add_argument("--json")
@@ -355,17 +560,36 @@ def main() -> int:
                     help="print the command for each run without executing it")
     ap.add_argument("--keep", action="store_true",
                     help="keep the scratch dir of any run that fails, for inspection")
+    ap.add_argument("--traces", type=Path, default=None,
+                    help="where each attempt's sessions and verdict are kept "
+                         "(default: $WORKSMITH_HOME/eval-traces/<timestamp>)")
+    ap.add_argument("--no-traces", action="store_true",
+                    help="discard the sessions as before")
     args = ap.parse_args()
+    traces = None if args.no_traces else (args.traces or default_traces_dir())
 
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
-    tasks = load_tasks(args.task)
+    tasks = load_tasks(args.task, args.length)
     if not tasks:
         print("no matching tasks", file=sys.stderr)
         return 1
 
+    if traces and not args.dry_run:
+        print(f"keeping traces in {traces}  (mine with: python3 evals/failures.py "
+              f"--root {traces})", file=sys.stderr)
     print("building worksmith…", file=sys.stderr)
     subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)], check=True)
-    binp = worksmith_bin()
+    if args.dry_run:
+        binp, build = worksmith_bin(), None
+    else:
+        # Run a private copy, never the shared build: see snapshot_binary.
+        binp = str(snapshot_binary(
+            Path(worksmith_bin()),
+            traces if traces else Path(tempfile.mkdtemp(prefix="wseval-bin-"))))
+        build = build_info(Path(binp))
+        print(f"measuring {build['version']} at {build['commit']}"
+              f"{' (uncommitted changes)' if build['dirty'] else ''}; binary {binp}",
+              file=sys.stderr)
 
     rows = []
     for task in tasks:
@@ -378,6 +602,13 @@ def main() -> int:
                 print(f"skipping {task['name']} [memory]: no [[memory]] rows in the task",
                       file=sys.stderr)
                 continue
+            # A task can say which modes mean anything for it. memory-convention
+            # in raw or guided mode has an answer that exists nowhere, so models
+            # went searching the disk for it.
+            if task.get("modes") and mode not in task["modes"]:
+                print(f"skipping {task['name']} [{mode}]: the task only runs in "
+                      f"{', '.join(task['modes'])}", file=sys.stderr)
+                continue
             for i in range(args.repeat):
                 tag = f"{task['name']} [{mode}]" + (f" {i+1}/{args.repeat}" if args.repeat > 1 else "")
                 if args.dry_run:
@@ -388,8 +619,7 @@ def main() -> int:
                     # workdir is a fresh temp dir each run and trust is keyed
                     # by path, so the config this harness just wrote there
                     # would be untrusted and silently ignored. It is our file.
-                    cmd = [binp, "--mode", "json", "--approve-all",
-                           "--trust-project"]
+                    cmd = [binp, "--mode", "json", "--trust-project"]
                     if args.model:
                         cmd += ["--model", args.model]
                     if args.fast:
@@ -411,12 +641,14 @@ def main() -> int:
                 # three full drafts plus a review in one turn; 240s kills it
                 # mid-stream and reports it as a failure of the harness rather
                 # than of the clock.
-                budget = int(task.get("timeout") or args.timeout)
+                token_budget, budget = limits(task, args.timeout)
+                trace_to = (traces / f"{task['name']}-{mode}-{i + 1}") if traces else None
                 row = run_one(binp, task, mode, args.model, budget, args.keep,
-                              args.worker_model, args.fast, args.think)
+                              args.worker_model, args.fast, args.think, trace_to, build,
+                              token_budget)
                 row["run"] = i
                 rows.append(row)
-                mark = "PASS" if row["passed"] else "FAIL"
+                mark = "PASS" if row["passed"] else ("TIME" if row.get("timed_out") else "FAIL")
                 extra = f" ({row['error']})" if row["error"] else ""
                 reason = (f" reason_tok={row['reasoning_tokens']}"
                           if row["reasoning_tokens"] else "")
@@ -460,14 +692,19 @@ def main() -> int:
         if not mr:
             continue
         passed = sum(1 for r in mr if r["passed"])
+        timed_out = sum(1 for r in mr if r.get("timed_out"))
         gen = sum(r["gen_tokens"] for r in mr)
         reason = sum(r["reasoning_tokens"] for r in mr)
         secs = sum(r["elapsed"] for r in mr)
         # Cost per *solved* task is the number that decides whether a thinking
         # level is worth it; totals reward doing nothing.
         per = round(gen / passed) if passed else "-"
-        print(f"  {mode:<8} {passed}/{len(mr)} passed   gen_tokens={gen} "
+        print(f"  {mode:<8} {passed}/{len(mr)} passed, {len(mr) - passed - timed_out} failed, "
+              f"{timed_out} timed out   gen_tokens={gen} "
               f"(reasoning={reason}, {per}/solved)   {round(secs)}s")
+        if timed_out:
+            print(f"           {timed_out} hit the wall-clock safety net, not the token budget: "
+                  "that measures the machine, so read them apart from failures")
         known = sum(r.get("known_cost_usd", 0.0) for r in mr)
         complete = all("metrics" in r and not r.get("unpriced_calls")
                        and not r["metrics"].get("warnings") for r in mr)

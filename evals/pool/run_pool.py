@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run import MANIFEST, REPO, parse_events, worksmith_bin  # noqa: E402
+from run import REPO, built_snapshot, parse_events  # noqa: E402
 
 
 def server_status(model: str | None) -> dict | None:
@@ -175,7 +175,9 @@ def prompt_for(task: dict, produced: dict) -> str:
 def run_task(binp: str, task: dict, workdir: Path, produced: dict,
              model: str | None, timeout: int, fast: bool = False,
              think: str | None = None, trace_dir: Path | None = None) -> dict:
-    cmd = [binp, "--mode", "json", "--approve-all", "--trust-project"]
+    # No --approve-all: unattended, the gate refuses writes outside the workdir
+    # instead of approving them (see reference_ok for what approving cost).
+    cmd = [binp, "--mode", "json", "--trust-project"]
     if model:
         cmd += ["--model", model]
     # A model that always reasons will spend its whole budget thinking and
@@ -559,9 +561,9 @@ def main() -> int:
         binp = args.bin
     else:
         print("building worksmith…", file=sys.stderr)
-        subprocess.run(["cargo", "build", "--quiet", "--manifest-path", str(MANIFEST)],
-                       check=True)
-        binp = worksmith_bin()
+        # A private copy: a rebuild in the shared target dir mid-sweep would
+        # otherwise change what later tasks measure.
+        binp, _build = built_snapshot()
 
     results = []
     for path in args.backlogs:
