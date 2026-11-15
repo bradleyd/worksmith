@@ -208,7 +208,8 @@ def main() -> int:
             Path(args.json).write_text(json.dumps(
                 {"model": args.model, "arms": res, "rows": rows}, indent=2))
 
-    print(f"\n{args.model} · HumanEval, {len(problems)} problems")
+    dataset = "HumanEval+" if "plus_input" in problems[0] else "HumanEval"
+    print(f"\n{args.model} · {dataset}, {len(problems)} problems")
     for a in arms:
         r = res[a]
         pct = 100 * r["pass"] / r["graded"] if r["graded"] else 0
