@@ -60,5 +60,16 @@ class SnapshotTest(unittest.TestCase):
             self.assertIn(info["dirty"], (True, False))
 
 
+class LengthTest(unittest.TestCase):
+    def test_the_suite_splits_by_declared_length(self):
+        short = {t["name"] for t in run.load_tasks(None, "short")}
+        long = {t["name"] for t in run.load_tasks(None, "long")}
+        every = {t["name"] for t in run.load_tasks(None)}
+        self.assertIn("newsletter-judge", long)
+        self.assertNotIn("newsletter-judge", short)
+        self.assertEqual(short | long, every, "every task is one or the other")
+        self.assertFalse(short & long)
+
+
 if __name__ == "__main__":
     unittest.main()

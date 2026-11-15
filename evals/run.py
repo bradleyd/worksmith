@@ -108,12 +108,19 @@ def worksmith_bin() -> str:
     return os.path.join(meta["target_directory"], "debug", "worksmith")
 
 
-def load_tasks(only: str | None) -> list[dict]:
+def load_tasks(only: str | None, length: str = "all") -> list[dict]:
+    """Tasks to run. `length` splits the suite: a short task finishes in
+    seconds to a minute and checks the loop's mechanics; a long one runs for
+    many minutes and long context, where compaction and step limits live.
+    Measured 2026-11-14 on the 27B: the seven short tasks took 13 minutes in
+    all, one long task took 95% of the run."""
     tasks = []
     for f in sorted(TASKS_DIR.glob("*.toml")):
         with open(f, "rb") as fh:
             t = tomllib.load(fh)
         if only and t["name"] != only:
+            continue
+        if length != "all" and t.get("length", "short") != length:
             continue
         tasks.append(t)
     return tasks
@@ -400,6 +407,9 @@ def metrics_fields(stats: dict) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--task")
+    ap.add_argument("--length", choices=["short", "long", "all"], default="all",
+                    help="short: seconds-to-a-minute mechanics checks; long: "
+                         "long-context runs (tasks declare `length`, default short)")
     ap.add_argument("--modes", default="raw,guided")
     ap.add_argument("--model")
     ap.add_argument("--timeout", type=int, default=240)
@@ -429,7 +439,7 @@ def main() -> int:
     traces = None if args.no_traces else (args.traces or default_traces_dir())
 
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
-    tasks = load_tasks(args.task)
+    tasks = load_tasks(args.task, args.length)
     if not tasks:
         print("no matching tasks", file=sys.stderr)
         return 1
