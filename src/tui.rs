@@ -3608,7 +3608,7 @@ fn knowledge_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Ite
                     for h in hits {
                         app.push(
                             Kind::Notice,
-                            format!("{} (chunk {})\n{}", h.source, h.ord, truncate(&h.text, 300)),
+                            format!("{}\n{}", h.location(), truncate(&h.text, 300)),
                         );
                     }
                 }

@@ -395,6 +395,12 @@ async fn run(args: Args) -> Result<()> {
         (Arc::new(worksmith::tools::approval::NoOneToAsk), None)
     };
 
+    // Off the critical path: startup never waits for it, and a search that
+    // arrives first simply waits for the build already under way.
+    if config.knowledge_auto_index() {
+        worksmith::knowledge::warm_in_background(&cwd);
+    }
+
     let tool_ctx = ToolContext {
         cwd: cwd.clone(),
         session_id: session.id.clone(),
@@ -1404,7 +1410,7 @@ fn handle_knowledge<'a>(mut parts: impl Iterator<Item = &'a str>, cwd: &Path) {
                 Ok(hits) if hits.is_empty() => println!("(no matches)"),
                 Ok(hits) => {
                     for h in hits {
-                        println!("--- {} (chunk {})\n{}\n", h.source, h.ord, h.text);
+                        println!("--- {}\n{}\n", h.location(), h.text);
                     }
                 }
                 Err(e) => eprintln!("knowledge search failed: {e}"),

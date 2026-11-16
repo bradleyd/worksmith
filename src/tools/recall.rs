@@ -161,9 +161,10 @@ impl Tool for KnowledgeTool {
     }
 
     fn description(&self) -> &str {
-        "Full-text search over this project's own documents and source, chunked into an index. \
-         Use it to find what the repo already says about a topic before reading files at \
-         random. The index maintains itself; `index` forces a rebuild."
+        "Find where a topic is handled when you don't know the file. Give a few topic words, \
+         not a regex (\"refund approval\", \"session expiry\"); returns ranked passages from \
+         this project's documents and source, each headed `path:start-end` for `read`. \
+         The index builds and refreshes itself; `index` forces a rebuild."
     }
 
     fn parameters(&self) -> Value {
@@ -229,10 +230,7 @@ impl Tool for KnowledgeTool {
                     Ok(hits) => {
                         let mut out = String::new();
                         for h in hits {
-                            out.push_str(&format!(
-                                "--- {} (chunk {})\n{}\n\n",
-                                h.source, h.ord, h.text
-                            ));
+                            out.push_str(&format!("--- {}\n{}\n\n", h.location(), h.text));
                         }
                         ToolOutput::ok(out)
                     }

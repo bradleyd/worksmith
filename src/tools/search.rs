@@ -1,7 +1,10 @@
-//! `grep`, `find`, `ls` — filesystem search conveniences. A small recursive
-//! walker skips the usual noise (`.git`, `target`, `node_modules`).
+//! `grep`, `find`, `ls` — filesystem search conveniences. Walking is
+//! ripgrep's own walker (the `ignore` crate): it honours `.gitignore` and skips
+//! the usual noise (`.git`, `target`, `node_modules`).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use regex::Regex;
@@ -28,30 +31,94 @@ fn skip_dir(name: &str) -> bool {
     name.starts_with('.') || SKIP_DIRS.contains(&name)
 }
 
-pub(crate) fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
-    if out.len() >= limit {
-        return;
+/// The walker every search shares. Hidden *files* stay in (`.env.example`),
+/// hidden and heavy directories go, and `.gitignore` is honoured even outside a
+/// git repo, so build output and virtualenvs never reach a search.
+fn walker(root: &Path, glob: Option<&str>) -> Result<ignore::WalkBuilder, String> {
+    let mut b = ignore::WalkBuilder::new(root);
+    b.hidden(false)
+        .require_git(false)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(|e| {
+            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+            // depth 0 is the root the caller asked for; never skip it.
+            e.depth() == 0 || !is_dir || !skip_dir(&e.file_name().to_string_lossy())
+        });
+    if let Some(g) = glob {
+        let mut o = ignore::overrides::OverrideBuilder::new(root);
+        o.add(g).map_err(|e| format!("invalid glob `{g}`: {e}"))?;
+        b.overrides(o.build().map_err(|e| format!("invalid glob `{g}`: {e}"))?);
     }
-    let Ok(entries) = std::fs::read_dir(root) else {
+    Ok(b)
+}
+
+pub(crate) fn walk(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
+    let Ok(b) = walker(root, None) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            if skip_dir(&name) {
-                continue;
-            }
-            walk(&path, out, limit);
-        } else {
-            out.push(path);
-        }
+    for entry in b.build().flatten() {
         if out.len() >= limit {
             return;
         }
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            out.push(entry.into_path());
+        }
     }
+}
+
+/// One file's matching lines: (line number, text).
+type FileHits = (PathBuf, Vec<(usize, String)>);
+
+/// Matching lines per file, searched in parallel. Stops collecting once
+/// `cap` lines are in hand; the caller truncates and says so.
+fn grep_files(
+    root: &Path,
+    re: &Regex,
+    glob: Option<&str>,
+    cap: usize,
+) -> Result<Vec<FileHits>, String> {
+    let found = Mutex::new(Vec::new());
+    let total = AtomicUsize::new(0);
+    walker(root, glob)?.build_parallel().run(|| {
+        Box::new(|entry| {
+            use ignore::WalkState;
+            if total.load(Ordering::Relaxed) >= cap {
+                return WalkState::Quit;
+            }
+            let Ok(entry) = entry else {
+                return WalkState::Continue;
+            };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                return WalkState::Continue;
+            }
+            // Oversized files are lock files and data blobs: noise in context.
+            if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_SIZE {
+                return WalkState::Continue;
+            }
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                return WalkState::Continue;
+            };
+            // One pass over the whole file rejects most files before any
+            // line is split out.
+            if !re.is_match(&text) {
+                return WalkState::Continue;
+            }
+            let lines: Vec<(usize, String)> = text
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| re.is_match(l))
+                .map(|(i, l)| (i + 1, l.trim_end().to_string()))
+                .collect();
+            if !lines.is_empty() {
+                total.fetch_add(lines.len(), Ordering::Relaxed);
+                found.lock().unwrap().push((entry.into_path(), lines));
+            }
+            WalkState::Continue
+        })
+    });
+    let mut found = found.into_inner().unwrap();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
 }
 
 // ---- grep -----------------------------------------------------------------
@@ -65,8 +132,9 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regular expression, recursively. Returns \
-         `path:line:text` matches. Skips .git/target/node_modules."
+        "Search file contents by regular expression, recursively and in parallel \
+         (ripgrep's walker). Returns `path:line:text` matches. Honours .gitignore and \
+         skips .git/target/node_modules. Faster than grep or rg through bash."
     }
 
     fn parameters(&self) -> Value {
@@ -74,7 +142,9 @@ impl Tool for GrepTool {
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Regular expression to search for." },
-                "path": { "type": "string", "description": "Directory or file to search (default: cwd)." }
+                "path": { "type": "string", "description": "Directory or file to search (default: cwd)." },
+                "glob": { "type": "string", "description": "Only files matching this glob, e.g. `*.rs`." },
+                "ignore_case": { "type": "boolean", "description": "Match case-insensitively." }
             },
             "required": ["pattern"]
         })
@@ -84,10 +154,18 @@ impl Tool for GrepTool {
         let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) else {
             return ToolOutput::error("missing required argument: pattern");
         };
-        let re = match Regex::new(pattern) {
+        let ignore_case = args
+            .get("ignore_case")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let re = match regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .build()
+        {
             Ok(r) => r,
             Err(e) => return ToolOutput::error(format!("invalid regex: {e}")),
         };
+        let glob = args.get("glob").and_then(|v| v.as_str()).map(String::from);
         let root = match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),
@@ -96,35 +174,30 @@ impl Tool for GrepTool {
             return ToolOutput::error(refusal);
         }
 
-        let mut files = Vec::new();
-        if root.is_file() {
-            files.push(root.clone());
-        } else {
-            walk(&root, &mut files, 10_000);
-        }
+        // CPU and disk bound: off the async runtime so the TUI keeps drawing.
+        let walk_root = root.clone();
+        let found = match tokio::task::spawn_blocking(move || {
+            grep_files(&walk_root, &re, glob.as_deref(), MAX_HITS)
+        })
+        .await
+        {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => return ToolOutput::error(e),
+            Err(e) => return ToolOutput::error(format!("grep failed: {e}")),
+        };
 
         let mut hits = 0usize;
         let mut out = String::new();
-        for file in &files {
-            // Skip oversized files (lock files, data blobs) to avoid dumping
-            // huge or irrelevant content into the model's context.
-            if std::fs::metadata(file).map(|m| m.len()).unwrap_or(0) > MAX_FILE_SIZE {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(file) else {
-                continue;
-            };
+        for (file, lines) in &found {
             let rel = display_rel(&ctx.cwd, file);
-            for (i, line) in text.lines().enumerate() {
-                if re.is_match(line) {
-                    out.push_str(&format!("{}:{}:{}\n", rel, i + 1, line.trim_end()));
-                    hits += 1;
-                    if hits >= MAX_HITS || out.len() >= MAX_GREP_BYTES {
-                        out.push_str(&format!(
-                            "... (truncated at {hits} matches / byte limit — narrow the pattern or scope with `path`)\n"
-                        ));
-                        return ToolOutput::ok(out);
-                    }
+            for (n, line) in lines {
+                out.push_str(&format!("{rel}:{n}:{line}\n"));
+                hits += 1;
+                if hits >= MAX_HITS || out.len() >= MAX_GREP_BYTES {
+                    out.push_str(&format!(
+                        "... (truncated at {hits} matches / byte limit — narrow the pattern, or scope with `path` or `glob`)\n"
+                    ));
+                    return ToolOutput::ok(out);
                 }
             }
         }

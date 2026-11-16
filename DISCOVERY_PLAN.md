@@ -1,6 +1,7 @@
 # Discovery: knowing a folder before working in it
 
-Status: plan, for review. Nothing here is built.
+Status: Phase 1 built (see its section). Phases 2 to 4 are plans; the review
+questions are answered under Decisions.
 
 ## The problem, measured
 
@@ -35,15 +36,17 @@ Interactive sessions since 2026-10-01:
 SQLite with an FTS5 index (`.worksmith/knowledge.db`), and re-indexes only files
 whose modification time changed. It covers code and plain text (`md`, `rs`,
 `py`, `toml`, `json` and so on), skips files over 512 KB, and refreshes when a
-search finds the index older than 60 seconds. The first search in a fresh
-folder pays for the whole build: 12 seconds in `~/Projects`.
+search finds the index older than 60 seconds. Building it is quick: 0.3 seconds
+for the POS repo (82 files) and 0.4 for Worksmith (250 files). The 12 seconds
+once measured was `~/Projects`, a folder of many repos that Worksmith no longer
+indexes at all.
 
 The `doc` tool can already extract text from PDF (poppler), Word, ODT, RTF and
 EPUB (pandoc), and convert with LibreOffice.
 
-The `grep` tool is a single-threaded Rust walker. It does not read
-`.gitignore` and stops at 10,000 files. ripgrep is installed and already a
-Worksmith dependency (session search uses it).
+The `grep` tool was a single-threaded Rust walker. It did not read
+`.gitignore`, and it stopped silently at 10,000 files: over the cargo registry
+(45,000 files) it returned 2 of the 8 matches rg finds.
 
 ## Why the model ignores the index
 
@@ -55,7 +58,8 @@ Worksmith dependency (session search uses it).
    shell. Bash is their universal tool and nothing steers them off it.
 3. Full-text search needs good query words. Without knowing what is in the
    folder, the model has no words to ask with. grep only needs a pattern.
-4. The first search in a fresh folder is slow because it builds the index.
+4. Its hits named a chunk number (`src/main.rs (chunk 27)`), not lines, so a
+   hit still left the model grepping for where it was.
 
 ## Non-goals
 
@@ -72,17 +76,30 @@ Worksmith dependency (session search uses it).
 
 Each phase is useful alone and measured before the next starts.
 
-### Phase 1: make search fast and used (cheap)
+### Phase 1: make search fast and used (built)
 
-- **Back the `grep` tool with ripgrep:** parallel, respects `.gitignore`, no
-  10,000-file cap. Keep the tool's output format.
-- **Put `knowledge` in the toolkit line of the prompt,** with guidance that
-  matches how the model works: search the index when you do not know where
-  something is; use grep when you know the exact pattern.
-- **Build the index at session start, in the background,** so the first search
-  is not the one that pays for it.
+- **The `grep` tool runs on ripgrep's walker** (the `ignore` crate, so no rg
+  binary is needed): parallel, honours `.gitignore` even outside a git repo,
+  no file cap, output sorted so a repeated search reads the same. New optional
+  `glob` and `ignore_case`, the two flags models reach for in bash grep.
+  Measured over the cargo registry (45,000 files, 854 MB): 0.7 to 0.9 s and all
+  8 matches; rg 0.7 to 1.1 s; bash `grep -rn` 6.4 to 6.8 s; the old tool 0.26 s
+  and 2 matches.
+- **Knowledge hits carry line ranges:** `src/app/admin_login.rs:1-24`, ready
+  for `read`. The index schema is versioned; an old index is dropped and
+  rebuilt.
+- **The prompt names `knowledge` in the toolkit line,** and says when to use
+  each: topic words to `knowledge` when the file is unknown, the `grep` tool
+  (not bash) for an exact string.
+- **The index builds in the background at session start,** unless
+  `[knowledge] auto-index = false`. Never in a folder of projects, the home
+  directory or `/`. Writes are batched per 200 files and one build runs per
+  database, so a search that arrives mid-build waits for it rather than
+  starting a second one.
+- **`.worksmith/.gitignore`** ignores `knowledge.db*`, since the index now
+  appears in every project unasked.
 - Measure: share of searches through `knowledge` and the `grep` tool against
-  bash `grep`. Baseline: 3 and 47 against about 1,800.
+  bash `grep`. Baseline since 2026-10-01: 3 and 47 against about 1,800.
 
 ### Phase 2: index every kind of file
 
@@ -164,11 +181,28 @@ files. Nothing in it is memory.
   the 27B. A "where is X handled" task in a larger repo would measure the map
   directly.
 
-## Questions for review
+## Decisions
 
-1. Should mapping run automatically on first visit, or only when asked
-   (`/discover`)? Automatic is the point, but it spends tokens unasked.
-2. Which model maps: the session's model, or the cheaper `[agents] model`?
-3. Should dependency maps be shared across projects (stored under
-   `~/.worksmith/`) or kept per project?
-4. Is a 1,000 to 2,000 token map the right size for your 27B and 9B windows?
+1. **Both, automatic by default.** Batteries included: mapping starts on its
+   own on a first visit and refreshes deltas after, with `[knowledge] map =
+   false` to turn it off and `/discover` to run or re-run it by hand. Same
+   shape as `auto-index` in Phase 1.
+2. **The fastest model available.** Mapping is many small summaries, so speed
+   beats depth. Default to `[agents] model` when set, else the session's model,
+   with `[knowledge] map-model` to override. Worksmith already records tokens
+   per second per model, so a later version can pick the measured fastest.
+3. **Shared, and not only for Rust.** A given package version has the same
+   source wherever it is used, so its map is stored once under
+   `~/.worksmith/deps/<ecosystem>/<name>@<version>` and shared. Versions come
+   from the lockfile (`Cargo.lock`, `package-lock.json`, `uv.lock` or
+   `poetry.lock`, `go.sum`) and source from where the package manager keeps it
+   (`~/.cargo/registry`, `node_modules`, `site-packages`, `$GOPATH/pkg/mod`).
+   Cargo first, since that is where the evidence is.
+4. **About 1,000 tokens, capped at the window divided by 64** (2,000 at 128k,
+   500 at 32k). Measured on 8 interactive 27B sessions since 2026-10-01: the
+   opening prompt (system, tools, instructions) is about 3,500 tokens, and
+   sessions run until compaction (median peak 98,000 of a 131,000 window). The
+   map rides in every request and is never compacted away, so it costs about
+   1.5% of the window for the whole session; the prefix cache keeps it from
+   costing time per request. Bigger is not better: the map is for vocabulary
+   and direction, and `knowledge` holds the detail.

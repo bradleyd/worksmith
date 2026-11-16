@@ -222,6 +222,14 @@ synthesize = true
 [tools]
 bash-timeout-secs = 120
 
+# --- Knowledge --------------------------------------------------------------
+# The project's own text, indexed for the `knowledge` search tool. Built in the
+# background when a session starts, so the first search does not wait for it;
+# only changed files are re-read. Never runs in a folder that holds several
+# projects, your home directory, or /.
+[knowledge]
+auto-index = true
+
 # --- Web --------------------------------------------------------------------
 # Needed only for `web` search; `web` fetch (read a URL) works without any of
 # this.

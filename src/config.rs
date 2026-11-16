@@ -26,6 +26,7 @@ pub struct Config {
     pub agents: AgentsConfig,
     pub web: WebConfig,
     pub tui: TuiConfig,
+    pub knowledge: KnowledgeConfig,
     /// Named, explicitly enabled local MCP programs. Never launched at startup.
     pub mcp: std::collections::BTreeMap<String, crate::mcp::ServerConfig>,
     /// Per-model settings, keyed by the same `provider/model` spec you put in
@@ -276,6 +277,14 @@ pub struct TuiConfig {
     pub insert_escape_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct KnowledgeConfig {
+    /// Build or refresh the project's search index in the background when a
+    /// session starts. On unless turned off.
+    pub auto_index: Option<bool>,
+}
+
 /// A resolved provider + model, ready to build a client.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
@@ -505,6 +514,7 @@ impl Config {
         }
         take(&mut self.tui.insert_escape, other.tui.insert_escape);
         take(&mut self.tui.insert_escape_ms, other.tui.insert_escape_ms);
+        take(&mut self.knowledge.auto_index, other.knowledge.auto_index);
     }
 
     pub fn max_steps(&self) -> usize {
@@ -544,6 +554,11 @@ impl Config {
         }
         let ms = self.tui.insert_escape_ms.unwrap_or(300);
         Some((a, b, std::time::Duration::from_millis(ms)))
+    }
+
+    /// Index the project at session start (`[knowledge] auto-index`, default on).
+    pub fn knowledge_auto_index(&self) -> bool {
+        self.knowledge.auto_index.unwrap_or(true)
     }
 
     /// The check spawned workers must pass, if the config sets one.
@@ -875,6 +890,9 @@ const PROJECT_EXAMPLE: &str = r#"# Worksmith, this project only.
 
 # [tools]
 # bash-timeout-secs = 300
+
+# [knowledge]
+# auto-index = false           # don't index this project at session start
 "#;
 
 /// Create a project's `.worksmith/` directory, seeding the annotated sample the
@@ -889,6 +907,18 @@ pub fn ensure_project_dir(dir: &Path) -> std::io::Result<()> {
         let example = dir.join(EXAMPLE_CONFIG);
         if !example.exists() && !dir.join("config.toml").exists() {
             let _ = std::fs::write(&example, PROJECT_EXAMPLE);
+        }
+    }
+    // The search index is built in every project now, unasked, and is a
+    // rebuildable binary: it must never land in somebody's commit. Written even
+    // into an existing directory, and never over the user's own file.
+    if dir.file_name().is_some_and(|n| n == ".worksmith") {
+        let ignore = dir.join(".gitignore");
+        if !ignore.exists() {
+            let _ = std::fs::write(
+                &ignore,
+                "# Rebuildable search index; see `/knowledge`.\nknowledge.db*\n",
+            );
         }
     }
     Ok(())
@@ -1163,6 +1193,9 @@ mod tests {
             [tui]
             insert-escape = "jj"
             insert-escape-ms = 11
+
+            [knowledge]
+            auto-index = false
 
             [models."p/m"]
             input = 0.11

@@ -117,3 +117,111 @@ fn search_indexes_itself_so_the_first_query_works() {
     assert!(!hits.is_empty(), "search should have indexed on demand");
     assert_eq!(hits[0].source, "notes.md");
 }
+
+#[test]
+fn hits_carry_the_line_range_they_came_from() {
+    // "chunk 27" meant nothing to the model, which grepped again for the lines.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/refunds.rs",
+        "use std::fmt;\n\n\n// Refund approval needs a manager PIN.\nfn approve_refund() {}\n\nfn other() {}\n",
+    );
+    let store = KnowledgeStore::open_at(&dir.path().join("k.db"), dir.path()).unwrap();
+    store.index().unwrap();
+    let hit = &store.search("refund approval manager", 5).unwrap()[0];
+    assert_eq!((hit.line_start, hit.line_end), (1, 7));
+    assert_eq!(hit.location(), "src/refunds.rs:1-7");
+
+    // A file large enough to split: each piece's lines are its own.
+    let mut big = String::new();
+    for i in 1..=400 {
+        big.push_str(&format!("line {i} of the ledger, padded to some length\n"));
+        if i % 10 == 0 {
+            big.push('\n');
+        }
+    }
+    big.push_str("\nthe zebra paragraph\n");
+    write(dir.path(), "big.md", &big);
+    store.index().unwrap();
+    let hit = &store.search("zebra", 5).unwrap()[0];
+    let last = big.lines().count() as i64;
+    assert_eq!(hit.line_end, last);
+    let first_line = big.lines().nth(hit.line_start as usize - 1).unwrap();
+    assert!(
+        hit.text.starts_with(first_line.trim_end()),
+        "{first_line:?} / {:?}",
+        &hit.text[..40]
+    );
+}
+
+#[test]
+fn an_index_from_an_older_version_is_rebuilt_not_misread() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.md", "widgets and gadgets");
+    let db = dir.path().join("k.db");
+    {
+        // Version 1's shape: no line columns, no schema marker.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (id INTEGER PRIMARY KEY, source TEXT NOT NULL, ord INTEGER NOT NULL,
+                                  text TEXT NOT NULL, mtime INTEGER NOT NULL, indexed_at INTEGER NOT NULL);
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES ('last_index_at', '9999999999');",
+        )
+        .unwrap();
+    }
+    let store = KnowledgeStore::open_at(&db, dir.path()).unwrap();
+    let hits = store.search("gadgets", 5).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the stale freshness stamp went with the old table"
+    );
+    assert_eq!(hits[0].location(), "a.md:1-1");
+}
+
+#[test]
+fn the_index_honours_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ".gitignore", "build/\n");
+    write(dir.path(), "notes.md", "the real notes");
+    write(
+        dir.path(),
+        "build/copy.md",
+        "the real notes, copied by a build",
+    );
+    let store = KnowledgeStore::open_at(&dir.path().join("k.db"), dir.path()).unwrap();
+    assert_eq!(store.index().unwrap().files, 1);
+}
+
+#[test]
+fn the_background_build_leaves_the_index_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "README.md", "Refunds need a manager PIN.");
+    worksmith::knowledge::warm_in_background(dir.path())
+        .expect("an ordinary folder is indexed")
+        .join()
+        .unwrap();
+    let store = KnowledgeStore::open(dir.path()).unwrap();
+    assert_eq!(store.chunk_count().unwrap(), 1);
+    assert!(
+        std::fs::read_to_string(dir.path().join(".worksmith/.gitignore"))
+            .unwrap()
+            .contains("knowledge.db*"),
+        "an index built unasked must not end up in a commit"
+    );
+}
+
+#[test]
+fn no_background_build_where_an_index_would_be_wrong() {
+    assert!(worksmith::knowledge::warm_in_background(std::path::Path::new("/")).is_none());
+    let home = dirs::home_dir().unwrap();
+    assert!(worksmith::knowledge::warm_in_background(&home).is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    for repo in ["pos", "novel"] {
+        fs::create_dir_all(dir.path().join(repo).join(".git")).unwrap();
+    }
+    assert!(worksmith::knowledge::warm_in_background(dir.path()).is_none());
+}
