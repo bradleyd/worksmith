@@ -10,7 +10,7 @@ pub(super) enum Status {
 }
 
 impl Transcript {
-    pub(super) fn start_tool(&mut self, id: String, summary: String) {
+    pub(super) fn start_tool(&mut self, id: String, summary: String, copy: Option<String>) {
         let index = self.items.len();
         self.push(
             Kind::ToolActivity {
@@ -21,6 +21,7 @@ impl Transcript {
             },
             summary.replace('\n', " "),
         );
+        self.items[index].copy = copy;
         self.pending_tools.insert(id, index);
     }
 
@@ -121,6 +122,7 @@ pub(super) fn render(
                 },
                 text: body,
                 checkpoint: Vec::new(),
+                copy: None,
             },
             false,
             true,
@@ -137,8 +139,8 @@ mod tests {
     #[test]
     fn results_join_by_id_and_failures_open_without_moving_later_selection() {
         let mut t = Transcript::default();
-        t.start_tool("a".into(), "read main.py".into());
-        t.start_tool("b".into(), "bash tests".into());
+        t.start_tool("a".into(), "read main.py".into(), None);
+        t.start_tool("b".into(), "bash tests".into(), None);
         t.ensure_rows(60);
         t.enter_normal();
         t.cursor_row = t.item_starts[1];
@@ -171,7 +173,7 @@ mod tests {
     #[test]
     fn explicit_expansion_survives_completion_and_search_reveals_hidden_output() {
         let mut t = Transcript::default();
-        t.start_tool("a".into(), "edit main.py".into());
+        t.start_tool("a".into(), "edit main.py".into(), None);
         t.ensure_rows(60);
         t.enter_normal();
         assert!(t.toggle_entry());

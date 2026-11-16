@@ -247,6 +247,7 @@ pub(super) fn render(
                 kind,
                 text: text.to_string(),
                 checkpoint: Vec::new(),
+                copy: None,
             },
             false,
             true,
@@ -284,7 +285,7 @@ mod tests {
         t.push(Kind::Notice, "worksmith · m");
         t.start_turn("Fix reconnect handling".into());
         t.push(Kind::Assistant, "I'll inspect the reconnect path.");
-        t.start_tool("a".into(), "read connection.rs".into());
+        t.start_tool("a".into(), "read connection.rs".into(), None);
         t.finish_tool("a", "read", true, "fn reconnect()", Some(200));
         t.ensure_rows(60);
         let rows = texts(&t.cached_rows);
@@ -467,7 +468,7 @@ mod tests {
     fn search_opens_a_collapsed_turn_around_its_match() {
         let mut t = Transcript::default();
         t.start_turn("one".into());
-        t.start_tool("a".into(), "bash cargo test".into());
+        t.start_tool("a".into(), "bash cargo test".into(), None);
         t.finish_tool("a", "bash", true, "140 passed", None);
         t.finish_turn("done");
         t.ensure_rows(60);
@@ -497,7 +498,7 @@ mod tests {
     fn bulk_tool_toggle_leaves_turns_alone() {
         let mut t = Transcript::default();
         t.start_turn("one".into());
-        t.start_tool("a".into(), "read x".into());
+        t.start_tool("a".into(), "read x".into(), None);
         t.finish_tool("a", "read", true, "body", None);
         t.toggle_tools(); // Ctrl+O folds every tool entry; turns are not tools
         assert!(matches!(t.items[0].kind, Kind::Turn { expanded: true, .. }));

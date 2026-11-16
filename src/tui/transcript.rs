@@ -60,6 +60,10 @@ pub(super) struct Item {
     pub(super) kind: Kind,
     pub(super) text: String,
     pub(super) checkpoint: Vec<super::checkpoint::Message>,
+    /// What `y` copies when it is not the text: the command a tool row ran,
+    /// exactly as run. The row's text is a one-line summary with timing and
+    /// output appended, and a heredoc flattened onto one line will not paste.
+    pub(super) copy: Option<String>,
 }
 
 impl Item {
@@ -71,6 +75,83 @@ impl Item {
             text: text.into(),
         });
     }
+}
+
+/// A fenced code block: the lines from its opening fence to its closing one
+/// (inclusive, as indexes into `text.split('\n')`) and the code between.
+pub(super) struct Block {
+    pub(super) first: usize,
+    pub(super) last: usize,
+    pub(super) body: String,
+}
+
+/// Fenced blocks in markdown, ``` or ~~~. A block still open at the end (a
+/// reply mid-stream) runs to the last line.
+pub(super) fn fenced_blocks(text: &str) -> Vec<Block> {
+    let mut out = Vec::new();
+    let mut open: Option<(usize, &str, Vec<&str>)> = None;
+    let lines: Vec<&str> = text.split('\n').collect();
+    for (n, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let fence = ["```", "~~~"].into_iter().find(|f| t.starts_with(f));
+        match (&mut open, fence) {
+            (None, Some(f)) => open = Some((n, f, Vec::new())),
+            (Some((first, f, body)), Some(g)) if *f == g && t.trim_end() == g => {
+                out.push(Block {
+                    first: *first,
+                    last: n,
+                    body: body.join("\n"),
+                });
+                open = None;
+            }
+            (Some((_, _, body)), _) => body.push(line),
+            (None, None) => {}
+        }
+    }
+    if let Some((first, _, body)) = open {
+        out.push(Block {
+            first,
+            last: lines.len().saturating_sub(1),
+            body: body.join("\n"),
+        });
+    }
+    out
+}
+
+/// Width of the label on an item's first row; continuation rows are indented
+/// by `CONTINUATION` instead.
+fn item_label_width(kind: Kind) -> usize {
+    kind_style(kind).1.chars().count()
+}
+
+const CONTINUATION: &str = "  ";
+
+/// For each row `item_rows` draws for plain text (the trailing blank row
+/// aside), the source line it came from. Mirrors the wrap in `item_rows`;
+/// a test holds the two to the same row count.
+pub(super) fn row_logical_lines(text: &str, label_width: usize, width: u16) -> Vec<usize> {
+    let w = (width.max(12) as usize).saturating_sub(1);
+    let text = text.replace('\t', "    ");
+    let mut out = Vec::new();
+    let mut first_row = true;
+    for (n, logical) in text.split('\n').enumerate() {
+        let len = logical.chars().count();
+        let mut i = 0;
+        loop {
+            let prefix = if first_row {
+                label_width
+            } else {
+                CONTINUATION.len()
+            };
+            out.push(n);
+            first_row = false;
+            i += w.saturating_sub(prefix).max(1);
+            if i >= len {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// How many lines of a long tool result to show before capping (Ctrl+O expands).
@@ -157,8 +238,52 @@ impl Transcript {
             kind,
             text: text.into(),
             checkpoint: Vec::new(),
+            copy: None,
         });
         self.touch(at);
+    }
+
+    /// What `y` copies at `row`, and what it is: the code block under the
+    /// cursor in a reply, the command of a tool row, or else the whole item.
+    pub(super) fn yank_at(&self, row: usize) -> Option<(String, &'static str)> {
+        let index = self.item_at_row(row)?;
+        let item = &self.items[index];
+        if let Some(copy) = &item.copy {
+            return Some((copy.clone(), "command"));
+        }
+        if item.kind == Kind::Assistant {
+            let in_turn = super::turn::enclosing(&self.items, index).is_some();
+            let width = if in_turn {
+                self.cache_width.saturating_sub(2)
+            } else {
+                self.cache_width
+            };
+            let lines = row_logical_lines(&item.text, item_label_width(item.kind), width);
+            let line = lines.get(row - self.item_starts[index]).copied();
+            if let Some(block) = line.and_then(|l| {
+                fenced_blocks(&item.text)
+                    .into_iter()
+                    .find(|b| (b.first..=b.last).contains(&l))
+            }) {
+                return Some((block.body, "code block"));
+            }
+        }
+        Some((item.text.clone(), "message"))
+    }
+
+    /// The code blocks of the most recent reply, for `/copy`.
+    pub(super) fn last_reply_blocks(&self) -> Option<Vec<String>> {
+        let item = self
+            .items
+            .iter()
+            .rev()
+            .find(|i| i.kind == Kind::Assistant && !i.text.trim().is_empty())?;
+        Some(
+            fenced_blocks(&item.text)
+                .into_iter()
+                .map(|b| b.body)
+                .collect(),
+        )
     }
 
     /// Enter reading mode, putting the cursor on the last visible row.
@@ -558,9 +683,21 @@ pub(super) fn item_rows(
             expanded
         };
 
-        let indent = "  ";
+        let indent = CONTINUATION;
+        // Number each code block's opening fence, `[1]`, `[2]`, so `/copy 2`
+        // has something to point at. Only where it fits: the tag must never
+        // add a row, or `row_logical_lines` stops matching what is drawn.
+        let opens: Vec<usize> = if item.kind == Kind::Assistant {
+            fenced_blocks(&text).iter().map(|b| b.first).collect()
+        } else {
+            Vec::new()
+        };
         let mut first_row = true;
-        for logical in text.split('\n') {
+        for (n, logical) in text.split('\n').enumerate() {
+            let tag = opens
+                .iter()
+                .position(|&o| o == n)
+                .map(|k| format!(" [{}]", k + 1));
             let chars: Vec<char> = logical.chars().collect();
             let mut i = 0;
             loop {
@@ -571,10 +708,20 @@ pub(super) fn item_rows(
                 };
                 let avail = w.saturating_sub(prefix.chars().count()).max(1);
                 let seg: String = chars[i..(i + avail).min(chars.len())].iter().collect();
-                rows.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(prefix, style.add_modifier(Modifier::DIM)),
-                    Span::styled(seg, style),
-                ]));
+                    Span::styled(seg.clone(), style),
+                ];
+                if i == 0
+                    && let Some(tag) = &tag
+                    && seg.chars().count() + tag.chars().count() <= avail
+                {
+                    spans.push(Span::styled(
+                        tag.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                rows.push(Line::from(spans));
                 first_row = false;
                 i += avail;
                 if i >= chars.len() {
@@ -675,5 +822,108 @@ fn render_diff(rows: &mut Vec<Line<'static>>, text: &str, collapse: bool, width:
             format!("  … (+{extra} more diff lines · Ctrl+O)"),
             Style::default().fg(Color::DarkGray),
         )));
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    fn reply() -> String {
+        "Run the migration first:\n\n```bash\ncd ~/Projects/togmoro && \\\n  swift build\n```\n\nThen this, which is long enough that it has to wrap across several rows of a narrow terminal:\n\n~~~\nswift test --filter WeatherTests\n~~~\nDone.".to_string()
+    }
+
+    #[test]
+    fn the_row_map_matches_what_is_drawn() {
+        // `yank_at` trusts this mapping, so it must agree with `item_rows`
+        // row for row, tags and wrapping included.
+        for width in [14u16, 30, 60, 120] {
+            for kind in [Kind::Assistant, Kind::User, Kind::Notice] {
+                let item = Item {
+                    kind,
+                    text: reply(),
+                    checkpoint: Vec::new(),
+                    copy: None,
+                };
+                let mut rows = Vec::new();
+                item_rows(&mut rows, &item, false, true, width);
+                let map = row_logical_lines(&item.text, item_label_width(kind), width);
+                assert_eq!(map.len() + 1, rows.len(), "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn fenced_blocks_are_found_in_order() {
+        let blocks = fenced_blocks(&reply());
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].body, "cd ~/Projects/togmoro && \\\n  swift build");
+        assert_eq!(blocks[1].body, "swift test --filter WeatherTests");
+        // A ``` inside a ~~~ block is code, not a fence.
+        let nested = fenced_blocks("~~~\n```\nx\n~~~");
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].body, "```\nx");
+        // Mid-stream, the open block runs to the end.
+        assert_eq!(fenced_blocks("```sh\nmake")[0].body, "make");
+    }
+
+    #[test]
+    fn y_copies_the_block_under_the_cursor_inside_a_turn() {
+        let mut t = Transcript::default();
+        t.start_turn("set it up".into());
+        t.push(Kind::Assistant, reply());
+        t.ensure_rows(40);
+        let start = t.item_starts[1];
+        let end = t.item_starts.get(2).copied().unwrap_or(t.cached_rows.len());
+        let mut seen: Vec<String> = Vec::new();
+        for r in start..end {
+            let (text, what) = t.yank_at(r).unwrap();
+            if what == "code block" && !seen.contains(&text) {
+                seen.push(text);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                "cd ~/Projects/togmoro && \\\n  swift build".to_string(),
+                "swift test --filter WeatherTests".to_string(),
+            ]
+        );
+        // The first row is prose: the whole message.
+        assert_eq!(t.yank_at(start).unwrap(), (reply(), "message"));
+        let tagged = t.cached_rows[start..end]
+            .iter()
+            .filter(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content == " [1]" || s.content == " [2]")
+            })
+            .count();
+        assert_eq!(tagged, 2, "each block's fence row carries its number");
+    }
+
+    #[test]
+    fn y_on_a_tool_row_copies_the_command_as_it_ran() {
+        let mut t = Transcript::default();
+        let cmd = "cat > Package.swift <<'EOF'\n// swift-tools-version:5.9\nEOF";
+        t.start_tool("a".into(), format!("bash: {cmd}"), Some(cmd.into()));
+        t.finish_tool("a", "bash", true, "lots\nof\noutput", Some(40));
+        t.ensure_rows(60);
+        assert_eq!(
+            t.yank_at(t.item_starts[0]).unwrap(),
+            (cmd.to_string(), "command")
+        );
+    }
+
+    #[test]
+    fn copy_reads_the_last_reply_with_text() {
+        let mut t = Transcript::default();
+        assert!(t.last_reply_blocks().is_none());
+        t.push(Kind::Assistant, reply());
+        t.push(Kind::Assistant, "  ");
+        t.push(Kind::Notice, "```\nnot a reply\n```");
+        assert_eq!(t.last_reply_blocks().unwrap().len(), 2);
+        t.push(Kind::Assistant, "No code here.");
+        assert_eq!(t.last_reply_blocks().unwrap().len(), 0);
     }
 }

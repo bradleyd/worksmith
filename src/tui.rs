@@ -116,11 +116,41 @@ fn copy_to_clipboard(text: &str) -> io::Result<()> {
     use base64::Engine;
     use std::io::Write;
 
+    // macOS Terminal.app ignores OSC 52, so on a local Mac session `pbcopy` is
+    // what actually lands the text. Over SSH it would fill the far machine's
+    // clipboard instead, so there only the escape is sent.
+    if cfg!(target_os = "macos") && std::env::var_os("SSH_TTY").is_none() {
+        let piped = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .expect("piped")
+                    .write_all(text.as_bytes())?;
+                child.wait()
+            });
+        if piped.is_ok_and(|s| s.success()) {
+            return Ok(());
+        }
+    }
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut out = io::stdout();
     // ESC ] 52 ; c ; <base64> BEL — `c` is the clipboard selection.
     write!(out, "\x1b]52;c;{encoded}\x07")?;
     out.flush()
+}
+
+/// Copy and say what was copied, in the status line.
+fn yank(app: &mut App, text: &str, what: &str) {
+    match copy_to_clipboard(text) {
+        Ok(()) => {
+            let n = text.lines().count().max(1);
+            app.status = format!("copied {what} ({n} line{})", if n == 1 { "" } else { "s" });
+        }
+        Err(e) => app.push(Kind::Error, format!("clipboard: {e}")),
+    }
 }
 
 /// Slash commands offered by Tab-completion.
@@ -133,6 +163,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/compact", "summarize the history now"),
     ("/memory", "what is remembered — search, mine, review"),
     ("/knowledge", "the project's own docs and source"),
+    ("/copy", "copy a code block from the last reply: /copy [n]"),
     ("/skill", "load a skill"),
     ("/mcp", "browse and activate parent MCP tools"),
     ("/spawn", "run a task in background workers"),
@@ -512,6 +543,7 @@ impl App {
                             kind: Kind::Thinking,
                             text,
                             checkpoint: Vec::new(),
+                            copy: None,
                         });
                         self.cur_thinking = Some(self.transcript.items.len() - 1);
                         self.transcript.items.len() - 1
@@ -530,6 +562,7 @@ impl App {
                             kind: Kind::Assistant,
                             text,
                             checkpoint: Vec::new(),
+                            copy: None,
                         });
                         self.cur_assistant = Some(self.transcript.items.len() - 1);
                         self.transcript.items.len() - 1
@@ -578,8 +611,11 @@ impl App {
                 arguments,
             } => {
                 if name != "checkpoint" {
-                    self.transcript
-                        .start_tool(id, tool_summary(&name, &arguments));
+                    self.transcript.start_tool(
+                        id,
+                        tool_summary(&name, &arguments),
+                        tool_copy(&name, &arguments),
+                    );
                 }
                 self.cur_assistant = None;
                 self.cur_thinking = None;
@@ -1810,20 +1846,19 @@ fn handle_normal_key(key: KeyEvent, app: &mut App, ctrl: bool) -> Result<Option<
                 app.status = "no matches".into();
             }
         }
-        // Yank the whole item under the cursor, not the wrapped row: what you
-        // want is the message, the tool output, the code block.
-        KeyCode::Char('y') => match app.item_at_row(app.transcript.cursor_row) {
+        // `y` copies the most specific thing under the cursor: the code block
+        // in a reply, or the command a tool row ran, since that is what gets
+        // pasted into another window. `Y` copies the whole item.
+        KeyCode::Char('y') => match app.transcript.yank_at(app.transcript.cursor_row) {
+            Some((text, what)) => yank(app, &text, what),
+            None => app.status = "nothing to copy".into(),
+        },
+        KeyCode::Char('Y') => match app.item_at_row(app.transcript.cursor_row) {
             Some(i) => {
                 let text = app.transcript.items[i].text.clone();
-                match copy_to_clipboard(&text) {
-                    Ok(()) => {
-                        let n = text.lines().count();
-                        app.status = format!("yanked {n} lines");
-                    }
-                    Err(e) => app.push(Kind::Error, format!("clipboard: {e}")),
-                }
+                yank(app, &text, "whole entry");
             }
-            None => app.status = "nothing to yank".into(),
+            None => app.status = "nothing to copy".into(),
         },
         _ => {}
     }
@@ -2053,7 +2088,8 @@ async fn handle_insert_key(
                 // Nothing to clear, so Esc means "stop typing, start reading".
                 // Never steals an Esc that had a job to do.
                 app.enter_normal();
-                app.status = "normal · j k /search n N · Enter fold · y yank · i insert".into();
+                app.status =
+                    "normal · j k /search n N · Enter fold · y copy · Y all · i insert".into();
             } else {
                 app.composer.clear_input();
             }
@@ -2089,7 +2125,8 @@ async fn handle_insert_key(
         KeyCode::Char(c) if !ctrl => {
             if app.escape_pair(c) {
                 app.enter_normal();
-                app.status = "normal · j k /search n N · Enter fold · y yank · i insert".into();
+                app.status =
+                    "normal · j k /search n N · Enter fold · y copy · Y all · i insert".into();
                 app.composer.refresh_hint();
                 return Ok(Flow::Continue);
             }
@@ -2226,7 +2263,8 @@ NORMAL MODE (Esc on an empty composer, or `jj`)
   j k  ↑ ↓       move            Ctrl+U/D   half page
   g  G           top / bottom    PageUp/Dn  page
   /              search          n  N       next / previous match
-  y              yank the message under the cursor to the clipboard
+  y              copy the code block or command under the cursor (else the message)
+  Y              copy the whole entry under the cursor
   Enter          expand/collapse entry (else back to typing)
   i  Esc         back to typing
 
@@ -2456,6 +2494,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
             }
         }
         "knowledge" | "know" => knowledge_command(app, cwd, parts),
+        "copy" => copy_command(app, parts),
         "skill" | "skills" => skill_command(app, cwd, agent, parts),
         "fast" | "lucky" => fast_command(app, agent, parts),
         "think" => think_command(app, agent, parts),
@@ -3569,6 +3608,30 @@ fn load_overlay_skill(app: &mut App, agent: &Agent, name: &str) {
     refresh_skill_overlay(app, agent);
 }
 
+/// `/copy [n]`: a code block from the last reply, without leaving the composer.
+/// The blocks are tagged `[1]`, `[2]` where they are drawn.
+fn copy_command<'a>(app: &mut App, mut parts: impl Iterator<Item = &'a str>) {
+    let blocks = app.transcript.last_reply_blocks().unwrap_or_default();
+    let pick = match (parts.next().map(str::parse::<usize>), blocks.len()) {
+        (_, 0) => {
+            app.status = "the last reply has no code blocks; Esc then y copies a message".into();
+            return;
+        }
+        (None, 1) => 0,
+        (None, n) => {
+            app.status = format!("the last reply has {n} code blocks: /copy 1 to /copy {n}");
+            return;
+        }
+        (Some(Ok(k)), n) if (1..=n).contains(&k) => k - 1,
+        (Some(_), n) => {
+            app.status = format!("/copy takes a block number from 1 to {n}");
+            return;
+        }
+    };
+    let text = blocks[pick].clone();
+    yank(app, &text, &format!("block [{}]", pick + 1));
+}
+
 /// `/knowledge [index | search <query> | status]` — the project's own text,
 /// chunked and searchable. Rebuildable, so `index` is always safe to re-run.
 fn knowledge_command<'a>(app: &mut App, cwd: &Path, mut parts: impl Iterator<Item = &'a str>) {
@@ -3818,6 +3881,18 @@ fn tool_summary(name: &str, arguments: &str) -> String {
     .unwrap_or_else(|| format!("{name} {arguments}"))
 }
 
+/// What `y` on a tool row copies: the command as it ran, or the path a file
+/// tool touched. Anything else copies the row's text.
+fn tool_copy(name: &str, arguments: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let key = match name {
+        "bash" => "command",
+        "read" | "write" | "edit" | "ls" => "path",
+        _ => return None,
+    };
+    v.get(key).and_then(|x| x.as_str()).map(str::to_string)
+}
+
 /// Tab-complete the current token: `/command` in command position, or `@path`
 /// file references anywhere. Repeated Tab cycles the candidates.
 fn complete(app: &mut App, cwd: &Path, mem: &MemoryStore, config: &Config) {
@@ -3975,7 +4050,13 @@ fn render_hint(f: &mut Frame, above: Rect, ov: &Overlay) {
         .map(|(_, i)| i.description.chars().count())
         .max()
         .unwrap_or(0);
-    let width = (label_w + desc_w + 8).clamp(20, above.width.saturating_sub(2) as usize) as u16;
+    // A pane narrower than the popup's minimum gets no popup: clamp panics
+    // when its floor is above its ceiling, and typing `/` crashed the TUI.
+    let room = above.width.saturating_sub(2) as usize;
+    if room < 20 {
+        return;
+    }
+    let width = (label_w + desc_w + 8).clamp(20, room) as u16;
     let rows = (matches.len() as u16).min(8);
     let height = rows + 2;
     if above.y < height {
@@ -4377,7 +4458,7 @@ fn input_title(app: &App) -> String {
         // The single worst modal failure is not knowing which mode you are in.
         match &app.transcript.search {
             Some(s) if s.typing => format!(" NORMAL · /{} ", s.pattern),
-            _ => " NORMAL · j k · /search · y yank · i insert ".to_string(),
+            _ => " NORMAL · j k · /search · y copy · i insert ".to_string(),
         }
     } else if app.running {
         // Say that typing is useful right now. " working… " reads as "wait",
