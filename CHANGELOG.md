@@ -1,6 +1,45 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 — 2026-11-15
+
+### Added
+
+- The `grep` tool runs on ripgrep's walker: parallel, honours `.gitignore`
+  (even outside a git repo), and has no file cap. It takes optional `glob`
+  (`*.rs`) and `ignore_case`. Over 45,000 files it took 0.7 to 0.9s, where
+  bash `grep -rn` took 6.4 to 6.8s. The old walker stopped silently at 10,000
+  files and could miss matches: 2 of 8 on that tree.
+- The project's knowledge index builds in the background when a session
+  starts, so the first search does not wait for it. `[knowledge] auto-index =
+  false` turns it off. It never runs in a folder of projects, the home
+  directory, or `/`.
+- A warning, once, when a provider ignores the reasoning budget it was sent.
+  OpenRouter's qwen3.5-9b reasoned past `reasoning.max_tokens = 2000` on 24 of
+  587 calls, up to 8,329 tokens.
+
+### Changed
+
+- Knowledge search hits are headed `path:start-end` instead of a chunk number,
+  so a hit can go straight to `read`. The index is rebuilt once on upgrade.
+- The system prompt names `knowledge` with the other tools and says when to use
+  it: topic words when the file is unknown, the `grep` tool (not bash) for an
+  exact string.
+- Compaction summaries put Goal and Unfinished first, cap Locations at 15
+  lines, and get a budget of a twelfth of the window (1,024 to 3,072 tokens).
+  All ten summaries in two long POS sessions had been cut off by a flat
+  1,024-token cap before reaching what was left to do. A summary missing Goal
+  or Unfinished is rejected and the history kept. The prompt no longer assumes
+  the work is code.
+- Every reasoning budget, a number or an effort level's, is capped at three
+  quarters of the request's `max-tokens`, so a quarter stays for the answer.
+  A fixed `thinking = 2000` in a squeezed window used to leave no room for one.
+
+### Fixed
+
+- Tool calls are no longer rescued from a reply that was cut off by the token
+  limit, holds more than 8 calls, or repeats one. A 9B brainstormed 240 calls
+  as text, 112 of them `rm -f chapter.docx`, and the rescue promoted them all.
+- `.worksmith/.gitignore` keeps `knowledge.db*` out of commits.
 
 ### Removed
 

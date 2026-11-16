@@ -1,93 +1,72 @@
-# Worksmith v0.8.0
+# Worksmith v0.8.1
 
-Most of this release came out of one long session building a POS app on Qwen
-3.8 27B. It ran for two days and kept hitting the same walls: stopping every 50
-steps, reasoning until it ran out of tokens, and losing the turn whenever the
-laptop slept.
+This one is about what a model does with its time: how it finds things, and
+what it remembers when the conversation gets squeezed. Most of it came from
+going back through a month of real sessions and counting.
 
-## Long runs no longer stop every 50 steps
+## Search that models will actually use
 
-A run that was writing code stopped at 50 steps and waited for someone to type
-`continue`. That caught nothing. The checks that actually catch a lost model
-(going in circles, 50 steps with nothing written, the token budget) were
-already there.
+Since October, models in my sessions ran about 1,800 searches through bash
+(`grep -rn`, `find`, `cat`). They used Worksmith's own `grep` tool 47 times and
+the `knowledge` index 3 times. The index answered in 50 to 70 milliseconds with
+the right file when it was used. It just wasn't.
 
-Now `max-steps` is a progress check. A stretch of 50 steps that made real edits
-inside the project gets another one, up to 4 per turn. Scratch files in `/tmp`
-and edits that failed don't count. Neither does a stretch where you had to step
-in: if you sent a message mid-turn, the next check stops and asks.
+Three things were in the way:
 
-When it does stop, it stops loudly. The stop shows up like a checkpoint, the
-terminal alerts, and an empty Enter continues.
+- **The `grep` tool was slow and incomplete.** It walked one directory at a
+  time and gave up after 10,000 files without saying so. It now runs on
+  ripgrep's walker. Over 45,000 files it takes under a second and finds every
+  match, where bash `grep -rn` takes over 6 seconds and the old tool found 2 of
+  8. It skips anything in `.gitignore` and takes `glob` and `ignore_case`.
+- **Knowledge hits didn't say where they were.** A hit read `src/main.rs (chunk
+  27)`, so the model went and grepped for it anyway. Hits now read
+  `src/app/admin_login.rs:1-24`, ready to open.
+- **The prompt never pointed at it.** The first line listed every tool but
+  `knowledge`. Now it's listed, with a plain rule: topic words to `knowledge`
+  when you don't know the file, the `grep` tool for an exact string.
 
-The real bound on a turn is now a token budget of 150,000 completion tokens.
-Across 758 recorded turns, the 99th percentile used 57k and the biggest one
-that finished on its own used 100k, so this cuts nothing real and still stops a
-runaway. Set `token-budget = 0` to turn it off.
+The index also builds in the background when a session starts. Turn that off
+with `[knowledge] auto-index = false`.
 
-## `/think low` now caps reasoning
+On the 9B, asking where the admin PIN was checked went from 13 tool calls
+(including bash `find`) to 7, starting with `knowledge`. That is one run, not a
+benchmark. Your sessions over the next few weeks are the real test.
 
-On vLLM, Qwen 3.8 at `low` reasoned straight to a 6,000-token cap and returned
-nothing. The effort level only adds a sentence to the prompt telling the model
-to keep its thinking brief. On a hard problem the model ignores it.
+## Compaction keeps what's left to do
 
-`thinking_token_budget` is what the server enforces, and it held exactly at
-300, 1,000 and 2,500 tokens. So each effort level now sends one too:
+When a long session fills the window, Worksmith summarises the older part and
+carries on from the summary. In two long POS sessions, all ten summaries were
+cut off mid-sentence. The list of files came second and was told to name every
+one, so it ate the 1,024-token budget, and none of them got as far as what was
+still unfinished. After every compaction the model had lost its to-do list.
 
-| Level | Budget |
-| --- | --- |
-| `low` | 1,024 |
-| `medium` | 4,096 |
-| `high` | 8,192 |
-| `xhigh` | 16,384 |
-| `max` | no cap |
+Summaries now go Goal, Unfinished, Established, Locations, with what can't be
+re-read from disk first and the file list capped at 15 lines. The budget grows
+with the window, from 1,024 up to 3,072 tokens. A summary that comes back
+without Goal and Unfinished is thrown out and the history kept. Run against the
+same transcripts, the old prompt cut off on all three tried; the new one
+finished all three, in 1,556 to 2,105 tokens.
 
-The budget never goes above three quarters of `max-tokens`, so there's always
-room left for the answer. This only applies to providers with a
-`reasoning-budget-param`. The same question at `/think low` now stops reasoning
-at 1,023 tokens and answers.
+The prompt also stopped assuming you're writing code. A session on a book keeps
+its decisions and `chapter.md § section` locations in its own terms.
 
-Qwen 3.8 only knows `low`, `medium` and `xhigh`. Ask for `high` and the server
-says so.
+## Reasoning budgets that leave room for an answer
 
-## A laptop sleeping mid-reply no longer ends the turn
-
-The connection drops, and the error comes back as "error decoding response
-body" with "Connection reset by peer" underneath. Worksmith didn't count that as
-a temporary failure. It also refused to retry once any text was on screen, so
-the answer wouldn't print twice.
-
-Now a dropped connection is retried at any point. The partial reply comes off
-the screen first, and the retry waits 2, 4, 8 and 16 seconds, about 30 in all,
-which is long enough for wifi to come back after the laptop wakes. Nothing was
-lost before either: the partial reply was never saved, so `continue` always
-worked.
-
-## Projects stay in their own lane
-
-The POS session was started in `~/Projects`, which holds 78 repos. That
-directory had its own memory, left over from writing a novel, and the model
-went off researching the book in the middle of the POS build. Two things were
-wrong.
-
-Memory got pulled into a turn on a single shared word. A 200-word brief matched
-the novel's notes on "people", "things" and "use". Now a memory has to share
-15% of the words of the shorter text, with common words ignored.
-
-Launching in a folder of projects now gets a warning at startup, and the
-`knowledge` tool refuses to index there. Start in the project's own folder.
+- A fixed `thinking = 2000` was sent as-is even when the window left only a
+  few hundred tokens for the whole reply, and the reply came back all
+  reasoning, no answer. Every budget is now capped at three quarters of what
+  the request has room for.
+- When a provider ignores the budget, Worksmith now says so, once. OpenRouter's
+  qwen3.5-9b went past a 2,000-token budget on 24 of 587 calls, up to 8,329.
 
 ## Smaller fixes
 
-- The transcript groups by turn, with live status on each turn's row. Reasoning
-  is hidden by default; Ctrl+T shows it.
-- Checkpoint discussions label who said what.
-- When Worksmith is stuck and asks you something, the question now comes after
-  the evidence. A long tool dump used to push it off screen.
-- Filing a decision outside a git repo no longer prints git's error over the
-  input box.
-- The terminal is restored when Worksmith is killed or panics.
-- Building needs Rust 1.89 or newer, and `Cargo.toml` says so.
+- A reply cut off by the token limit no longer has tool calls fished out of
+  its unfinished thinking. A 9B once brainstormed 240 calls as text, 112 of
+  them `rm -f chapter.docx`, and every one got promoted.
+- `.worksmith/.gitignore` keeps the search index out of commits.
+- `install.sh` is gone. Build with `cargo install --path .` or use Homebrew.
+- A configuration recipes page, with every example checked by `cargo test`.
 
-No configuration changes are needed. A turn can now run to 200 steps, so if
-you want it tighter, set `max-steps` or `token-budget`.
+No configuration changes are needed. The knowledge index is rebuilt once on
+first use, which takes under a second for a typical repo.
