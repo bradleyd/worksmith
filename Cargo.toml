@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 rmcp = { version = "=3.2.0", default-features = false, features = ["client", "transport-async-rw"] }
 ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 # Already in the tree via tokio; named directly to kill a process *group*, so a
 # timed-out command cannot leave its children holding the machine.
 [target.'cfg(unix)'.dependencies]

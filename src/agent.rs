@@ -687,7 +687,37 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
         self.set_session_path(session.path().to_path_buf());
-        session.append_message(Message::user(user_input))?;
+        // `@photo.jpg` attaches the image; text files were inlined upstream.
+        let cwd = self.tool_ctx.cwd.clone();
+        let (images, unreadable) = crate::image::mentioned(user_input, &cwd);
+        for reason in unreadable {
+            self.emit(
+                session,
+                Event::Warning {
+                    message: format!("not attached: {reason}"),
+                },
+            );
+        }
+        if !images.is_empty() && !self.current().prices.vision.unwrap_or(false) {
+            let active = self.current();
+            self.emit(
+                session,
+                Event::Warning {
+                    message: format!(
+                        "{} not shown: {} is not set up for images. If it can see them, add \
+                         `vision = true` under [models.\"{}\"] in config.toml.",
+                        images
+                            .iter()
+                            .map(|i| i.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        active.model_key,
+                        active.model_key
+                    ),
+                },
+            );
+        }
+        session.append_message(Message::user(user_input).with_images(images))?;
         self.emit(
             session,
             Event::UserMessage {
@@ -1068,12 +1098,15 @@ impl Agent {
             // One mode snapshot governs both guidance and tools, including fit retries.
             let pairing = self.pairing_on();
             let tools = self.tools_for_pairing(pairing);
+            // Read per request, so a `/model` switch mid-session takes effect.
+            let vision = self.current().prices.vision.unwrap_or(false);
             let mut request_parts = request_messages(
                 system_prompt,
                 pairing,
                 &self.tool_ctx,
                 memory_context,
                 session,
+                vision,
             );
 
             // Never ask for more output than the window can hold. The server
@@ -1159,6 +1192,7 @@ impl Agent {
                         &self.tool_ctx,
                         memory_context,
                         session,
+                        vision,
                     );
                     let room = active
                         .context_limit
@@ -1312,6 +1346,9 @@ impl Agent {
 
             // Execute tool calls and feed results back.
             let mut blocked: Option<String> = None;
+            // Images a tool returned (`read` on a photo). A tool result is text
+            // on the wire, so they follow the step's results as one message.
+            let mut step_images: Vec<crate::image::Image> = Vec::new();
             let mut checkpoint_intervened = false;
             for call in &completion.tool_calls {
                 self.emit(
@@ -1383,6 +1420,7 @@ impl Agent {
                                     tools.iter().find(|def| def.name == call.name),
                                 )
                                 .await;
+                            step_images.extend(o.images);
                             (
                                 !o.is_error,
                                 o.fatal,
@@ -1431,6 +1469,13 @@ impl Agent {
                     blocked = Some(content);
                     break;
                 }
+            }
+            if !step_images.is_empty() && blocked.is_none() {
+                let names: Vec<&str> = step_images.iter().map(|i| i.name.as_str()).collect();
+                session.append_message(
+                    Message::user(format!("The image(s) you opened: {}.", names.join(", ")))
+                        .with_images(step_images),
+                )?;
             }
             if cancel.is_cancelled() {
                 return Ok(IdleReason::Aborted);
@@ -2141,12 +2186,52 @@ fn with_loaded_skills(system_prompt: &str, ctx: &ToolContext) -> SystemPromptPar
     }
 }
 
+/// Images sent per request. Older ones become a one-line note: a photo costs
+/// about a thousand tokens and would otherwise ride every request for the rest
+/// of the session.
+const IMAGES_PER_REQUEST: usize = 3;
+
+/// Decide, per request, which images actually go out. Session history keeps
+/// them all; this only shapes what the model is sent.
+fn prepare_images(messages: &mut [Message], vision: bool) {
+    let mut kept = 0usize;
+    for m in messages.iter_mut().rev() {
+        if m.images.is_empty() {
+            continue;
+        }
+        let mut notes = Vec::new();
+        m.images.retain(|img| {
+            if !vision {
+                notes.push(img.placeholder(
+                    "not shown: this model is not set up for images (vision = true in its \
+                     [models] block if it can see them)",
+                ));
+                false
+            } else if kept < IMAGES_PER_REQUEST {
+                kept += 1;
+                true
+            } else {
+                notes.push(img.placeholder("shown earlier; `read` it again to look"));
+                false
+            }
+        });
+        if !notes.is_empty() {
+            let text = m.content.get_or_insert_with(String::new);
+            for note in notes {
+                text.push('\n');
+                text.push_str(&note);
+            }
+        }
+    }
+}
+
 fn request_messages(
     system_prompt: &str,
     pairing: bool,
     ctx: &ToolContext,
     memory_context: Option<&MemoryContext>,
     session: &Session,
+    vision: bool,
 ) -> RequestParts {
     let mut messages = Vec::with_capacity(session.messages().len() + 2);
     let mut breakdown = ContextBreakdown::default();
@@ -2172,18 +2257,19 @@ fn request_messages(
         breakdown.memory_tokens = text_tokens(&memory.text);
         messages.push(Message::user(memory.text.clone()));
     }
-    let latest_user = session
-        .messages()
+    let mut history = session.messages().to_vec();
+    prepare_images(&mut history, vision);
+    let latest_user = history
         .iter()
         .rposition(|m| matches!(m.role, crate::llm::Role::User));
-    for (idx, message) in session.messages().iter().enumerate() {
-        let tokens = tokens_u32(message_tokens(message));
+    for (idx, message) in history.into_iter().enumerate() {
+        let tokens = tokens_u32(message_tokens(&message));
         if Some(idx) == latest_user {
             breakdown.latest_user_tokens = breakdown.latest_user_tokens.saturating_add(tokens);
         } else {
             breakdown.history_tokens = breakdown.history_tokens.saturating_add(tokens);
         }
-        messages.push(message.clone());
+        messages.push(message);
     }
     RequestParts {
         messages,
@@ -2384,16 +2470,7 @@ fn compaction_trigger(context_limit: usize) -> usize {
 /// Rough token estimate (~4 chars/token) over messages: content + tool-call
 /// arguments. Good enough to decide when to compact.
 fn estimate_tokens(messages: &[Message]) -> usize {
-    let mut chars = 0usize;
-    for m in messages {
-        if let Some(c) = &m.content {
-            chars += c.len();
-        }
-        for tc in &m.tool_calls {
-            chars += tc.name.len() + tc.arguments.len();
-        }
-    }
-    chars / 4
+    messages.iter().map(message_tokens).sum()
 }
 
 fn estimate_tool_schema_tokens(tools: &[ToolDef]) -> usize {
@@ -2475,7 +2552,7 @@ fn message_tokens(m: &Message) -> usize {
     for tc in &m.tool_calls {
         chars += tc.name.len() + tc.arguments.len();
     }
-    chars / 4
+    chars / 4 + m.images.iter().map(|i| i.est_tokens()).sum::<usize>()
 }
 
 /// Pull the real numbers out of a context-length rejection.

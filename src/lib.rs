@@ -8,6 +8,7 @@ pub mod check;
 pub mod config;
 pub mod event;
 pub mod fanout;
+pub mod image;
 pub mod knowledge;
 pub mod llm;
 pub mod mcp;

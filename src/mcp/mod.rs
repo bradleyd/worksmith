@@ -774,6 +774,7 @@ fn store_result(state: &mut State, content: String, is_error: bool) -> ToolOutpu
             content,
             is_error,
             fatal: false,
+            images: Vec::new(),
         };
     }
     let length = content.len();
@@ -791,6 +792,7 @@ fn store_result(state: &mut State, content: String, is_error: bool) -> ToolOutpu
             ),
             is_error,
             fatal: false,
+            images: Vec::new(),
         },
         Err(error) => ToolOutput::error(format!(
             "{excerpt}\n[result {length} bytes; storage unavailable: {error}; do not replay a mutation to recover omitted content]"

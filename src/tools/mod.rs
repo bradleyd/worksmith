@@ -198,6 +198,9 @@ pub struct ToolOutput {
     pub is_error: bool,
     /// If true, the whole turn is aborted (e.g. a refused destructive command).
     pub fatal: bool,
+    /// Images for the model to look at. A tool result can only carry text on
+    /// the wire, so the agent shows these in a message after the step's results.
+    pub images: Vec<crate::image::Image>,
 }
 
 impl ToolOutput {
@@ -206,6 +209,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: false,
             fatal: false,
+            images: Vec::new(),
         }
     }
     pub fn error(content: impl Into<String>) -> Self {
@@ -213,6 +217,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: true,
             fatal: false,
+            images: Vec::new(),
         }
     }
     /// A hard stop: the command was refused and the turn should end immediately.
@@ -221,7 +226,13 @@ impl ToolOutput {
             content: content.into(),
             is_error: true,
             fatal: true,
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<crate::image::Image>) -> Self {
+        self.images = images;
+        self
     }
 }
 

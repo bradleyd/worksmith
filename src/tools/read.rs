@@ -38,6 +38,18 @@ impl Tool for ReadTool {
         if let Some(refusal) = super::approve_read_outside_cwd(ctx, &full).await {
             return ToolOutput::error(refusal);
         }
+        // An image is looked at, not read: it comes back for the model to see
+        // (the agent decides whether this model can).
+        if crate::image::is_image_path(&full) {
+            return match crate::image::Image::load(&full, path) {
+                Ok(img) => ToolOutput::ok(format!(
+                    "{path}: image, {}×{} after shrinking. It is shown to you in the next message.",
+                    img.width, img.height
+                ))
+                .with_images(vec![img]),
+                Err(e) => ToolOutput::error(format!("{e:#}")),
+            };
+        }
         let text = match std::fs::read_to_string(&full) {
             Ok(t) => t,
             Err(e) => return ToolOutput::error(format!("cannot read {}: {e}", full.display())),

@@ -62,6 +62,11 @@ pub struct Message {
     /// provider's log files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Images shown to the model with this message, already shrunk. Whether
+    /// they are sent at all is the request builder's call: a text-only model,
+    /// or an image well behind the current turn, gets a one-line note instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::image::Image>,
 }
 
 impl Message {
@@ -75,6 +80,7 @@ impl Message {
             reasoning: None,
             finish_reason: None,
             model: None,
+            images: vec![],
         }
     }
     pub fn user(text: impl Into<String>) -> Self {
@@ -87,6 +93,7 @@ impl Message {
             reasoning: None,
             finish_reason: None,
             model: None,
+            images: vec![],
         }
     }
     pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -99,6 +106,7 @@ impl Message {
             reasoning: None,
             finish_reason: None,
             model: None,
+            images: vec![],
         }
     }
     pub fn tool_result(
@@ -115,7 +123,13 @@ impl Message {
             reasoning: None,
             finish_reason: None,
             model: None,
+            images: vec![],
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<crate::image::Image>) -> Self {
+        self.images = images;
+        self
     }
 
     /// Attach the provider's reasoning trace and finish reason. Transcript-only

@@ -232,6 +232,10 @@ pub struct ModelSettings {
     /// a 32k model waits for a trigger the server rejects the request long
     /// before reaching.
     pub context: Option<usize>,
+    /// The model can look at images. Off unless set: a text-only model
+    /// rejects a request that carries one, so images are only sent where this
+    /// says they are understood.
+    pub vision: Option<bool>,
 }
 
 impl ModelSettings {
@@ -260,6 +264,9 @@ impl ModelSettings {
         }
         if other.top_k.is_some() {
             self.top_k = other.top_k;
+        }
+        if other.vision.is_some() {
+            self.vision = other.vision;
         }
         if other.context.is_some() {
             self.context = other.context;
@@ -1204,6 +1211,7 @@ mod tests {
             top-p = 0.11
             top-k = 11
             context = 11111
+            vision = true
             "#,
         )
         .expect("the fixture itself must parse");

@@ -526,6 +526,17 @@ fn message_to_json(m: &Message) -> serde_json::Value {
     let mut obj = serde_json::json!({ "role": role_str(m.role) });
     // Content is always present (null allowed) except we keep it simple.
     obj["content"] = match &m.content {
+        Some(c) if !m.images.is_empty() => {
+            // The OpenAI vision layout: text first, then each image.
+            let mut parts = vec![serde_json::json!({ "type": "text", "text": c })];
+            for img in &m.images {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": img.data_url() }
+                }));
+            }
+            serde_json::Value::Array(parts)
+        }
         Some(c) => serde_json::json!(c),
         None => serde_json::Value::Null,
     };
@@ -823,6 +834,35 @@ impl Accumulator {
             usage,
             finish_reason: self.finish_reason,
         }
+    }
+}
+
+#[cfg(test)]
+mod image_wire_tests {
+    use super::*;
+
+    #[test]
+    fn a_message_with_images_goes_out_in_the_vision_layout() {
+        let img = crate::image::Image {
+            name: "closet.jpg".into(),
+            mime: "image/jpeg".into(),
+            data: "AAAA".into(),
+            width: 2,
+            height: 2,
+        };
+        let wire = message_to_json(&Message::user("what goes with this?").with_images(vec![img]));
+        assert_eq!(
+            wire["content"][0],
+            serde_json::json!({"type": "text", "text": "what goes with this?"})
+        );
+        assert_eq!(wire["content"][1]["type"], "image_url");
+        assert_eq!(
+            wire["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,AAAA"
+        );
+        // No images: content stays a plain string, so text-only requests are
+        // byte-for-byte what they were.
+        assert_eq!(message_to_json(&Message::user("hi"))["content"], "hi");
     }
 }
 
