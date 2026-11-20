@@ -153,10 +153,12 @@ pub fn mentioned(text: &str, cwd: &Path) -> (Vec<Image>, Vec<String>) {
             continue;
         };
         let name = name.trim_end_matches([',', '.', ';', ':', ')', '?', '!']);
-        let path = if Path::new(name).is_absolute() {
-            Path::new(name).to_path_buf()
-        } else {
-            cwd.join(name)
+        // `@~/Desktop/shot.png` is how a person names a file outside the
+        // project; without expanding it the image was silently not attached.
+        let path = match (name.strip_prefix("~/"), dirs::home_dir()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ if Path::new(name).is_absolute() => Path::new(name).to_path_buf(),
+            _ => cwd.join(name),
         };
         if !is_image_path(&path) || !path.is_file() {
             continue;
@@ -242,6 +244,17 @@ mod tests {
         assert_eq!(imgs[0].name, "shirt.png");
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("broken.jpg"), "{errs:?}");
+    }
+
+    #[test]
+    fn a_home_relative_mention_is_found() {
+        let home = dirs::home_dir().unwrap();
+        let dir = tempfile::tempdir_in(&home).unwrap();
+        std::fs::write(dir.path().join("doll.png"), png(8, 8, 255)).unwrap();
+        let rel = dir.path().strip_prefix(&home).unwrap().join("doll.png");
+        let (imgs, errs) = mentioned(&format!("view @~/{}", rel.display()), Path::new("/"));
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(imgs.len(), 1);
     }
 
     #[test]
