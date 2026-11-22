@@ -952,11 +952,17 @@ async fn run_loop(
     let session = Arc::new(AsyncMutex::new(session));
     let mem = MemoryStore::open(Some(&cwd)).or_else(|_| MemoryStore::open(None))?;
     // Workers may run on a cheaper model than the session (`agents.model`).
+    // Shown in the transcript once the app exists: an `eprintln!` here lands
+    // on top of the drawn screen, in the input box, half cut off.
+    let mut worker_model_error = None;
     let worker_model = match config.agents_model() {
         Some(spec) => match ModelOverride::resolve(&config, spec) {
             Ok(m) => Some(m),
             Err(e) => {
-                eprintln!("agents.model `{spec}` is unusable: {e:#}");
+                worker_model_error = Some(format!(
+                    "agents.model `{spec}` is unusable: {e:#}. Workers and review use the \
+                     session's model until it is fixed."
+                ));
                 None
             }
         },
@@ -996,6 +1002,9 @@ async fn run_loop(
             Kind::Error,
             crate::config::folder_of_projects_warning(&cwd, repos),
         );
+    }
+    if let Some(e) = worker_model_error {
+        app.push(Kind::Error, e);
     }
     if agent.review_on() {
         app.push(Kind::Notice, review_status(&agent, true));

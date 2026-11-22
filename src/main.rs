@@ -482,7 +482,14 @@ async fn run(args: Args) -> Result<()> {
     )
     .with_thinking(thinking)
     .with_pairing(config.pair() && mode == OutputMode::Tui)
-    .with_review(config.review(), reviewer_model(&config))
+    .with_review(
+        config.review(),
+        // The REPL and the TUI report a bad `agents.model` themselves.
+        reviewer_model(
+            &config,
+            matches!(mode, OutputMode::Print | OutputMode::Json),
+        ),
+    )
     .with_token_budget(config.token_budget());
 
     // Validation command: --until overrides the configured default.
@@ -1734,14 +1741,19 @@ fn print_memories(mem: &MemoryStore, scope: Option<Scope>) {
 
 /// The reviewer runs on the worker model when one is configured: cheaper, and
 /// a different model than the one being checked.
-fn reviewer_model(config: &Config) -> Option<worksmith::llm::ModelOverride> {
+///
+/// `warn` is false under the TUI, which reports a bad `agents.model` in its own
+/// transcript: printing here as well lands on the screen it is about to draw.
+fn reviewer_model(config: &Config, warn: bool) -> Option<worksmith::llm::ModelOverride> {
     let spec = config.agents_model()?;
     match worksmith::llm::ModelOverride::resolve(config, spec) {
         Ok(m) => Some(m),
         Err(e) => {
-            eprintln!(
-                "agents.model `{spec}` is unusable for review: {e:#}; reviewing on the session model"
-            );
+            if warn && config.review() {
+                eprintln!(
+                    "agents.model `{spec}` is unusable for review: {e:#}; reviewing on the session model"
+                );
+            }
             None
         }
     }
