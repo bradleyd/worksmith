@@ -440,6 +440,7 @@ async fn run(args: Args) -> Result<()> {
     )
     .with_thinking(thinking)
     .with_pairing(config.pair() && mode == OutputMode::Tui)
+    .with_review(config.review(), reviewer_model(&config))
     .with_token_budget(config.token_budget());
 
     // Validation command: --until overrides the configured default.
@@ -1680,6 +1681,21 @@ fn print_memories(mem: &MemoryStore, scope: Option<Scope>) {
             }
         }
         Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+/// The reviewer runs on the worker model when one is configured: cheaper, and
+/// a different model than the one being checked.
+fn reviewer_model(config: &Config) -> Option<worksmith::llm::ModelOverride> {
+    let spec = config.agents_model()?;
+    match worksmith::llm::ModelOverride::resolve(config, spec) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!(
+                "agents.model `{spec}` is unusable for review: {e:#}; reviewing on the session model"
+            );
+            None
+        }
     }
 }
 

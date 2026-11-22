@@ -135,6 +135,13 @@ context-limit = 128000      # approx model context (tokens); compact at 75%
 # background task, and a fan-out of five would queue five questions behind one
 # composer.
 # pair = true
+# When a turn that changed files is about to finish, an independent model call
+# (the [agents] model when set, else this one) reads your request and the diff,
+# not the conversation, and may send the work back once with up to five
+# concrete problems. A model checking its own work approves almost all of it;
+# a separate reviewer on the changes is what measured well. Off by default
+# until measured here. `/review` toggles it for a session. Needs a git repo.
+# review = true
 keep-recent-turns = 6       # turns kept verbatim when compacting
 # How much does the model reason before answering? Unset leaves the provider's
 # default. "off" is fast mode ("feeling lucky"): measured at 101 completion
@@ -295,8 +302,8 @@ insert-escape-ms = 300
 # message attaches the photo, and the `read` tool opens image files for the
 # model to see. Off unless set, because a text-only model rejects a request
 # that carries an image; without it, images become a one-line note instead.
-# Images are shrunk to 1024 pixels on the longest side, and only the three
-# newest are sent with each request.
+# Images are shrunk to about two megapixels (roughly 2000 tokens each), and
+# only the three newest are sent with each request.
 #
 # [models."vllm/qwen38"]
 # vision = true

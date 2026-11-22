@@ -193,6 +193,11 @@ pub struct AgentConfig {
     /// default: it is an interrupt, and an interrupt nobody asked for is a
     /// nuisance. `/pair` toggles it for a session.
     pub pair: Option<bool>,
+    /// Review a turn's changes before it is called done: an independent model
+    /// call (the `[agents] model` when set) reads the request and the diff and
+    /// may send the agent back once. Off by default until it is measured.
+    /// `/review` toggles it for a session.
+    pub review: Option<bool>,
 }
 
 /// `thinking = "off"`, `thinking = "on"`, or `thinking = 2000`. TOML gives us
@@ -498,6 +503,7 @@ impl Config {
         );
         take(&mut self.agent.thinking, other.agent.thinking);
         take(&mut self.agent.pair, other.agent.pair);
+        take(&mut self.agent.review, other.agent.review);
         take(&mut self.decisions_dir, other.decisions_dir);
         take(
             &mut self.tools.bash_timeout_secs,
@@ -591,6 +597,10 @@ impl Config {
     /// Whether pairing checkpoints start switched on.
     pub fn pair(&self) -> bool {
         self.agent.pair.unwrap_or(false)
+    }
+
+    pub fn review(&self) -> bool {
+        self.agent.review.unwrap_or(false)
     }
 
     pub fn keep_recent_turns(&self) -> usize {
@@ -1175,6 +1185,7 @@ mod tests {
             keep-recent-turns = 11
             thinking = 111
             pair = true
+            review = true
 
             [agents]
             max = 11

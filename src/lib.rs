@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod mining;
 pub mod prompt;
 pub mod report;
+pub mod review;
 pub mod session;
 pub mod skill;
 pub mod supervisor;

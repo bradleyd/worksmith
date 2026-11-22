@@ -59,7 +59,7 @@ fn uuid(value: &str) -> Result<()> {
     );
     Ok(())
 }
-async fn git(
+pub(crate) async fn git(
     root: &Path,
     args: &[&str],
     index: Option<&Path>,

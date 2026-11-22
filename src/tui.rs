@@ -186,6 +186,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "stop at decisions so you learn the code being written",
     ),
     (
+        "/review",
+        "check each finished turn's diff against your request",
+    ),
+    (
         "/mouse",
         "wheel scrolls the transcript (off: the terminal keeps the wheel)",
     ),
@@ -2281,6 +2285,7 @@ MODEL
   /think [on|off|auto|low|high|<n>]   how hard to think: a level or a token budget
   /route [throughput|latency|price]   which provider serves you (OpenRouter)
   /model [provider/model|default]     switch model for this session (or list)
+  /review [on|off]                    check each finished turn's diff against your request
   /pair [on|off]                      stop at decisions: ask you, tell you why,
                                       or hand you the hard part. Main loop only —
                                       spawned workers never interrupt you.
@@ -2500,6 +2505,7 @@ Ids accept any unique prefix, and Tab completes them. @path includes a file."
         "think" => think_command(app, agent, parts),
         "trust" => trust_command(app, cwd, parts),
         "pair" => pair_command(app, agent, parts),
+        "review" => review_command(app, agent, parts),
         "route" => route_command(app, agent, parts),
         "model" => {
             // A session-scoped switch: it retargets the running agent and the
@@ -2590,6 +2596,33 @@ fn pair_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Item 
             app.push(Kind::Notice, pair_status(false));
         }
         Some(other) => app.push(Kind::Error, format!("usage: /pair [on|off] (got {other})")),
+    }
+}
+
+fn review_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Item = &'a str>) {
+    match parts.next() {
+        None => app.push(Kind::Notice, review_status(agent.review_on())),
+        Some("on") => {
+            agent.set_review(true);
+            app.push(Kind::Notice, review_status(true));
+        }
+        Some("off") => {
+            agent.set_review(false);
+            app.push(Kind::Notice, review_status(false));
+        }
+        Some(other) => app.push(
+            Kind::Error,
+            format!("usage: /review [on|off] (got {other})"),
+        ),
+    }
+}
+
+fn review_status(on: bool) -> &'static str {
+    if on {
+        "review on — a turn that changed files is checked against your request before it \
+         finishes (from the next turn)"
+    } else {
+        "review off — turns finish when the model says so"
     }
 }
 

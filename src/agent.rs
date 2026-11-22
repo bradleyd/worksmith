@@ -292,6 +292,15 @@ pub struct Agent {
     ///
     /// Unlike `route`, a fork does **not** share this. See `fork_with`.
     pairing: Arc<AtomicBool>,
+    /// Review a turn's diff before calling it done (`[agent] review`,
+    /// `/review`). Shared with the front end that toggles it; a fork never
+    /// reviews, since workers have their own checks and a review per worker
+    /// multiplies the cost.
+    review: Arc<AtomicBool>,
+    /// The model the reviewer runs on: `[agents] model` when set, so the check
+    /// is cheap and independent of the session's model. `None` uses the
+    /// session's own.
+    reviewer: Option<crate::llm::ModelOverride>,
     /// The provider's prompt-token count for the most recent completion — what
     /// the next request will cost, as opposed to what we estimate it costs.
     last_prompt_tokens: AtomicU32,
@@ -343,6 +352,8 @@ impl Agent {
             thinking: ThinkingMode::default(),
             route: Arc::new(Mutex::new(None)),
             pairing: Arc::new(AtomicBool::new(false)),
+            review: Arc::new(AtomicBool::new(false)),
+            reviewer: None,
             last_prompt_tokens: AtomicU32::new(0),
             rescued_calls: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -359,6 +370,22 @@ impl Agent {
     pub fn with_pairing(mut self, on: bool) -> Self {
         self.pairing = Arc::new(AtomicBool::new(on));
         self
+    }
+
+    /// Turn the end-of-turn review on, run by `reviewer` (or the session's
+    /// model when `None`).
+    pub fn with_review(mut self, on: bool, reviewer: Option<crate::llm::ModelOverride>) -> Self {
+        self.review = Arc::new(AtomicBool::new(on));
+        self.reviewer = reviewer;
+        self
+    }
+
+    pub fn review_on(&self) -> bool {
+        self.review.load(Ordering::Relaxed)
+    }
+
+    pub fn set_review(&self, on: bool) {
+        self.review.store(on, Ordering::Relaxed);
     }
 
     /// Ask the model to skip its reasoning pass. On a small Qwen this is the
@@ -657,6 +684,8 @@ impl Agent {
             // Not `self.pairing.clone()`: `/pair` in the session must not start
             // interrupting background work, and a worker must never inherit it.
             pairing: Arc::new(AtomicBool::new(false)),
+            review: Arc::new(AtomicBool::new(false)),
+            reviewer: None,
             // Its own context, so its own accounting.
             last_prompt_tokens: AtomicU32::new(0),
             rescued_calls: std::sync::atomic::AtomicUsize::new(0),
@@ -767,6 +796,14 @@ impl Agent {
         // clamp a context limit the current prompt was not built for. It lands
         // on the next turn.
         let active = self.current();
+        // What the tree looked like before this turn, for the review's diff.
+        // Taken only when reviewing, and outside git there is nothing to diff.
+        let before = if self.review_on() {
+            crate::review::snapshot(&self.tool_ctx.cwd).await
+        } else {
+            None
+        };
+        let mut reviewed = false;
 
         let outcome = loop {
             let idle = self
@@ -907,6 +944,14 @@ impl Agent {
                 IdleReason::Blocked(r) => break TurnOutcome::Blocked(r),
                 IdleReason::ModelDone => {
                     let Some(v) = validator else {
+                        if !reviewed
+                            && self
+                                .review_asks_for_changes(session, user_input, &before)
+                                .await?
+                        {
+                            reviewed = true;
+                            continue;
+                        }
                         break TurnOutcome::Done;
                     };
 
@@ -927,6 +972,16 @@ impl Agent {
                         },
                     );
                     if passed {
+                        // The check passed; now the reviewer, once. A revision
+                        // goes round the loop again, so the check re-runs on it.
+                        if !reviewed
+                            && self
+                                .review_asks_for_changes(session, user_input, &before)
+                                .await?
+                        {
+                            reviewed = true;
+                            continue;
+                        }
                         break TurnOutcome::Done;
                     } else {
                         if retries_left == 0 {
@@ -1023,6 +1078,87 @@ impl Agent {
             text: final_text,
             outcome,
         })
+    }
+
+    /// Run the end-of-turn review. True when the reviewer asked for changes and
+    /// its findings were handed to the agent, so the turn should keep going.
+    /// Every failure along the way ends in `false`: a review that cannot run
+    /// must never hold a finished turn hostage.
+    async fn review_asks_for_changes(
+        &self,
+        session: &mut Session,
+        asked: &str,
+        before: &Option<crate::review::Snapshot>,
+    ) -> Result<bool> {
+        if !self.review_on() {
+            return Ok(false);
+        }
+        let Some(before) = before else {
+            return Ok(false);
+        };
+        let Some(after) = crate::review::snapshot(&self.tool_ctx.cwd).await else {
+            return Ok(false);
+        };
+        let active = match &self.reviewer {
+            Some(o) => ActiveModel::from(o.clone()),
+            None => self.current(),
+        };
+        // Leave room for the request, the prompt and the answer.
+        let max_chars = (active.context_limit / 2).saturating_mul(3).max(8_000);
+        let diff = crate::review::diff(before, &after, max_chars).await;
+        if diff.is_empty() {
+            return Ok(false);
+        }
+        let reviewer = active.model_key.clone();
+        let answer = self
+            .ask_on(
+                active,
+                crate::review::REVIEW_PROMPT,
+                &crate::review::request(asked, &diff),
+                // The 27B reasons in prose before its verdict (about 600 tokens
+                // on a small change); a cut-off answer has no verdict and
+                // counts as a pass, so leave room.
+                2_048,
+            )
+            .await;
+        let review = match answer {
+            Ok(text) => crate::review::parse(&text),
+            Err(e) => {
+                self.emit(
+                    session,
+                    Event::Warning {
+                        message: format!("review skipped: {}", truncate_error(&e)),
+                    },
+                );
+                return Ok(false);
+            }
+        };
+        // Recorded either way, so how often it fires and what it finds can be
+        // counted from sessions.
+        self.emit(
+            session,
+            Event::Nudge {
+                reason: if review.revise {
+                    format!(
+                        "review ({reviewer}): {} finding(s)\n{}",
+                        review.findings.len(),
+                        review
+                            .findings
+                            .iter()
+                            .map(|f| format!("- {f}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                } else {
+                    format!("review ({reviewer}): pass")
+                },
+            },
+        );
+        if !review.revise {
+            return Ok(false);
+        }
+        session.append_message(Message::user(crate::review::directive(&review)))?;
+        Ok(true)
     }
 
     /// Inner loop: run model↔tool steps until the model stops calling tools,
@@ -1905,7 +2041,18 @@ impl Agent {
     /// the call structurally impossible to satisfy, and it comes back empty
     /// every time. That is how memory extraction silently produced nothing.
     pub async fn ask(&self, system: &str, user: &str, max_tokens: u32) -> Result<String> {
-        let active = self.current();
+        self.ask_on(self.current(), system, user, max_tokens).await
+    }
+
+    /// `ask`, on a model other than the session's: the reviewer runs on the
+    /// worker model when one is configured.
+    async fn ask_on(
+        &self,
+        active: ActiveModel,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
         let req = ChatRequest {
             model: active.model.clone(),
             messages: vec![Message::system(system), Message::user(user)],
