@@ -117,6 +117,16 @@ fn write_decision(ctx: &ToolContext, subject: &str, question: &str, answer: &str
     }
 }
 
+/// The answer already given to this subject, if any. Keyed on the subject
+/// because a repeat rewords the question and keeps the title.
+fn settled_answer(ctx: &ToolContext, subject: &str) -> Option<String> {
+    let settled = ctx.settled.lock().unwrap();
+    settled
+        .iter()
+        .find(|(s, _)| s.eq_ignore_ascii_case(subject))
+        .map(|(_, a)| a.clone())
+}
+
 #[async_trait]
 impl Tool for CheckpointTool {
     fn name(&self) -> &str {
@@ -178,6 +188,18 @@ impl Tool for CheckpointTool {
             return ToolOutput::error("checkpoint needs both `subject` and `detail`");
         }
 
+        // Asked and answered already: hand back the answer, not the user.
+        // Before the cap, so a repeat costs nothing and is never the call
+        // that gets declined into "decide it yourself".
+        if kind == "ask"
+            && let Some(answer) = settled_answer(ctx, subject)
+        {
+            return ToolOutput::ok(format!(
+                "You already asked this, and the user answered: {answer}\n\n\
+                 It is settled and they were not asked again. Build that."
+            ));
+        }
+
         // The cap is spent by every kind, not just the blocking one: three
         // notes in a turn is the same chattiness that teaches the user to stop
         // reading them.
@@ -206,6 +228,10 @@ impl Tool for CheckpointTool {
                 )),
                 Some(answer) if !answer.trim().is_empty() => {
                     let filed = write_decision(ctx, subject, detail, answer.trim());
+                    ctx.settled
+                        .lock()
+                        .unwrap()
+                        .push((subject.to_string(), answer.trim().to_string()));
                     ToolOutput::ok(format!(
                         "The user answered: {}\n\nBuild that. Decision {filed}.",
                         answer.trim()
@@ -302,12 +328,67 @@ mod tests {
         assert!(!tmp.path().join("decisions").exists());
     }
 
+    /// Counts how often the user was actually interrupted.
+    struct Counting(AtomicUsize);
+
+    #[async_trait]
+    impl Asker for Counting {
+        async fn ask_text(&self, _s: &str, _q: &str) -> Option<String> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some("a".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_question_already_answered_is_not_put_to_the_user_again() {
+        // Seen live: a 27B asked, got "a", worked twelve minutes, re-derived
+        // the task from the top and asked the identical question again.
+        let tmp = tempfile::tempdir().unwrap();
+        let asker = Arc::new(Counting(AtomicUsize::new(0)));
+        let c = ctx(tmp.path(), asker.clone());
+        CheckpointTool.run(args("ask"), &c).await;
+        let left = c.checkpoints_left.load(Ordering::Relaxed);
+
+        let reworded =
+            json!({"kind": "ask", "subject": "pin the worker model", "detail": "so, pin?"});
+        let out = CheckpointTool.run(reworded, &c).await;
+        assert!(!out.is_error);
+        assert!(
+            out.content.contains("the user answered: a"),
+            "{}",
+            out.content
+        );
+        assert_eq!(asker.0.load(Ordering::Relaxed), 1, "asked once");
+        assert_eq!(
+            c.checkpoints_left.load(Ordering::Relaxed),
+            left,
+            "a repeat is free"
+        );
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("decisions"))
+                .unwrap()
+                .count(),
+            1,
+            "one decision, one record"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_question_back_from_the_user_settles_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path(), Arc::new(Answers("Why would we pin it?")));
+        CheckpointTool.run(args("ask"), &c).await;
+        assert!(c.settled.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn records_are_numbered_in_the_order_they_were_taken() {
         let tmp = tempfile::tempdir().unwrap();
         let c = ctx(tmp.path(), Arc::new(Answers("yes")));
-        for _ in 0..2 {
-            CheckpointTool.run(args("ask"), &c).await;
+        // Two subjects: the same one twice is a repeat, and is not asked.
+        for subject in ["Pin the worker model", "Retarget on fork"] {
+            let a = json!({"kind": "ask", "subject": subject, "detail": "which?"});
+            CheckpointTool.run(a, &c).await;
         }
         let mut names: Vec<String> = std::fs::read_dir(tmp.path().join("decisions"))
             .unwrap()
@@ -316,10 +397,7 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            vec![
-                "0001-pin-the-worker-model.md",
-                "0002-pin-the-worker-model.md"
-            ]
+            vec!["0001-pin-the-worker-model.md", "0002-retarget-on-fork.md"]
         );
     }
 

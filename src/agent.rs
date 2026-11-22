@@ -781,6 +781,8 @@ impl Agent {
         self.tool_ctx
             .checkpoints_left
             .store(crate::tools::CHECKPOINTS_PER_TURN, Ordering::Relaxed);
+        // A new message from the user can reopen anything they settled.
+        self.tool_ctx.settled.lock().unwrap().clear();
 
         let mut final_text = String::new();
         let mut retries_left = self.max_retries;

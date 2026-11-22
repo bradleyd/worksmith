@@ -77,6 +77,11 @@ pub struct ToolContext {
     /// and cannot ignore a tool that declines the fourth call. Reset per turn
     /// by the agent.
     pub checkpoints_left: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Questions the user has already answered this turn, as (subject,
+    /// answer). A 27B that reasons to its cap re-derives the task from the
+    /// top and asks the same thing again twelve minutes later; the tool hands
+    /// back the answer instead of the user. Reset per turn by the agent.
+    pub settled: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// Where decisions are filed, relative to `cwd` unless absolute
     /// (`decisions-dir`, default `.worksmith/decisions`).
     pub decisions_dir: PathBuf,
@@ -103,6 +108,7 @@ impl Default for ToolContext {
             checkpoints_left: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
                 CHECKPOINTS_PER_TURN,
             )),
+            settled: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             decisions_dir: PathBuf::from(".worksmith/decisions"),
         }
     }
