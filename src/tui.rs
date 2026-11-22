@@ -997,6 +997,9 @@ async fn run_loop(
             crate::config::folder_of_projects_warning(&cwd, repos),
         );
     }
+    if agent.review_on() {
+        app.push(Kind::Notice, review_status(&agent, true));
+    }
     if !crate::config::load_project_instructions(&cwd)
         .trim()
         .is_empty()
@@ -2601,14 +2604,14 @@ fn pair_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Item 
 
 fn review_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Item = &'a str>) {
     match parts.next() {
-        None => app.push(Kind::Notice, review_status(agent.review_on())),
+        None => app.push(Kind::Notice, review_status(agent, agent.review_on())),
         Some("on") => {
             agent.set_review(true);
-            app.push(Kind::Notice, review_status(true));
+            app.push(Kind::Notice, review_status(agent, true));
         }
         Some("off") => {
             agent.set_review(false);
-            app.push(Kind::Notice, review_status(false));
+            app.push(Kind::Notice, review_status(agent, false));
         }
         Some(other) => app.push(
             Kind::Error,
@@ -2617,12 +2620,15 @@ fn review_command<'a>(app: &mut App, agent: &Agent, mut parts: impl Iterator<Ite
     }
 }
 
-fn review_status(on: bool) -> &'static str {
+fn review_status(agent: &Agent, on: bool) -> String {
     if on {
-        "review on — a turn that changed files is checked against your request before it \
-         finishes (from the next turn)"
+        format!(
+            "review on — a turn that changed files is checked against your request before it \
+             finishes (from the next turn); {}.",
+            agent.reviewer_note()
+        )
     } else {
-        "review off — turns finish when the model says so"
+        "review off — turns finish when the model says so".into()
     }
 }
 

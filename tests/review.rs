@@ -281,3 +281,38 @@ async fn a_broken_reviewer_never_holds_the_turn() {
     .await;
     assert!(matches!(r.outcome, TurnOutcome::Done), "{:?}", r.outcome);
 }
+
+#[test]
+fn the_person_is_told_who_reviews() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Agent::new(
+        Arc::new(Script {
+            steps: Mutex::new(VecDeque::new()),
+            reviews: Mutex::new(VecDeque::new()),
+            reviewer_saw: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(ToolRegistry::with_builtins()),
+        EventBus::new(),
+        "mock".into(),
+        None,
+        None,
+        20,
+        3,
+        3,
+        100_000,
+        4,
+        ToolContext {
+            cwd: dir.path().to_path_buf(),
+            ..Default::default()
+        },
+    )
+    .with_accounting("vllm/qwen38".into(), Default::default())
+    .with_review(true, None);
+    let note = agent.reviewer_note();
+    assert!(note.contains("vllm/qwen38"), "{note}");
+    assert!(
+        note.contains("session's own model in a fresh context"),
+        "{note}"
+    );
+    assert!(note.contains("[agents] model"), "{note}");
+}

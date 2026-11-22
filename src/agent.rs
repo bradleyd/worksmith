@@ -388,6 +388,21 @@ impl Agent {
         self.review.store(on, Ordering::Relaxed);
     }
 
+    /// Who reviews, said plainly. Without `[agents] model` it is the session's
+    /// own model in a fresh context: still independent of the transcript, which
+    /// is what made the reviewer work, but the person should know it is not a
+    /// second opinion from a different model.
+    pub fn reviewer_note(&self) -> String {
+        match &self.reviewer {
+            Some(o) => format!("checked by {}", o.model_key),
+            None => format!(
+                "checked by {}, the session's own model in a fresh context. Set \
+                 `[agents] model` for a different (and cheaper) reviewer",
+                self.current().model_key
+            ),
+        }
+    }
+
     /// Ask the model to skip its reasoning pass. On a small Qwen this is the
     /// difference between 500 completion tokens and 31 for the same question —
     /// the loop is expected to catch what the model no longer deliberates over.

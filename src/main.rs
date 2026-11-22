@@ -896,6 +896,12 @@ async fn repl(
     if let Some(c) = &validate_cmd {
         println!("validation: `{c}` must pass before a task is considered done");
     }
+    if agent.review_on() {
+        println!(
+            "review: a turn that changed files is checked against your request; {}.",
+            agent.reviewer_note()
+        );
+    }
 
     let mut editor = DefaultEditor::new().context("initializing line editor")?;
     let mut pending = first;
