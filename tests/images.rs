@@ -125,7 +125,7 @@ async fn an_at_mention_sends_the_photo_to_a_model_that_can_see() {
     let requests = seen.lock().unwrap();
     let user = requests[0].iter().rfind(|m| m.role == Role::User).unwrap();
     assert_eq!(user.images.len(), 1);
-    assert_eq!((user.images[0].width, user.images[0].height), (1024, 768));
+    assert_eq!((user.images[0].width, user.images[0].height), (1672, 1254));
     assert_eq!(
         user.content.as_deref(),
         Some("what goes with @closet.png today?")

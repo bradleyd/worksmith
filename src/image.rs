@@ -12,9 +12,14 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-/// Longest side after shrinking. A phone photo at full size costs thousands of
-/// tokens; at 1024 a wardrobe shot or a screenshot is still legible.
-pub const MAX_SIDE: u32 = 1024;
+/// Pixels kept after shrinking, about 2000 tokens. A budget on area, not on
+/// the longest side: a 1206×2622 phone screenshot capped at 1024 tall came out
+/// 471 wide, and the model could not make out a thumbnail inside it.
+pub const MAX_PIXELS: u64 = 2048 * PATCH as u64 * PATCH as u64;
+
+/// Side of the square the vision encoder spends one token on. Measured on the
+/// 27B through vLLM: 471×1024 cost 480 image tokens, 1206×2622 cost 3116.
+const PATCH: u32 = 32;
 
 /// Refuse anything bigger than this before decoding it.
 const MAX_FILE_BYTES: u64 = 40 * 1024 * 1024;
@@ -43,7 +48,7 @@ pub fn is_image_path(path: &Path) -> bool {
 }
 
 impl Image {
-    /// Load `path`, shrink it to fit `MAX_SIDE`, and re-encode as JPEG.
+    /// Load `path`, shrink it to fit `MAX_PIXELS`, and re-encode as JPEG.
     pub fn load(path: &Path, name: &str) -> Result<Image> {
         let len = std::fs::metadata(path)
             .with_context(|| format!("cannot read {}", path.display()))?
@@ -69,8 +74,13 @@ impl Image {
     }
 
     fn from_image(img: image::DynamicImage, name: &str) -> Image {
-        let img = if img.width() > MAX_SIDE || img.height() > MAX_SIDE {
-            img.thumbnail(MAX_SIDE, MAX_SIDE)
+        let pixels = img.width() as u64 * img.height() as u64;
+        let img = if pixels > MAX_PIXELS {
+            let scale = (MAX_PIXELS as f64 / pixels as f64).sqrt();
+            img.thumbnail(
+                (img.width() as f64 * scale) as u32,
+                (img.height() as f64 * scale) as u32,
+            )
         } else {
             img
         };
@@ -100,11 +110,11 @@ impl Image {
         format!("data:{};base64,{}", self.mime, self.data)
     }
 
-    /// Rough prompt cost. Qwen's vision encoder spends one token per 28×28
-    /// patch; other models are in the same range. Good enough for deciding
-    /// when to compact, which is all the estimate is for.
+    /// Rough prompt cost: one token per patch. Other models are in the same
+    /// range. Good enough for deciding when to compact, which is all the
+    /// estimate is for.
     pub fn est_tokens(&self) -> usize {
-        (self.width.div_ceil(28) * self.height.div_ceil(28)) as usize + 8
+        (self.width.div_ceil(PATCH) * self.height.div_ceil(PATCH)) as usize + 8
     }
 
     /// What stands in for the image when it is not sent.
@@ -198,7 +208,7 @@ mod tests {
         let p = dir.path().join("closet.png");
         std::fs::write(&p, png(3000, 2000, 255)).unwrap();
         let img = Image::load(&p, "closet.png").unwrap();
-        assert_eq!((img.width, img.height), (1024, 683));
+        assert_eq!((img.width, img.height), (1773, 1182));
         assert_eq!(img.mime, "image/jpeg");
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&img.data)
@@ -206,10 +216,20 @@ mod tests {
         assert_eq!(&bytes[..2], &[0xFF, 0xD8], "a JPEG");
         assert!(img.data_url().starts_with("data:image/jpeg;base64,"));
         assert!(
-            (900..1200).contains(&img.est_tokens()),
+            (1900..2200).contains(&img.est_tokens()),
             "{}",
             img.est_tokens()
         );
+    }
+
+    #[test]
+    fn a_tall_phone_screenshot_stays_wide_enough_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("confirm.png");
+        std::fs::write(&p, png(1206, 2622, 255)).unwrap();
+        let img = Image::load(&p, "confirm.png").unwrap();
+        assert!(img.width > 950, "{}×{}", img.width, img.height);
+        assert!(img.width as u64 * img.height as u64 <= MAX_PIXELS);
     }
 
     #[test]
