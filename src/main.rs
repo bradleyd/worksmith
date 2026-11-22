@@ -211,9 +211,51 @@ enum OutputMode {
     Json,
 }
 
+/// The prompt for a one-shot run (`--print`, `--mode json`): the argument, or
+/// else the whole of stdin when it is piped. Without this, a piped prompt fell
+/// through to the line REPL, which ran every line of it as its own turn: a
+/// review request of a diff became dozens of one-line turns on a paid model
+/// for twenty minutes. A one-shot run with no prompt at all is an error, never
+/// an interactive session nobody is there to type into.
+fn one_shot_prompt(
+    prompt: Option<String>,
+    one_shot: bool,
+    stdin_is_terminal: bool,
+    read_stdin: impl FnOnce() -> std::io::Result<String>,
+) -> Result<Option<String>> {
+    if !one_shot || prompt.is_some() {
+        return Ok(prompt);
+    }
+    if stdin_is_terminal {
+        anyhow::bail!(
+            "--print and --mode json run one prompt: pass it as an argument, or pipe it in \
+             (`worksmith --print < prompt.txt`)"
+        );
+    }
+    let text = read_stdin().context("reading the prompt from stdin")?;
+    anyhow::ensure!(
+        !text.trim().is_empty(),
+        "--print and --mode json run one prompt, and stdin was empty"
+    );
+    Ok(Some(text))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    let one_shot = args.cmd.is_none() && (args.print || args.mode.as_deref() == Some("json"));
+    match one_shot_prompt(
+        args.prompt.take(),
+        one_shot,
+        std::io::stdin().is_terminal(),
+        || std::io::read_to_string(std::io::stdin()),
+    ) {
+        Ok(prompt) => args.prompt = prompt,
+        Err(e) => {
+            eprintln!("\x1b[31merror:\x1b[0m {e:#}");
+            std::process::exit(2);
+        }
+    }
     if let Err(e) = run(args).await {
         eprintln!("\x1b[31merror:\x1b[0m {e:#}");
         std::process::exit(1);
@@ -1999,6 +2041,33 @@ fn resolve_project_trust(config: Config, cwd: &Path, args: &Args) -> Result<Conf
 
 #[cfg(test)]
 mod tests {
+    use super::one_shot_prompt;
+
+    #[test]
+    fn a_piped_prompt_is_one_turn_not_one_per_line() {
+        let piped = "Review this diff:\n+let x = 1\n+let y = 2\n";
+        let got = one_shot_prompt(None, true, false, || Ok(piped.into())).unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some(piped),
+            "the whole of stdin, as one prompt"
+        );
+        // An argument wins, and stdin is left alone.
+        let got = one_shot_prompt(Some("hi".into()), true, false, || panic!("read stdin")).unwrap();
+        assert_eq!(got.as_deref(), Some("hi"));
+        // Interactive modes never read stdin here: the REPL owns it.
+        let got = one_shot_prompt(None, false, false, || panic!("read stdin")).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn a_one_shot_run_with_no_prompt_is_an_error_not_a_repl() {
+        let err = one_shot_prompt(None, true, true, || panic!("read stdin")).unwrap_err();
+        assert!(err.to_string().contains("pipe it in"), "{err}");
+        let err = one_shot_prompt(None, true, false, || Ok("  \n".into())).unwrap_err();
+        assert!(err.to_string().contains("stdin was empty"), "{err}");
+    }
+
     use super::starts_with_absolute_path;
 
     #[test]
