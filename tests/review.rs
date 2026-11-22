@@ -256,6 +256,14 @@ async fn nothing_changed_or_review_off_means_no_review() {
         r.reviewer_saw.is_empty(),
         "a question that changed nothing is not reviewed"
     );
+    // ...but it says so, or a skip looks like review being off.
+    assert!(
+        r.nudges
+            .iter()
+            .any(|n| n == "review: nothing to check — this turn changed no project files"),
+        "{:?}",
+        r.nudges
+    );
 
     let dir = repo();
     let r = run(
@@ -266,6 +274,11 @@ async fn nothing_changed_or_review_off_means_no_review() {
     )
     .await;
     assert!(r.reviewer_saw.is_empty());
+    assert!(
+        r.nudges.iter().all(|n| !n.starts_with("review")),
+        "off is silent: {:?}",
+        r.nudges
+    );
 }
 
 #[tokio::test]
@@ -315,4 +328,25 @@ fn the_person_is_told_who_reviews() {
         "{note}"
     );
     assert!(note.contains("[agents] model"), "{note}");
+}
+
+#[tokio::test]
+async fn outside_git_the_skip_is_explained() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run(
+        dir.path(),
+        vec![write("a.py", "x = 1\n"), done("Done.")],
+        vec![],
+        true,
+    )
+    .await;
+    assert!(matches!(r.outcome, TurnOutcome::Done), "{:?}", r.outcome);
+    assert!(r.reviewer_saw.is_empty());
+    assert!(
+        r.nudges
+            .iter()
+            .any(|n| n == "review: skipped — not a git repository"),
+        "{:?}",
+        r.nudges
+    );
 }

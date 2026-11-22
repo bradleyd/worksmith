@@ -1110,10 +1110,21 @@ impl Agent {
         if !self.review_on() {
             return Ok(false);
         }
+        // Every skip says why. A silent skip looked the same as review being
+        // off or broken: a turn that only committed work already on disk had
+        // nothing to compare, and the person could not tell.
+        let skipped = |why: &str| Event::Nudge {
+            reason: format!("review: {why}"),
+        };
         let Some(before) = before else {
+            self.emit(session, skipped("skipped — not a git repository"));
             return Ok(false);
         };
         let Some(after) = crate::review::snapshot(&self.tool_ctx.cwd).await else {
+            self.emit(
+                session,
+                skipped("skipped — could not read the project's files"),
+            );
             return Ok(false);
         };
         let active = match &self.reviewer {
@@ -1124,6 +1135,10 @@ impl Agent {
         let max_chars = (active.context_limit / 2).saturating_mul(3).max(8_000);
         let diff = crate::review::diff(before, &after, max_chars).await;
         if diff.is_empty() {
+            self.emit(
+                session,
+                skipped("nothing to check — this turn changed no project files"),
+            );
             return Ok(false);
         }
         let reviewer = active.model_key.clone();
